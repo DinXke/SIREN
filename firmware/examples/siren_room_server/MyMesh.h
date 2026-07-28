@@ -172,7 +172,7 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
 
 protected:
   /* ---- Override packet dispatch for multi-room routing ---- */
-  DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
+  mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
 
   /* ---- Tuning overrides (unchanged from simple_room_server) ---- */
   float    getAirtimeBudgetFactor() const override { return _prefs.airtime_factor; }

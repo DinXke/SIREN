@@ -263,7 +263,7 @@ void MultiRoomMesh::loadRoomConfig() {
 /* ------------------------------------------------------------------ */
 /*  onRecvPacket — multi-room routing override                          */
 /* ------------------------------------------------------------------ */
-DispatcherAction MultiRoomMesh::onRecvPacket(mesh::Packet* pkt) {
+mesh::DispatcherAction MultiRoomMesh::onRecvPacket(mesh::Packet* pkt) {
   uint8_t ptype = pkt->getPayloadType();
 
   // For addressed packets (anon login / peer data / path), find the matching room
