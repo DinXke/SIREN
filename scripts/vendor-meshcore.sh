@@ -122,12 +122,16 @@ echo "    extracted $(find "$PREFIX" -type f | wc -l) files from $TAG"
 echo ""
 echo "==> Restoring SIREN-specific files ..."
 for relpath in "${SIREN_EXTRA_DIRS[@]}"; do
-  src="$WORKDIR/extras/$(basename "$relpath")"
+  # The save step copied the directory itself into extras/$(dirname relpath)/
+  # so the saved path mirrors the original relative layout.
+  src="$WORKDIR/extras/$relpath"
   dst="$PREFIX/$relpath"
   if [ -e "$src" ]; then
     mkdir -p "$(dirname "$dst")"
     cp -r "$src" "$dst"
     echo "    restored: $dst"
+  else
+    echo "    WARNING: saved copy not found at $src — check script logic"
   fi
 done
 
