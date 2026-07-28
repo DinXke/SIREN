@@ -56,6 +56,7 @@ export function App() {
           {selectedChannel ? (
             <ChatPane
               channel={selectedChannel}
+              conn={state.conn}
             />
           ) : (
             <div className={styles.noChannelSelected}>

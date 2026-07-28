@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { api, Channel, Message } from '../api';
+import { api, Channel, ConnState, Message } from '../api';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { LoginDialog } from './LoginDialog';
@@ -7,9 +7,10 @@ import styles from './ChatPane.module.css';
 
 interface ChatPaneProps {
   channel: Channel;
+  conn: ConnState;
 }
 
-export function ChatPane({ channel }: ChatPaneProps) {
+export function ChatPane({ channel, conn }: ChatPaneProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +25,11 @@ export function ChatPane({ channel }: ChatPaneProps) {
 
     const loadMessages = async () => {
       try {
+        // Auto-join unlocked channels to mark as read
+        if (!channel.joined && !channel.locked) {
+          await api.joinChannel(channel.id);
+        }
+
         const newMessages = await api.getMessages(channel.id, 100);
         setMessages(newMessages);
         setError(null);
@@ -148,7 +154,7 @@ export function ChatPane({ channel }: ChatPaneProps) {
         <div ref={messagesEndRef} />
       </div>
 
-      <MessageInput onSendMessage={handleSendMessage} disabled={!channel.joined} />
+      <MessageInput onSendMessage={handleSendMessage} disabled={!channel.joined || conn !== 'connected'} />
     </div>
   );
 }
