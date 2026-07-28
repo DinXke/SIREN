@@ -1,22 +1,51 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAppState } from './hooks/useAppState';
 import { ConnectionPanel } from './components/ConnectionPanel';
 import { ChannelList } from './components/ChannelList';
 import { ChatPane } from './components/ChatPane';
 import { UserList } from './components/UserList';
+import { api } from './api';
 import styles from './App.module.css';
 
 export function App() {
   const { state, loading, error } = useAppState();
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+
+  // Listen for incoming messages to track unread counts
+  useEffect(() => {
+    const handleMessage = (event: { message: { channelId: string } }) => {
+      const { channelId } = event.message;
+      if (channelId !== selectedChannelId) {
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [channelId]: (prev[channelId] ?? 0) + 1,
+        }));
+      }
+    };
+    api.on('message', handleMessage);
+    return () => api.off('message', handleMessage);
+  }, [selectedChannelId]);
+
+  const handleSelectChannel = useCallback((channelId: string) => {
+    setSelectedChannelId(channelId);
+    setUnreadCounts((prev) => {
+      if (!prev[channelId]) return prev;
+      const next = { ...prev };
+      delete next[channelId];
+      return next;
+    });
+  }, []);
+
+  // Merge client-side unread counts with server state
+  const channelsWithUnread = state.channels.map((ch) => ({
+    ...ch,
+    unread: (unreadCounts[ch.id] ?? 0) + ch.unread,
+  }));
 
   const selectedChannel = selectedChannelId
-    ? state.channels.find((ch) => ch.id === selectedChannelId)
+    ? channelsWithUnread.find((ch) => ch.id === selectedChannelId)
     : null;
-
-  const handleSelectChannel = (channelId: string) => {
-    setSelectedChannelId(channelId);
-  };
 
   if (loading) {
     return (
@@ -47,7 +76,7 @@ export function App() {
 
       <div className={styles.main}>
         <ChannelList
-          channels={state.channels}
+          channels={channelsWithUnread}
           selectedChannelId={selectedChannelId}
           onSelectChannel={handleSelectChannel}
         />
