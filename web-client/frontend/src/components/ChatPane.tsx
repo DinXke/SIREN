@@ -14,6 +14,7 @@ export function ChatPane({ channel }: ChatPaneProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showLoginDialog, setShowLoginDialog] = useState(channel.locked && !channel.joined);
+  const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load messages when channel changes
@@ -63,14 +64,28 @@ export function ChatPane({ channel }: ChatPaneProps) {
       }
     };
 
+    const handleNotice = (event: any) => {
+      setNoticeMsg(event.text);
+    };
+
     api.on('message', handleMessage);
     api.on('login', handleLogin);
+    api.on('notice', handleNotice);
 
     return () => {
       api.off('message', handleMessage);
       api.off('login', handleLogin);
+      api.off('notice', handleNotice);
     };
   }, [channel.id]);
+
+  // Clear notice message after 5 seconds
+  useEffect(() => {
+    if (noticeMsg) {
+      const timer = setTimeout(() => setNoticeMsg(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [noticeMsg]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -121,6 +136,7 @@ export function ChatPane({ channel }: ChatPaneProps) {
       </div>
 
       <div className={styles.messages}>
+        {noticeMsg && <div className={styles.error}>{noticeMsg}</div>}
         {error && <div className={styles.error}>{error}</div>}
         {loading ? (
           <div className={styles.loading}>Loading messages...</div>
@@ -132,7 +148,7 @@ export function ChatPane({ channel }: ChatPaneProps) {
         <div ref={messagesEndRef} />
       </div>
 
-      <MessageInput onSendMessage={handleSendMessage} />
+      <MessageInput onSendMessage={handleSendMessage} disabled={!channel.joined} />
     </div>
   );
 }

@@ -3,15 +3,18 @@ import styles from './MessageInput.module.css';
 
 interface MessageInputProps {
   onSendMessage: (text: string) => void;
+  disabled?: boolean;
 }
 
-export function MessageInput({ onSendMessage }: MessageInputProps) {
+const MAX_MESSAGE_LENGTH = 500;
+
+export function MessageInput({ onSendMessage, disabled = false }: MessageInputProps) {
   const [text, setText] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSend = () => {
     const trimmed = text.trim();
-    if (trimmed) {
+    if (trimmed && !disabled) {
       onSendMessage(trimmed);
       setText('');
       if (inputRef.current) {
@@ -22,14 +25,20 @@ export function MessageInput({ onSendMessage }: MessageInputProps) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !disabled) {
       e.preventDefault();
       handleSend();
     }
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = e.target.value;
+    let value = e.target.value;
+
+    // Enforce 500 character limit
+    if (value.length > MAX_MESSAGE_LENGTH) {
+      value = value.substring(0, MAX_MESSAGE_LENGTH);
+    }
+
     setText(value);
 
     // Auto-grow textarea
@@ -48,10 +57,12 @@ export function MessageInput({ onSendMessage }: MessageInputProps) {
         placeholder="Type a message... (Shift+Enter for new line)"
         className={styles.input}
         rows={1}
+        disabled={disabled}
+        maxLength={MAX_MESSAGE_LENGTH}
       />
       <button
         onClick={handleSend}
-        disabled={!text.trim()}
+        disabled={!text.trim() || disabled}
         className={styles.button}
       >
         Send

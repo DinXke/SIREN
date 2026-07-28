@@ -9,7 +9,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  color: white;
+  color: #00ff00;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
 }
 
 .disconnected {
@@ -20,7 +21,7 @@
 
 .indicator {
   font-size: 12px;
-  color: #4caf50;
+  color: #00ff00;
   animation: blink 1.5s infinite;
 }
 
@@ -36,49 +37,65 @@
 }
 
 .status {
-  color: white;
+  color: #00ff00;
   font-size: 14px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .select {
   padding: 6px 8px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background-color: white;
+  border: 1px solid #00ff00;
+  border-radius: 0;
+  background-color: #000;
+  color: #00ff00;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 14px;
   cursor: pointer;
 }
 
 .select:disabled {
-  background-color: #f5f5f5;
+  background-color: #1a1a1a;
+  color: #666;
+  border-color: #666;
   cursor: not-allowed;
 }
 
 .button {
   padding: 6px 12px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background-color: white;
-  color: #333;
+  border: 1px solid #00ff00;
+  border-radius: 0;
+  background-color: #003300;
+  color: #00ff00;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: background-color 0.15s, color 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .button:hover:not(:disabled) {
-  background-color: #f0f0f0;
+  background-color: #00ff00;
+  color: #000;
 }
 
 .button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+  background-color: #1a1a1a;
+  border-color: #666;
+  color: #666;
 }
 
 .error {
-  color: #d32f2f;
+  color: #ff0000;
   font-size: 12px;
   position: absolute;
   top: 100%;
   white-space: nowrap;
   margin-top: 4px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
 }

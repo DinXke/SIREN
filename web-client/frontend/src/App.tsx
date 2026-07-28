@@ -14,6 +14,10 @@ export function App() {
     ? state.channels.find((ch) => ch.id === selectedChannelId)
     : null;
 
+  const handleSelectChannel = (channelId: string) => {
+    setSelectedChannelId(channelId);
+  };
+
   if (loading) {
     return (
       <div className={styles.container}>
@@ -45,7 +49,7 @@ export function App() {
         <ChannelList
           channels={state.channels}
           selectedChannelId={selectedChannelId}
-          onSelectChannel={setSelectedChannelId}
+          onSelectChannel={handleSelectChannel}
         />
 
         <div className={styles.chatArea}>
