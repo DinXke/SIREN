@@ -51,8 +51,9 @@ fi
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
-if [ -n "$(git status --porcelain)" ]; then
-  echo "ERROR: Working tree is not clean. Commit or stash changes first."
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "ERROR: Working tree has uncommitted changes. Commit or stash first."
+  git status --short --untracked-files=no
   exit 1
 fi
 
