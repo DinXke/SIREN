@@ -1,0 +1,22 @@
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+
+# Server
+server/__pycache__/
+server/venv/
+server/.env
+server/static/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
