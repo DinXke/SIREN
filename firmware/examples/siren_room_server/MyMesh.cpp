@@ -71,10 +71,11 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
   memset(rooms, 0, sizeof(rooms));
+  memset(_post_pool, 0, sizeof(_post_pool));
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) _post_pool[i].room_idx = 0xFF;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
     rooms[i].active          = false;
-    rooms[i].next_post_idx   = 0;
     rooms[i].next_client_idx = 0;
     rooms[i].num_posted      = 0;
     rooms[i].num_post_pushes = 0;
@@ -586,11 +587,49 @@ void MultiRoomMesh::onAckRecv(mesh::Packet* packet, uint32_t ack_crc) {
 /*  Per-slot helpers                                                    */
 /* ------------------------------------------------------------------ */
 void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text) {
-  int idx = slot.next_post_idx;
-  slot.posts[idx].author = client->id;
-  StrHelper::strncpy(slot.posts[idx].text, text, MAX_POST_TEXT_LEN);
-  slot.posts[idx].post_timestamp = getRTCClock()->getCurrentTimeUnique();
-  slot.next_post_idx = (idx + 1) % MAX_UNSYNCED_POSTS;
+  uint8_t ridx = (uint8_t)(&slot - rooms);
+  int quota = MAX_TOTAL_POSTS / (_num_active_rooms > 0 ? _num_active_rooms : 1);
+
+  // Find a free slot; also track oldest post owned by this room
+  PostInfo* free_slot = nullptr;
+  PostInfo* oldest_for_room = nullptr;
+  int room_count = 0;
+
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    PostInfo& p = _post_pool[i];
+    if (p.room_idx == 0xFF) {
+      if (!free_slot) free_slot = &p;
+    } else if (p.room_idx == ridx) {
+      room_count++;
+      if (!oldest_for_room || p.post_timestamp < oldest_for_room->post_timestamp)
+        oldest_for_room = &p;
+    }
+  }
+
+  // If this room is at quota, evict its oldest post to make room
+  if (room_count >= quota && oldest_for_room) {
+    memset(oldest_for_room, 0, sizeof(PostInfo));
+    oldest_for_room->room_idx = 0xFF;
+    if (!free_slot) free_slot = oldest_for_room;
+  }
+
+  // Last resort: pool completely full — evict the globally oldest post
+  if (!free_slot) {
+    PostInfo* oldest_global = nullptr;
+    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+      if (!oldest_global || _post_pool[i].post_timestamp < oldest_global->post_timestamp)
+        oldest_global = &_post_pool[i];
+    }
+    memset(oldest_global, 0, sizeof(PostInfo));
+    oldest_global->room_idx = 0xFF;
+    free_slot = oldest_global;
+  }
+
+  free_slot->author         = client->id;
+  StrHelper::strncpy(free_slot->text, text, MAX_POST_TEXT_LEN);
+  free_slot->post_timestamp = getRTCClock()->getCurrentTimeUnique();
+  free_slot->room_idx       = ridx;
+
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   slot.num_posted++;
 }
@@ -631,10 +670,13 @@ void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInf
 }
 
 uint8_t MultiRoomMesh::getUnsyncedCount(RoomSlot& slot, ClientInfo* client) {
+  uint8_t ridx = (uint8_t)(&slot - rooms);
   uint8_t count = 0;
-  for (int k = 0; k < MAX_UNSYNCED_POSTS; k++) {
-    if (slot.posts[k].post_timestamp > client->extra.room.sync_since &&
-        !slot.posts[k].author.matches(client->id)) {
+  for (int k = 0; k < MAX_TOTAL_POSTS; k++) {
+    const PostInfo& p = _post_pool[k];
+    if (p.room_idx == ridx &&
+        p.post_timestamp > client->extra.room.sync_since &&
+        !p.author.matches(client->id)) {
       count++;
     }
   }
@@ -831,19 +873,23 @@ void MultiRoomMesh::loopSlot(RoomSlot& slot) {
       client->last_activity != 0 &&
       client->extra.room.push_failures < 3) {
 
+    uint8_t ridx = (uint8_t)(&slot - rooms);
     uint32_t now = getRTCClock()->getCurrentTime();
-    for (int k = 0, idx = slot.next_post_idx; k < MAX_UNSYNCED_POSTS; k++) {
-      PostInfo& p = slot.posts[idx];
-      if (now >= p.post_timestamp + POST_SYNC_DELAY_SECS &&
+    PostInfo* oldest_unsynced = nullptr;
+    for (int k = 0; k < MAX_TOTAL_POSTS; k++) {
+      PostInfo& p = _post_pool[k];
+      if (p.room_idx == ridx &&
+          now >= p.post_timestamp + POST_SYNC_DELAY_SECS &&
           p.post_timestamp > client->extra.room.sync_since &&
           !p.author.matches(client->id)) {
-        // Set self_id to this room before sending so the packet is signed correctly
-        self_id = slot.id;
-        pushPostToClient(slot, client, p);
-        did_push = true;
-        break;
+        if (!oldest_unsynced || p.post_timestamp < oldest_unsynced->post_timestamp)
+          oldest_unsynced = &p;
       }
-      idx = (idx + 1) % MAX_UNSYNCED_POSTS;
+    }
+    if (oldest_unsynced) {
+      self_id = slot.id;
+      pushPostToClient(slot, client, *oldest_unsynced);
+      did_push = true;
     }
   }
 

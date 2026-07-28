@@ -58,13 +58,16 @@
 #ifndef TXT_ACK_DELAY
   #define TXT_ACK_DELAY          200
 #endif
-#ifndef MAX_UNSYNCED_POSTS
-  #define MAX_UNSYNCED_POSTS     32
+/* Total post budget shared across all active rooms.
+   Per-room quota = MAX_TOTAL_POSTS / num_active_rooms.
+   With MAX_ROOMS=16 active: 8 posts/room; with 2 active: 64 posts/room. */
+#ifndef MAX_TOTAL_POSTS
+  #define MAX_TOTAL_POSTS        128
 #endif
 
 /* Maximum virtual room servers hosted on one device. */
 #ifndef MAX_ROOMS
-  #define MAX_ROOMS  4
+  #define MAX_ROOMS  16
 #endif
 
 #define FIRMWARE_ROLE        "siren_room"
@@ -78,6 +81,7 @@ struct PostInfo {
   mesh::Identity  author;
   uint32_t        post_timestamp;
   char            text[MAX_POST_TEXT_LEN + 1];
+  uint8_t         room_idx;     // owning room (0xFF = free slot)
 };
 
 /**
@@ -95,8 +99,6 @@ struct RoomSlot {
   float lon;
 
   ClientACL  acl;
-  PostInfo   posts[MAX_UNSYNCED_POSTS];
-  int        next_post_idx;
   int        next_client_idx;
   uint16_t   num_posted;
   uint16_t   num_post_pushes;
@@ -118,6 +120,9 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   RoomSlot      rooms[MAX_ROOMS];
   int           _num_active_rooms;
   int           _active_slot;     // set during onRecvPacket dispatch
+
+  /* ---- Global post pool (shared budget across all rooms) ---- */
+  PostInfo      _post_pool[MAX_TOTAL_POSTS];
 
   /* ---- Shared mesh state ---- */
   uint32_t      last_millis;
