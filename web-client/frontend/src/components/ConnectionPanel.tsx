@@ -1,12 +1,8 @@
 import { useState, useEffect } from 'react';
-import { api, SerialPort, ConnState } from '../api';
+import { api, SerialPort } from '../api';
 import styles from './ConnectionPanel.module.css';
 
-interface ConnectionPanelProps {
-  connState?: ConnState;
-}
-
-export function ConnectionPanel({ connState = 'disconnected' }: ConnectionPanelProps) {
+export function ConnectionPanel() {
   const [ports, setPorts] = useState<SerialPort[]>([]);
   const [selectedPort, setSelectedPort] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);

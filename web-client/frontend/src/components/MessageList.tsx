@@ -1,9 +1,8 @@
-import { Message, User } from '../api';
+import { Message } from '../api';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
   messages: Message[];
-  self: User | null;
 }
 
 function formatTime(ts: number): string {
@@ -11,7 +10,7 @@ function formatTime(ts: number): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function MessageList({ messages, self }: MessageListProps) {
+export function MessageList({ messages }: MessageListProps) {
   return (
     <div className={styles.list}>
       {messages.map((msg) => (

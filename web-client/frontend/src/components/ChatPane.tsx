@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { api, Channel, User, Message } from '../api';
+import { api, Channel, Message } from '../api';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { LoginDialog } from './LoginDialog';
@@ -7,10 +7,9 @@ import styles from './ChatPane.module.css';
 
 interface ChatPaneProps {
   channel: Channel;
-  self: User | null;
 }
 
-export function ChatPane({ channel, self }: ChatPaneProps) {
+export function ChatPane({ channel }: ChatPaneProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -128,7 +127,7 @@ export function ChatPane({ channel, self }: ChatPaneProps) {
         ) : messages.length === 0 ? (
           <div className={styles.empty}>No messages yet. Start a conversation!</div>
         ) : (
-          <MessageList messages={messages} self={self} />
+          <MessageList messages={messages} />
         )}
         <div ref={messagesEndRef} />
       </div>

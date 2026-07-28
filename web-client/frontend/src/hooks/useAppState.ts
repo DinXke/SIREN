@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { api, AppState, Channel, User, ConnState } from '../api';
+import { api, AppState } from '../api';
 
 export function useAppState() {
   const [state, setState] = useState<AppState>({

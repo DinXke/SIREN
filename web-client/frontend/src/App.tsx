@@ -1,5 +1,4 @@
-import { useState, useEffect } from 'react';
-import { api, SerialPort, Channel } from './api';
+import { useState } from 'react';
 import { useAppState } from './hooks/useAppState';
 import { ConnectionPanel } from './components/ConnectionPanel';
 import { ChannelList } from './components/ChannelList';
@@ -53,7 +52,6 @@ export function App() {
           {selectedChannel ? (
             <ChatPane
               channel={selectedChannel}
-              self={state.self}
             />
           ) : (
             <div className={styles.noChannelSelected}>
