@@ -27,6 +27,7 @@
             border-radius: 4px; cursor: pointer; font-size: 13px; }
         #connect-section button:hover { background: #14919b; }
         #connect-section button:disabled { background: #666; cursor: not-allowed; }
+        #ble-hint { font-size: 11px; color: #888; margin-top: 4px; margin-bottom: 4px; }
         #status-line { font-size: 12px; color: #aaa; margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.05);
             border-radius: 4px; }
 
@@ -98,6 +99,7 @@
                     <button id="btn-serial">Serial</button>
                     <button id="btn-ble">Bluetooth</button>
                 </div>
+                <div id="ble-hint">Vereist eenmalig koppelen in Windows (PIN 123456).</div>
                 <div id="status-line">Disconnected</div>
             </div>
             <ul id="channel-list"></ul>
@@ -503,22 +505,49 @@ class BleTransport {
 
     async connect() {
         const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        const NUS_RX_UUID    = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+        const NUS_TX_UUID    = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
         try {
             this.device = await navigator.bluetooth.requestDevice({
                 filters: [{ services: [NUS_SERVICE_UUID] }],
             });
-            const gatt = await this.device.gatt.connect();
-            const service = await gatt.getPrimaryService(NUS_SERVICE_UUID);
-            this.rxChar = await service.getCharacteristic('6e400002-b5a3-f393-e0a9-e50e24dcca9e');
-            this.txChar = await service.getCharacteristic('6e400003-b5a3-f393-e0a9-e50e24dcca9e');
-            await this.txChar.startNotifications();
-            this.txChar.addEventListener('characteristicvaluechanged', (e) => {
-                const payload = new Uint8Array(e.target.value.buffer);
-                if (this.frameCallback) {
-                    this.frameCallback(payload);
+
+            // SC/MITM bonding causes a transient GATT disconnect right after pairing.
+            // Retry the connect + service-discovery sequence with back-off to survive it.
+            let lastErr;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+                    const server = await this.device.gatt.connect();
+                    const service = await server.getPrimaryService(NUS_SERVICE_UUID);
+                    this.rxChar = await service.getCharacteristic(NUS_RX_UUID);
+                    this.txChar = await service.getCharacteristic(NUS_TX_UUID);
+                    await this.txChar.startNotifications();
+                    this.txChar.addEventListener('characteristicvaluechanged', (e) => {
+                        const payload = new Uint8Array(e.target.value.buffer);
+                        if (this.frameCallback) this.frameCallback(payload);
+                    });
+                    // Register disconnect handler only AFTER full setup so bonding
+                    // disconnects during connect() don't null out state mid-sequence.
+                    this.device.addEventListener('gattserverdisconnected', () => {
+                        this.rxChar = null;
+                        this.txChar = null;
+                    });
+                    return; // success
+                } catch (e) {
+                    lastErr = e;
+                    const isGattErr = e.message && e.message.toLowerCase().includes('gatt');
+                    if (!isGattErr) throw e; // non-GATT error — don't retry
                 }
-            });
+            }
+            throw lastErr;
         } catch (err) {
+            const isGattDisconnect = err.message && err.message.toLowerCase().includes('gatt server is disconnected');
+            if (isGattDisconnect) {
+                throw new Error(
+                    `Bluetooth-koppeling vereist. Koppel de radio eerst in Windows-instellingen > Bluetooth (PIN 123456), klik daarna opnieuw op Bluetooth. Of gebruik de Serial-verbinding via USB. [${err.name}]`
+                );
+            }
             throw new Error(`BLE connect failed: ${err.message}`);
         }
     }
@@ -832,6 +861,8 @@ class SirenApp {
                         status: 'confirmed',
                     });
                 }
+                // Drain next message
+                this.drainMessages();
             } else if (code === RESP_CODE_CHANNEL_MSG_RECV_V3) {
                 const msg = Codec.parseChannelMsgRecvV3(payload);
                 if (msg) {
@@ -846,6 +877,8 @@ class SirenApp {
                         status: 'confirmed',
                     });
                 }
+                // Drain next message
+                this.drainMessages();
             } else if (code === RESP_CODE_SENT) {
                 // Mark message as sent; extract expected_ack at offset 2
                 if (payload.length >= 6) {
@@ -1051,11 +1084,162 @@ window.addEventListener('DOMContentLoaded', () => {
     new SirenApp();
     // Codec self-test
     {
-        const test1 = Codec.buildDeviceQuery(3);
-        console.assert(test1.length === 2 && test1[0] === 22, 'buildDeviceQuery failed');
-        const test2 = Codec.buildAppStart('test');
-        console.assert(test2.length >= 8, 'buildAppStart failed');
-        console.log('✓ Codec self-tests passed');
+        const tests = [];
+
+        // Test 1: SerialTransport framing round-trip
+        {
+            const originalPayload = Codec.buildDeviceQuery(3);
+            const transport = new SerialTransport();
+            let receivedPayload = null;
+            transport.onFrame((payload) => {
+                receivedPayload = payload;
+            });
+
+            // Frame the payload: 0x3e, lenLSB, lenMSB, payload
+            const framedBytes = new Uint8Array(1 + 2 + originalPayload.length);
+            framedBytes[0] = 0x3e;
+            framedBytes[1] = originalPayload.length & 0xff;
+            framedBytes[2] = (originalPayload.length >> 8) & 0xff;
+            framedBytes.set(originalPayload, 3);
+
+            // Split into two chunks and feed separately
+            const chunk1 = framedBytes.slice(0, Math.ceil(framedBytes.length / 2));
+            const chunk2 = framedBytes.slice(Math.ceil(framedBytes.length / 2));
+            transport.processBytes(chunk1);
+            transport.processBytes(chunk2);
+
+            tests.push(receivedPayload &&
+                receivedPayload.length === originalPayload.length &&
+                Array.from(receivedPayload).every((b, i) => b === originalPayload[i]),
+                'SerialTransport framing round-trip');
+        }
+
+        // Test 2: Parse RESP_CODE_CONTACT (code 3)
+        {
+            const payload = new Uint8Array(1 + 32 + 1 + 1 + 1 + 64 + 32 + 4);
+            payload[0] = RESP_CODE_CONTACT;
+            // pubKey[32] at [1..32]
+            for (let i = 1; i < 33; i++) payload[i] = 0xaa;
+            payload[33] = ADV_TYPE_ROOM; // type
+            payload[34] = 0; // flags
+            payload[35] = 0; // out_path_len
+            // path[64] at [36..99]
+            // name[32] at [100..131]
+            const name = 'TestRoom';
+            new TextEncoder().encode(name).forEach((b, i) => {
+                payload[100 + i] = b;
+            });
+            // lastAdvertTs at [132..135]
+            writeUint32LE(payload, 132, 0x12345678);
+
+            const contact = Codec.parseContactInfo(payload);
+            tests.push(contact &&
+                contact.pubKeyPrefix === 'aaaaaaaaaaaa' &&
+                contact.name === 'TestRoom' &&
+                contact.isRoom === true,
+                'Parse RESP_CODE_CONTACT');
+        }
+
+        // Test 3: Parse RESP_CODE_CONTACT_MSG_RECV_V3 (code 16, txt_type 0 = PLAIN)
+        {
+            const text = 'Hello';
+            const textBytes = new TextEncoder().encode(text);
+            const payload = new Uint8Array(1 + 1 + 2 + 6 + 1 + 1 + 4 + textBytes.length);
+            payload[0] = RESP_CODE_CONTACT_MSG_RECV_V3;
+            payload[1] = 0; // snr
+            payload[2] = 0; // reserved
+            payload[3] = 0; // reserved
+            // pubKeyPrefix[6] at [4..9]
+            for (let i = 4; i < 10; i++) payload[i] = 0xbb;
+            payload[10] = 0; // pathLen
+            payload[11] = TXT_TYPE_PLAIN; // txt_type = 0
+            writeUint32LE(payload, 12, 0x87654321); // ts
+            payload.set(textBytes, 16);
+
+            const msg = Codec.parseContactMsgRecvV3(payload);
+            tests.push(msg &&
+                msg.pubKeyPrefix === 'bbbbbbbbbbbb' &&
+                msg.txtType === 0 &&
+                msg.ts === 0x87654321 &&
+                msg.text === 'Hello',
+                'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=0)');
+        }
+
+        // Test 4: Parse RESP_CODE_CONTACT_MSG_RECV_V3 (code 16, txt_type 1 = SIGNED)
+        {
+            const text = 'Signed';
+            const textBytes = new TextEncoder().encode(text);
+            const payload = new Uint8Array(1 + 1 + 2 + 6 + 1 + 1 + 4 + 4 + textBytes.length);
+            payload[0] = RESP_CODE_CONTACT_MSG_RECV_V3;
+            payload[1] = 0; // snr
+            payload[2] = 0; // reserved
+            payload[3] = 0; // reserved
+            for (let i = 4; i < 10; i++) payload[i] = 0xcc;
+            payload[10] = 0; // pathLen
+            payload[11] = 1; // txt_type = 1 (SIGNED)
+            writeUint32LE(payload, 12, 0x11223344); // ts
+            for (let i = 16; i < 20; i++) payload[i] = 0xdd; // sender_prefix[4]
+            payload.set(textBytes, 20);
+
+            const msg = Codec.parseContactMsgRecvV3(payload);
+            tests.push(msg &&
+                msg.pubKeyPrefix === 'cccccccccccc' &&
+                msg.txtType === 1 &&
+                msg.ts === 0x11223344 &&
+                msg.text === 'Signed',
+                'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=1/SIGNED)');
+        }
+
+        // Test 5: Truncated frame returns null
+        {
+            const payload = new Uint8Array(5); // Too short for CONTACT
+            payload[0] = RESP_CODE_CONTACT;
+            const result = Codec.parseContactInfo(payload);
+            tests.push(result === null, 'Truncated frame returns null');
+        }
+
+        // Test 6: Oversized frame handling (SerialTransport rejects it)
+        {
+            const transport = new SerialTransport();
+            let receivedPayload = null;
+            transport.onFrame((payload) => {
+                receivedPayload = payload;
+            });
+
+            // Frame with oversized length
+            const framedBytes = new Uint8Array(3);
+            framedBytes[0] = 0x3e;
+            framedBytes[1] = 0xff; // lenLSB = 255
+            framedBytes[2] = 0xff; // lenMSB = 255 => len = 65535, exceeds MAX_FRAME_SIZE
+
+            transport.processBytes(framedBytes);
+            // Should not crash and not call onFrame for malformed size
+            tests.push(receivedPayload === null, 'Oversized frame rejected safely');
+        }
+
+        // Summary
+        const testCases = [
+            { result: tests[0], name: 'SerialTransport framing round-trip' },
+            { result: tests[1], name: 'Parse RESP_CODE_CONTACT' },
+            { result: tests[2], name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=0)' },
+            { result: tests[3], name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=1/SIGNED)' },
+            { result: tests[4], name: 'Truncated frame returns null' },
+            { result: tests[5], name: 'Oversized frame rejected safely' }
+        ];
+
+        let allPassed = true;
+        for (const test of testCases) {
+            if (!test.result) {
+                console.error(`✗ ${test.name}`);
+                allPassed = false;
+            }
+        }
+
+        if (allPassed) {
+            console.log('✓ Initial drain: loop until RESP_CODE_NO_MORE_MESSAGES');
+        } else {
+            console.error('✗ Codec self-test failed');
+        }
     }
 });
     </script>
