@@ -12,8 +12,9 @@
 
 | File | Size | Use |
 |------|------|-----|
-| `SIREN_v3_room_server.bin` | ~1.1 MB | **OTA update** — upload via web flasher or ElegantOTA |
-| `SIREN_v3_room_server-full-flash.bin` | ~1.2 MB | **Initial / full flash** — use for first-time flashing via web serial or esptool |
+| `SIREN_v3_room_server.bin` | ~1.1 MB | **OTA update** — normal production image |
+| `SIREN_v3_room_server-full-flash.bin` | ~1.2 MB | **Initial / full flash** — first-time flash via web serial or esptool |
+| `SIREN_v3_room_server_radio_fix.bin` | ~1.1 MB | **OTA — radio settings recovery** — one-shot correction for stale prefs from a prior firmware |
 
 ---
 
@@ -68,7 +69,36 @@ Dual OTA slots are present — over-the-air updates are safe and will not erase 
 
 ## Build stats
 
-- RAM: 40.5% (132864 / 327680 bytes)
-- Flash: 34.7% (1160805 / 3342336 bytes)
+| Environment | RAM | Flash |
+|---|---|---|
+| `SIREN_v3_room_server` | 40.5% (132864 / 327680 B) | 34.7% (1160805 / 3342336 B) |
+| `SIREN_v3_room_server_radio_fix` | 40.5% (132864 / 327680 B) | 34.7% (1161037 / 3342336 B) |
 
 Plenty of headroom for future phases.
+
+---
+
+## Radio-settings recovery (SIREN_v3_room_server_radio_fix.bin)
+
+Use this image when the device may be running on stale radio settings stored
+by a previous firmware (MeshCore OTA does **not** reset SPIFFS prefs).
+
+**What it does on first boot:**
+
+1. Loads existing SPIFFS prefs (`/com_prefs`) — node name, crypto identity, and
+   all non-radio settings are preserved.
+2. Overwrites freq / SF / BW / CR / TX-power with the SIREN EU868 defaults:
+   - Frequency: **869.618 MHz**
+   - Bandwidth: **62.5 kHz**
+   - Spreading factor: **SF8**
+   - Coding rate: **CR 4/5**
+   - TX power: **22 dBm**
+3. Saves the corrected prefs back to SPIFFS.
+4. Continues normal operation — the node is immediately on the correct frequency.
+
+**After confirming the device is on the right frequency** (observable via a second
+node or the OTA-AP liveness check), flash the normal `SIREN_v3_room_server.bin`
+to remove the one-shot correction behaviour.
+
+> **Safety:** Both OTA slots are intact — the known-good `SIREN_v3_room_server.bin`
+> remains as an immediate rollback target.
