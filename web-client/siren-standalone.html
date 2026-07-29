@@ -513,11 +513,16 @@ class BleTransport {
             });
 
             // SC/MITM bonding causes a transient GATT disconnect right after pairing.
-            // Retry the connect + service-discovery sequence with back-off to survive it.
+            // Retry the connect + service-discovery sequence with exponential back-off.
+            // Bonded devices may still trigger transient disconnects; give them time to settle.
             let lastErr;
-            for (let attempt = 0; attempt < 3; attempt++) {
+            const maxAttempts = 5;
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 try {
-                    if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+                    if (attempt > 0) {
+                        const delayMs = Math.min(500 * Math.pow(2, attempt - 1), 10000);
+                        await new Promise(r => setTimeout(r, delayMs));
+                    }
                     const server = await this.device.gatt.connect();
                     const service = await server.getPrimaryService(NUS_SERVICE_UUID);
                     this.rxChar = await service.getCharacteristic(NUS_RX_UUID);
@@ -536,16 +541,23 @@ class BleTransport {
                     return; // success
                 } catch (e) {
                     lastErr = e;
-                    const isGattErr = e.message && e.message.toLowerCase().includes('gatt');
-                    if (!isGattErr) throw e; // non-GATT error — don't retry
+                    // Check for transient GATT errors that should be retried
+                    const errMsg = (e.message || '').toLowerCase();
+                    const isGattErr = errMsg.includes('gatt') ||
+                                      errMsg.includes('disconnected') ||
+                                      e.name === 'NetworkError';
+                    if (!isGattErr || attempt === maxAttempts - 1) {
+                        throw e; // non-GATT error or final attempt — don't retry further
+                    }
                 }
             }
             throw lastErr;
         } catch (err) {
-            const isGattDisconnect = err.message && err.message.toLowerCase().includes('gatt server is disconnected');
+            const errMsg = (err.message || '').toLowerCase();
+            const isGattDisconnect = errMsg.includes('gatt') && errMsg.includes('disconnected');
             if (isGattDisconnect) {
                 throw new Error(
-                    `Bluetooth-koppeling vereist. Koppel de radio eerst in Windows-instellingen > Bluetooth (PIN 123456), klik daarna opnieuw op Bluetooth. Of gebruik de Serial-verbinding via USB. [${err.name}]`
+                    `Bluetooth-koppeling vereist. Zorg dat de radio is gekoppeld in Windows-instellingen > Bluetooth (PIN 123456). Sluit andere Bluetooth-apps, start de browser opnieuw, en probeer het opnieuw. Of gebruik de Serial-verbinding via USB. [${err.name}]`
                 );
             }
             throw new Error(`BLE connect failed: ${err.message}`);
@@ -787,8 +799,18 @@ class SirenApp {
             await this.handshake();
         } catch (err) {
             console.error('BLE connect error:', err);
-            document.getElementById('status-line').textContent = `Error: ${err.message}`;
+            const errMsg = err.message || '';
+            // Check if it's a pairing-related error or something else
+            if (errMsg.includes('Bluetooth-koppeling vereist')) {
+                document.getElementById('status-line').textContent = `Error: ${errMsg}`;
+            } else if (errMsg.includes('BLE connect failed')) {
+                document.getElementById('status-line').textContent = `Error: ${errMsg}`;
+            } else {
+                // Handshake or other error - provide context
+                document.getElementById('status-line').textContent = `Error: Verbinding verbroken (${errMsg.substring(0, 60)}...)`;
+            }
             this.connected = false;
+            this.transport = null;
         }
     }
 
