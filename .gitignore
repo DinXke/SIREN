@@ -1,0 +1,5 @@
+# Claude Code auto-memory
+.claude/
+
+# PlatformIO build artifacts (if run from repo root)
+.pio/

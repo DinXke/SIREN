@@ -1,0 +1,130 @@
+.dialog {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background-color: #000;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+.content {
+  padding: 32px;
+  background-color: #001a00;
+  border: 2px solid #00ff00;
+  max-width: 400px;
+  box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+}
+
+.content h2 {
+  margin: 0 0 12px 0;
+  font-size: 18px;
+  color: #00ff00;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.content p {
+  margin: 0 0 20px 0;
+  color: #00aa00;
+  font-size: 14px;
+}
+
+.field {
+  margin-bottom: 16px;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 6px;
+  color: #00ff00;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  background-color: #000;
+  color: #00ff00;
+  border: 1px solid #00aa00;
+  border-radius: 0;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 14px;
+  outline: none;
+}
+
+.input:focus {
+  border-color: #00ff00;
+  box-shadow: inset 0 0 0 1px #00ff00;
+}
+
+.input:disabled {
+  background-color: #1a1a1a;
+  color: #666;
+  border-color: #666;
+  cursor: not-allowed;
+}
+
+.input::placeholder {
+  color: #00aa00;
+}
+
+.passwordInput {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.passwordInput input {
+  flex: 1;
+}
+
+.togglePassword {
+  position: absolute;
+  right: 8px;
+  background: none;
+  border: none;
+  color: #00ff00;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px;
+}
+
+.togglePassword:hover {
+  color: #ffffff;
+}
+
+.actions {
+  margin-top: 20px;
+}
+
+.joinButton {
+  width: 100%;
+  padding: 10px 16px;
+  background-color: #003300;
+  color: #00ff00;
+  border: 1px solid #00ff00;
+  border-radius: 0;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.joinButton:hover {
+  background-color: #00ff00;
+  color: #000;
+}
+
+.joinButton:disabled {
+  background-color: #1a1a1a;
+  color: #666;
+  border-color: #666;
+  cursor: not-allowed;
+}
