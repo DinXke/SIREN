@@ -86,22 +86,35 @@ set SCHEME=http
 if "%USE_HTTPS%"=="1" (
     where openssl >nul 2>&1
     if errorlevel 1 (
-        echo ERROR: openssl not found.
-        echo openssl ships with Git for Windows. Add its usr\bin directory to PATH, e.g.:
-        echo   set PATH=C:\Program Files\Git\usr\bin;%%PATH%%
-        echo Alternatively, use mkcert to generate trusted certificates.
-        exit /b 1
+        REM openssl not on PATH -- try to locate it next to a Git for Windows install
+        set "GIT_OPENSSL="
+        for /f "delims=" %%G in ('where git 2^>nul') do (
+            if not defined GIT_OPENSSL (
+                REM git.exe lives in <git-root>\cmd\ or <git-root>\bin\; go one level up
+                for %%P in ("%%~dpG..") do set "GIT_ROOT=%%~fP"
+                if exist "!GIT_ROOT!\usr\bin\openssl.exe" (
+                    set "GIT_OPENSSL=!GIT_ROOT!\usr\bin"
+                )
+            )
+        )
+        if defined GIT_OPENSSL (
+            echo [SSL] Found openssl via Git for Windows: !GIT_OPENSSL!
+            set "PATH=!GIT_OPENSSL!;!PATH!"
+        ) else (
+            echo ERROR: openssl not found.
+            echo openssl ships with Git for Windows ^(usr\bin\openssl.exe inside your Git install^).
+            echo Make sure Git for Windows is installed, then either:
+            echo   1. Re-run this script -- it will locate openssl automatically via 'where git'
+            echo   2. Add the usr\bin folder inside your Git install to PATH manually
+            echo Alternatively, install mkcert to generate trusted certificates.
+            exit /b 1
+        )
     )
-    set CERT_DIR=%SCRIPT_DIR%.certs
-    if not exist "%CERT_DIR%\" mkdir "%CERT_DIR%"
-    if not exist "%CERT_DIR%\cert.pem" if not exist "%CERT_DIR%\key.pem" (
+    set CERT_DIR=!SCRIPT_DIR!.certs
+    if not exist "!CERT_DIR!\" mkdir "!CERT_DIR!"
+    if not exist "!CERT_DIR!\cert.pem" if not exist "!CERT_DIR!\key.pem" (
         echo [SSL] Generating self-signed certificate...
-        openssl req -x509 -newkey rsa:2048 -nodes ^
-            -keyout "%CERT_DIR%\key.pem" ^
-            -out "%CERT_DIR%\cert.pem" ^
-            -days 365 ^
-            -subj "/CN=SIREN" ^
-            -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+        openssl req -x509 -newkey rsa:2048 -nodes -keyout "!CERT_DIR!\key.pem" -out "!CERT_DIR!\cert.pem" -days 365 -subj "/CN=SIREN" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
         if errorlevel 1 (
             echo ERROR: Failed to generate SSL certificate.
             exit /b 1
@@ -109,7 +122,7 @@ if "%USE_HTTPS%"=="1" (
     ) else (
         echo [SSL] Using existing certificates in .certs\
     )
-    set SSL_ARGS=--ssl-cert "%CERT_DIR%\cert.pem" --ssl-key "%CERT_DIR%\key.pem"
+    set SSL_ARGS=--ssl-cert "!CERT_DIR!\cert.pem" --ssl-key "!CERT_DIR!\key.pem"
     set SCHEME=https
 )
 

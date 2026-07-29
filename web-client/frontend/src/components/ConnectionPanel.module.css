@@ -15,8 +15,69 @@
 
 .disconnected {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #00ff00;
+}
+
+.tab {
+  padding: 6px 12px;
+  background-color: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #666;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.tab:hover:not(:disabled) {
+  color: #00ff00;
+}
+
+.tab.active {
+  color: #00ff00;
+  border-bottom-color: #00ff00;
+}
+
+.tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.content {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.bleUnavailable {
+  color: #ff6600;
+  font-size: 13px;
+  padding: 8px;
+  background-color: rgba(255, 102, 0, 0.1);
+  border: 1px solid #ff6600;
+  border-radius: 2px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+.bleUnavailable p {
+  margin: 0;
+}
+
+.bleUnavailable code {
+  background-color: rgba(0, 255, 0, 0.1);
+  padding: 2px 4px;
+  color: #00ff00;
 }
 
 .indicator {
