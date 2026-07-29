@@ -310,11 +310,11 @@ class Codec {
     static parseContactInfo(payload) {
         // RESP_CODE_CONTACT: [3, pub_key[32], type(1), flags(1), out_path_len(1),
         //   out_path[64], name[32 z-padded], last_advert_ts_u32, gps_lat_i32, gps_lon_i32, lastmod_u32]
-        if (payload.length < 1 + 32 + 1 + 1 + 1 + 64 + 32 + 4) return null;
+        if (payload.length < 36 + 64 + 32 + 4) return null;
         const pubKey = payload.slice(1, 1 + PUB_KEY_SIZE);
         const type = payload[33];
-        const name = readString(payload, 37 + 64, 32);
-        const lastAdvertTs = readUint32LE(payload, 37 + 64 + 32);
+        const name = readString(payload, 36 + 64, 32);
+        const lastAdvertTs = readUint32LE(payload, 36 + 64 + 32);
         const isRoom = type === ADV_TYPE_ROOM;
         return {
             pubKeyPrefix: bytesToHex(pubKey.slice(0, 6)),
@@ -1108,10 +1108,12 @@ window.addEventListener('DOMContentLoaded', () => {
             transport.processBytes(chunk1);
             transport.processBytes(chunk2);
 
-            tests.push(receivedPayload &&
-                receivedPayload.length === originalPayload.length &&
-                Array.from(receivedPayload).every((b, i) => b === originalPayload[i]),
-                'SerialTransport framing round-trip');
+            tests.push({
+                ok: receivedPayload &&
+                    receivedPayload.length === originalPayload.length &&
+                    Array.from(receivedPayload).every((b, i) => b === originalPayload[i]),
+                name: 'SerialTransport framing round-trip'
+            });
         }
 
         // Test 2: Parse RESP_CODE_CONTACT (code 3)
@@ -1133,11 +1135,13 @@ window.addEventListener('DOMContentLoaded', () => {
             writeUint32LE(payload, 132, 0x12345678);
 
             const contact = Codec.parseContactInfo(payload);
-            tests.push(contact &&
-                contact.pubKeyPrefix === 'aaaaaaaaaaaa' &&
-                contact.name === 'TestRoom' &&
-                contact.isRoom === true,
-                'Parse RESP_CODE_CONTACT');
+            tests.push({
+                ok: contact &&
+                    contact.pubKeyPrefix === 'aaaaaaaaaaaa' &&
+                    contact.name === 'TestRoom' &&
+                    contact.isRoom === true,
+                name: 'Parse RESP_CODE_CONTACT'
+            });
         }
 
         // Test 3: Parse RESP_CODE_CONTACT_MSG_RECV_V3 (code 16, txt_type 0 = PLAIN)
@@ -1157,12 +1161,14 @@ window.addEventListener('DOMContentLoaded', () => {
             payload.set(textBytes, 16);
 
             const msg = Codec.parseContactMsgRecvV3(payload);
-            tests.push(msg &&
-                msg.pubKeyPrefix === 'bbbbbbbbbbbb' &&
-                msg.txtType === 0 &&
-                msg.ts === 0x87654321 &&
-                msg.text === 'Hello',
-                'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=0)');
+            tests.push({
+                ok: msg &&
+                    msg.pubKeyPrefix === 'bbbbbbbbbbbb' &&
+                    msg.txtType === 0 &&
+                    msg.ts === 0x87654321 &&
+                    msg.text === 'Hello',
+                name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=0)'
+            });
         }
 
         // Test 4: Parse RESP_CODE_CONTACT_MSG_RECV_V3 (code 16, txt_type 1 = SIGNED)
@@ -1182,12 +1188,14 @@ window.addEventListener('DOMContentLoaded', () => {
             payload.set(textBytes, 20);
 
             const msg = Codec.parseContactMsgRecvV3(payload);
-            tests.push(msg &&
-                msg.pubKeyPrefix === 'cccccccccccc' &&
-                msg.txtType === 1 &&
-                msg.ts === 0x11223344 &&
-                msg.text === 'Signed',
-                'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=1/SIGNED)');
+            tests.push({
+                ok: msg &&
+                    msg.pubKeyPrefix === 'cccccccccccc' &&
+                    msg.txtType === 1 &&
+                    msg.ts === 0x11223344 &&
+                    msg.text === 'Signed',
+                name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=1/SIGNED)'
+            });
         }
 
         // Test 5: Truncated frame returns null
@@ -1195,7 +1203,10 @@ window.addEventListener('DOMContentLoaded', () => {
             const payload = new Uint8Array(5); // Too short for CONTACT
             payload[0] = RESP_CODE_CONTACT;
             const result = Codec.parseContactInfo(payload);
-            tests.push(result === null, 'Truncated frame returns null');
+            tests.push({
+                ok: result === null,
+                name: 'Truncated frame returns null'
+            });
         }
 
         // Test 6: Oversized frame handling (SerialTransport rejects it)
@@ -1214,29 +1225,23 @@ window.addEventListener('DOMContentLoaded', () => {
 
             transport.processBytes(framedBytes);
             // Should not crash and not call onFrame for malformed size
-            tests.push(receivedPayload === null, 'Oversized frame rejected safely');
+            tests.push({
+                ok: receivedPayload === null,
+                name: 'Oversized frame rejected safely'
+            });
         }
 
         // Summary
-        const testCases = [
-            { result: tests[0], name: 'SerialTransport framing round-trip' },
-            { result: tests[1], name: 'Parse RESP_CODE_CONTACT' },
-            { result: tests[2], name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=0)' },
-            { result: tests[3], name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=1/SIGNED)' },
-            { result: tests[4], name: 'Truncated frame returns null' },
-            { result: tests[5], name: 'Oversized frame rejected safely' }
-        ];
-
         let allPassed = true;
-        for (const test of testCases) {
-            if (!test.result) {
+        for (const test of tests) {
+            if (!test.ok) {
                 console.error(`✗ ${test.name}`);
                 allPassed = false;
             }
         }
 
         if (allPassed) {
-            console.log('✓ Initial drain: loop until RESP_CODE_NO_MORE_MESSAGES');
+            console.log(`✓ Codec self-test: ${tests.length}/${tests.length} passed`);
         } else {
             console.error('✗ Codec self-test failed');
         }
