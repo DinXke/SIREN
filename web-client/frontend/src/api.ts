@@ -138,8 +138,9 @@ class APIClient {
   }
 
   async connectBle(): Promise<{ state: ConnState; self?: User }> {
+    const transport = new BleTransport();
     try {
-      this.transport = new BleTransport();
+      this.transport = transport;
       // Proxy events from transport
       this.transport.on('conn', (e) => this.emit('conn', e));
       this.transport.on('channels', (e) => this.emit('channels', e));
@@ -152,6 +153,14 @@ class APIClient {
       const state = await this.transport.getState();
       return { state: state.conn, self: state.self };
     } catch (e) {
+      // Ensure proper cleanup on connection failure
+      if (this.transport) {
+        try {
+          await this.transport.disconnect();
+        } catch (disconnectErr) {
+          console.error('Error during cleanup after connect failure:', disconnectErr);
+        }
+      }
       this.transport = null;
       throw e;
     }

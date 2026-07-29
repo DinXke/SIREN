@@ -78,7 +78,14 @@ export class BleTransport implements Transport {
           // Connected successfully
           this.connState = 'connected';
           this.emit('conn', { type: 'conn', state: 'connected', self: this.state.self });
-          await this.handshake();
+
+          try {
+            await this.handshake();
+          } catch (handshakeErr) {
+            // Handshake failed, clean up handlers before throwing
+            this.cleanupDevice();
+            throw handshakeErr;
+          }
           return;
         } catch (e) {
           lastErr = e;
@@ -86,8 +93,11 @@ export class BleTransport implements Transport {
           const isGattErr = errMsg.includes('gatt') || errMsg.includes('disconnected') || (e as any).name === 'NetworkError';
 
           if (!isGattErr || attempt === maxAttempts - 1) {
+            // On final attempt or non-GATT error, clean up before throwing
+            this.cleanupDevice();
             throw e;
           }
+          // On retry, cleanupDevice will be called at start of next iteration
         }
       }
 
