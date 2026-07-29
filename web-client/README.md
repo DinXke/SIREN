@@ -134,6 +134,21 @@ web-client/
 - pyserial for USB communication
 - In-memory state (no database)
 
+## Standalone Single-File Client
+
+`web-client/siren-standalone.html` is a zero-dependency alternative — no Node.js, no Python, no build step.
+Open it directly in **Chrome or Edge (desktop)** and connect to your SIREN node over USB serial or Bluetooth.
+
+**When to use it vs the full Flask+React stack:**
+
+| Scenario | Use |
+|---|---|
+| Quick field access, no laptop setup | `siren-standalone.html` |
+| Troubleshooting / hardware bring-up | `siren-standalone.html` |
+| Full feature set, persistent config, multi-user | Flask + React stack |
+
+Web Serial and Web Bluetooth are Chrome/Edge desktop only. The file displays a compat banner and disables unavailable transports automatically.
+
 ## Notes
 
 - **Security**: The app binds to `127.0.0.1` by default. Do not bind to `0.0.0.0` without authentication.

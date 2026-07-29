@@ -1,0 +1,1063 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIREN IRC — Standalone</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { background: #1e1e1e; color: #e0e0e0; display: flex; flex-direction: column; }
+
+        #compat-banner {
+            background: #ff6b6b; color: white; padding: 12px 16px; font-size: 14px; font-weight: 600;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        #compat-banner.ok { background: #51cf66; }
+        #compat-banner button { background: rgba(255,255,255,0.2); border: none; color: white; padding: 6px 12px;
+            cursor: pointer; border-radius: 4px; font-size: 13px; }
+        #compat-banner button:hover { background: rgba(255,255,255,0.3); }
+
+        #container { display: flex; flex: 1; overflow: hidden; }
+
+        #sidebar { width: 280px; background: #252525; border-right: 1px solid #333; overflow-y: auto; }
+        #sidebar-header { padding: 16px; border-bottom: 1px solid #333; }
+        #connect-section { display: flex; gap: 8px; margin-bottom: 12px; }
+        #connect-section button { flex: 1; padding: 8px; background: #0d7377; color: white; border: none;
+            border-radius: 4px; cursor: pointer; font-size: 13px; }
+        #connect-section button:hover { background: #14919b; }
+        #connect-section button:disabled { background: #666; cursor: not-allowed; }
+        #status-line { font-size: 12px; color: #aaa; margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.05);
+            border-radius: 4px; }
+
+        #channel-list { list-style: none; }
+        #channel-list li { padding: 12px 16px; border-bottom: 1px solid #333; cursor: pointer; user-select: none; }
+        #channel-list li:hover { background: #333; }
+        #channel-list li.active { background: #0d7377; color: white; }
+        #channel-list li .badge { float: right; background: #ff6b6b; color: white; padding: 2px 8px;
+            border-radius: 12px; font-size: 11px; }
+
+        #main { flex: 1; display: flex; flex-direction: column; }
+        #chat-header { padding: 16px; border-bottom: 1px solid #333; font-size: 14px; font-weight: 600; }
+        #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+        #messages .message { display: flex; gap: 12px; }
+        #messages .message.self .bubble { background: #0d7377; margin-left: auto; }
+        #messages .message.other .bubble { background: #333; }
+        #messages .message .sender { font-size: 11px; color: #888; margin-bottom: 4px; }
+        #messages .message .bubble { padding: 8px 12px; border-radius: 6px; max-width: 60%; word-wrap: break-word; }
+        #messages .message .status { font-size: 10px; color: #888; margin-top: 4px; }
+
+        #input-section { padding: 16px; border-top: 1px solid #333; display: flex; gap: 8px; }
+        #message-input { flex: 1; background: #333; color: #e0e0e0; border: 1px solid #444; padding: 10px 12px;
+            border-radius: 4px; font-family: inherit; }
+        #message-input:focus { outline: none; border-color: #0d7377; }
+        #send-btn { background: #0d7377; color: white; border: none; padding: 10px 16px; border-radius: 4px;
+            cursor: pointer; font-weight: 600; }
+        #send-btn:hover { background: #14919b; }
+        #send-btn:disabled { background: #666; cursor: not-allowed; }
+
+        #users-panel { width: 200px; background: #252525; border-left: 1px solid #333; overflow-y: auto; padding: 16px 0; }
+        #users-panel-header { padding: 0 16px 12px; font-size: 12px; font-weight: 600; color: #aaa; }
+        #users-list { list-style: none; }
+        #users-list li { padding: 8px 16px; font-size: 13px; }
+        #users-list li.room::before { content: "🔒 "; }
+        #users-list li.channel::before { content: "# "; }
+
+        #login-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7);
+            z-index: 1000; justify-content: center; align-items: center; }
+        #login-modal.show { display: flex; }
+        #login-form { background: #252525; padding: 24px; border-radius: 8px; width: 90%; max-width: 400px; }
+        #login-form h2 { margin-bottom: 16px; font-size: 18px; }
+        #login-form input { width: 100%; padding: 10px; margin-bottom: 16px; background: #333; color: #e0e0e0;
+            border: 1px solid #444; border-radius: 4px; font-family: inherit; }
+        #login-form input:focus { outline: none; border-color: #0d7377; }
+        #login-form .buttons { display: flex; gap: 8px; }
+        #login-form .buttons button { flex: 1; padding: 10px; border: none; border-radius: 4px;
+            cursor: pointer; font-weight: 600; }
+        #login-form .ok { background: #0d7377; color: white; }
+        #login-form .cancel { background: #666; color: white; }
+
+        @media (max-width: 1024px) {
+            #users-panel { display: none; }
+        }
+        @media (max-width: 768px) {
+            #sidebar { width: 200px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="compat-banner">
+        <span>⚠️ Web Serial / Web Bluetooth require Chrome or Edge (desktop)</span>
+        <button id="banner-close">Dismiss</button>
+    </div>
+
+    <div id="container">
+        <div id="sidebar">
+            <div id="sidebar-header">
+                <div id="connect-section">
+                    <button id="btn-serial">Serial</button>
+                    <button id="btn-ble">Bluetooth</button>
+                </div>
+                <div id="status-line">Disconnected</div>
+            </div>
+            <ul id="channel-list"></ul>
+        </div>
+
+        <div id="main">
+            <div id="chat-header">Select a channel or room</div>
+            <div id="messages"></div>
+            <div id="input-section" style="display: none;">
+                <input id="message-input" type="text" placeholder="Type a message...">
+                <button id="send-btn">Send</button>
+            </div>
+        </div>
+
+        <div id="users-panel">
+            <div id="users-panel-header">CONTACTS</div>
+            <ul id="users-list"></ul>
+        </div>
+    </div>
+
+    <div id="login-modal">
+        <div id="login-form">
+            <h2>Join Room</h2>
+            <p id="login-room-name" style="margin-bottom: 16px; color: #aaa; font-size: 14px;"></p>
+            <input id="login-password" type="password" placeholder="Room password">
+            <div class="buttons">
+                <button class="ok" id="login-ok">Join</button>
+                <button class="cancel" id="login-cancel">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+// ============================================================================
+// CONSTANTS (from firmware/examples/companion_radio/MyMesh.cpp)
+// ============================================================================
+const PUB_KEY_SIZE = 32;
+const MAX_PATH_SIZE = 64;
+const MAX_FRAME_SIZE = 176;
+const ADV_TYPE_CHAT = 1;
+const ADV_TYPE_ROOM = 3;
+const TXT_TYPE_PLAIN = 0;
+const TXT_TYPE_CLI_DATA = 1;
+
+const CMD_DEVICE_QUERY = 22;
+const CMD_APP_START = 1;
+const CMD_GET_CONTACTS = 4;
+const CMD_GET_CHANNEL = 31;
+const CMD_SEND_TXT_MSG = 2;
+const CMD_SEND_CHANNEL_TXT_MSG = 3;
+const CMD_SYNC_NEXT_MESSAGE = 10;
+const CMD_SEND_LOGIN = 26;
+
+const RESP_CODE_OK = 0;
+const RESP_CODE_ERR = 1;
+const RESP_CODE_CONTACTS_START = 2;
+const RESP_CODE_CONTACT = 3;
+const RESP_CODE_END_OF_CONTACTS = 4;
+const RESP_CODE_SELF_INFO = 5;
+const RESP_CODE_SENT = 6;
+const RESP_CODE_CONTACT_MSG_RECV_V3 = 16;
+const RESP_CODE_CHANNEL_MSG_RECV_V3 = 17;
+const RESP_CODE_CHANNEL_INFO = 18;
+const RESP_CODE_DEVICE_INFO = 13;
+const RESP_CODE_CONTACT_MSG_RECV = 7;
+const RESP_CODE_CHANNEL_MSG_RECV = 8;
+const RESP_CODE_NO_MORE_MESSAGES = 10;
+
+const PUSH_CODE_ADVERT = 0x80;
+const PUSH_CODE_SEND_CONFIRMED = 0x82;
+const PUSH_CODE_MSG_WAITING = 0x83;
+const PUSH_CODE_LOGIN_SUCCESS = 0x85;
+const PUSH_CODE_LOGIN_FAIL = 0x86;
+const PUSH_CODE_NEW_ADVERT = 0x8a;
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+function bytesToHex(bytes) {
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+        bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+    }
+    return bytes;
+}
+
+function readUint16LE(buf, offset) {
+    return buf[offset] | (buf[offset + 1] << 8);
+}
+
+function writeUint16LE(buf, offset, value) {
+    buf[offset] = value & 0xff;
+    buf[offset + 1] = (value >> 8) & 0xff;
+}
+
+function readUint32LE(buf, offset) {
+    return buf[offset] | (buf[offset + 1] << 8) | (buf[offset + 2] << 16) | (buf[offset + 3] << 24);
+}
+
+function writeUint32LE(buf, offset, value) {
+    buf[offset] = value & 0xff;
+    buf[offset + 1] = (value >> 8) & 0xff;
+    buf[offset + 2] = (value >> 16) & 0xff;
+    buf[offset + 3] = (value >> 24) & 0xff;
+}
+
+function readInt32LE(buf, offset) {
+    const val = readUint32LE(buf, offset);
+    return val >= 0x80000000 ? val - 0x100000000 : val;
+}
+
+function readString(buf, offset, maxLen) {
+    let len = 0;
+    while (len < maxLen && offset + len < buf.length && buf[offset + len] !== 0) {
+        len++;
+    }
+    return new TextDecoder('utf-8').decode(buf.slice(offset, offset + len));
+}
+
+function clampTextLength(text) {
+    // Leave room for header: code + type + attempt/channel + ts(4) + pubkey(6) = ~15 bytes
+    const maxBytes = Math.max(1, MAX_FRAME_SIZE - 30);
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(text);
+    if (bytes.length <= maxBytes) return text;
+    // Clamp by byte length, decode back
+    return new TextDecoder('utf-8').decode(bytes.slice(0, maxBytes));
+}
+
+// ============================================================================
+// CODEC: Command Builders (returns Uint8Array payload)
+// ============================================================================
+class Codec {
+    static buildDeviceQuery(appVer = 3) {
+        return new Uint8Array([CMD_DEVICE_QUERY, appVer]);
+    }
+
+    static buildAppStart(appName = 'siren-standalone') {
+        const nameBytes = new TextEncoder().encode(appName);
+        const payload = new Uint8Array(8 + nameBytes.length);
+        payload[0] = CMD_APP_START;
+        // bytes 1-7 = reserved, 0
+        payload.set(nameBytes, 8);
+        return payload;
+    }
+
+    static buildGetContacts(since = 0) {
+        const payload = new Uint8Array(5);
+        payload[0] = CMD_GET_CONTACTS;
+        if (since > 0) {
+            writeUint32LE(payload, 1, since);
+        }
+        return payload;
+    }
+
+    static buildGetChannel(idx) {
+        return new Uint8Array([CMD_GET_CHANNEL, idx]);
+    }
+
+    static buildSendTxtMsg(pubkeyPrefix, text, txtType = TXT_TYPE_PLAIN, attempt = 0) {
+        const textBytes = new TextEncoder().encode(clampTextLength(text));
+        const totalLen = 1 + 1 + 1 + 4 + 6 + textBytes.length;
+        const payload = new Uint8Array(totalLen);
+        payload[0] = CMD_SEND_TXT_MSG;
+        payload[1] = txtType;
+        payload[2] = attempt;
+        const ts = Math.floor(Date.now() / 1000);
+        writeUint32LE(payload, 3, ts);
+        const pkeyBytes = hexToBytes(pubkeyPrefix.padEnd(12, '0'));
+        payload.set(pkeyBytes.slice(0, 6), 7);
+        payload.set(textBytes, 13);
+        return payload;
+    }
+
+    static buildSendChannelTxtMsg(channelIdx, text, txtType = TXT_TYPE_PLAIN) {
+        const textBytes = new TextEncoder().encode(clampTextLength(text));
+        const totalLen = 1 + 1 + 1 + 4 + textBytes.length;
+        const payload = new Uint8Array(totalLen);
+        payload[0] = CMD_SEND_CHANNEL_TXT_MSG;
+        payload[1] = txtType;
+        payload[2] = channelIdx;
+        const ts = Math.floor(Date.now() / 1000);
+        writeUint32LE(payload, 3, ts);
+        payload.set(textBytes, 7);
+        return payload;
+    }
+
+    static buildSyncNextMessage() {
+        return new Uint8Array([CMD_SYNC_NEXT_MESSAGE]);
+    }
+
+    static buildSendLogin(pubkeyPrefix, password) {
+        const passBytes = new TextEncoder().encode(password);
+        const totalLen = 1 + 6 + passBytes.length;
+        const payload = new Uint8Array(totalLen);
+        payload[0] = CMD_SEND_LOGIN;
+        const pkeyBytes = hexToBytes(pubkeyPrefix.padEnd(12, '0'));
+        payload.set(pkeyBytes.slice(0, 6), 1);
+        payload.set(passBytes, 7);
+        return payload;
+    }
+
+    // Response parsers (returns object or null if parse fails)
+    static parseContactInfo(payload) {
+        // RESP_CODE_CONTACT: [3, pub_key[32], type(1), flags(1), out_path_len(1),
+        //   out_path[64], name[32 z-padded], last_advert_ts_u32, gps_lat_i32, gps_lon_i32, lastmod_u32]
+        if (payload.length < 1 + 32 + 1 + 1 + 1 + 64 + 32 + 4) return null;
+        const pubKey = payload.slice(1, 1 + PUB_KEY_SIZE);
+        const type = payload[33];
+        const name = readString(payload, 37 + 64, 32);
+        const lastAdvertTs = readUint32LE(payload, 37 + 64 + 32);
+        const isRoom = type === ADV_TYPE_ROOM;
+        return {
+            pubKeyPrefix: bytesToHex(pubKey.slice(0, 6)),
+            name,
+            isRoom,
+            type,
+            lastAdvertTs,
+        };
+    }
+
+    static parseSelfInfo(payload) {
+        // RESP_CODE_SELF_INFO: [5, adv_type(1), tx_power(1), max_tx_power(1), pub_key[32], lat_i32, lon_i32,
+        //   multi_acks(1), advert_loc_policy(1), telemetry_mode(1), manual_add(1), freq_u32, bw_u32, sf(1), cr(1), node_name...]
+        if (payload.length < 48) return null;
+        const pubKey = payload.slice(4, 4 + PUB_KEY_SIZE);
+        const nodeNameStart = 48;
+        const nodeName = readString(payload, nodeNameStart, payload.length - nodeNameStart);
+        return {
+            pubKeyPrefix: bytesToHex(pubKey.slice(0, 6)),
+            name: nodeName || 'self',
+            isRoom: false,
+        };
+    }
+
+    static parseChannelInfo(payload) {
+        // RESP_CODE_CHANNEL_INFO: [18, channel_idx(1), name[32 z-padded], secret[16]]
+        if (payload.length < 1 + 1 + 32) return null;
+        const idx = payload[1];
+        const name = readString(payload, 2, 32);
+        return { idx, name };
+    }
+
+    static parseContactMsgRecvV3(payload) {
+        // RESP_CODE_CONTACT_MSG_RECV_V3: [16, snr_i8, rsv, rsv, pubkeyPrefix[6], path_len(1), txt_type(1),
+        //   sender_ts_u32, {if txt_type is SIGNED: sender_prefix[4]}, utf8(text)]
+        if (payload.length < 1 + 1 + 2 + 6 + 1 + 1 + 4) return null;
+        const snr = payload[1]; // signed, but unused here
+        const pubKeyPrefix = bytesToHex(payload.slice(4, 10));
+        const pathLen = payload[10];
+        const txtType = payload[11];
+        const ts = readUint32LE(payload, 12);
+        let textStart = 16;
+        if (txtType === 1) {
+            // SIGNED: sender_prefix[4] follows
+            textStart += 4;
+        }
+        const text = readString(payload, textStart, payload.length - textStart);
+        return { pubKeyPrefix, txtType, ts, text };
+    }
+
+    static parseChannelMsgRecvV3(payload) {
+        // RESP_CODE_CHANNEL_MSG_RECV_V3: [17, snr_i8, rsv, rsv, channel_idx(1), path_len(1),
+        //   txt_type(1), ts_u32, utf8(text)]
+        if (payload.length < 1 + 1 + 2 + 1 + 1 + 1 + 4) return null;
+        const channelIdx = payload[4];
+        const pathLen = payload[5];
+        const txtType = payload[6];
+        const ts = readUint32LE(payload, 7);
+        const text = readString(payload, 11, payload.length - 11);
+        return { channelIdx, txtType, ts, text };
+    }
+}
+
+// ============================================================================
+// TRANSPORT: SerialTransport (with framing)
+// ============================================================================
+class SerialTransport {
+    constructor() {
+        this.port = null;
+        this.reader = null;
+        this.writer = null;
+        this.frameCallback = null;
+
+        // Framing state
+        this.frameBuf = new Uint8Array(MAX_FRAME_SIZE + 4);
+        this.framePos = 0;
+        this.frameState = 'IDLE'; // IDLE | GOT_START | GOT_LEN_LSB | GOT_LEN_MSB | READING_BODY
+        this.frameLen = 0;
+    }
+
+    async connect() {
+        try {
+            this.port = await navigator.serial.requestPort();
+            await this.port.open({ baudRate: 115200 });
+            this.startReading();
+        } catch (err) {
+            throw new Error(`Serial connect failed: ${err.message}`);
+        }
+    }
+
+    async disconnect() {
+        if (this.port) {
+            await this.port.close();
+            this.port = null;
+            this.reader = null;
+            this.writer = null;
+        }
+    }
+
+    async send(payload) {
+        if (!this.port || !this.port.writable) throw new Error('Serial port not writable');
+        const frame = new Uint8Array(1 + 2 + payload.length);
+        frame[0] = 0x3e; // '>'
+        writeUint16LE(frame, 1, payload.length);
+        frame.set(payload, 3);
+        const writer = this.port.writable.getWriter();
+        try {
+            await writer.write(frame);
+        } finally {
+            writer.releaseLock();
+        }
+    }
+
+    startReading() {
+        if (!this.port || !this.port.readable) return;
+        const self = this;
+        (async () => {
+            const reader = self.port.readable.getReader();
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    self.processBytes(value);
+                }
+            } catch (err) {
+                console.error('Serial read error:', err);
+            } finally {
+                reader.releaseLock();
+            }
+        })();
+    }
+
+    processBytes(chunk) {
+        for (let i = 0; i < chunk.length; i++) {
+            const byte = chunk[i];
+            switch (this.frameState) {
+                case 'IDLE':
+                    if (byte === 0x3c) { // '<'
+                        this.frameState = 'GOT_START';
+                    }
+                    break;
+                case 'GOT_START':
+                    this.frameLen = byte; // lenLSB
+                    this.frameState = 'GOT_LEN_LSB';
+                    break;
+                case 'GOT_LEN_LSB':
+                    this.frameLen |= (byte << 8); // lenMSB
+                    if (this.frameLen === 0 || this.frameLen > MAX_FRAME_SIZE) {
+                        // Invalid frame
+                        this.frameState = 'IDLE';
+                        this.framePos = 0;
+                    } else {
+                        this.frameState = 'READING_BODY';
+                        this.framePos = 0;
+                    }
+                    break;
+                case 'READING_BODY':
+                    this.frameBuf[this.framePos++] = byte;
+                    if (this.framePos === this.frameLen) {
+                        // Frame complete
+                        const payload = this.frameBuf.slice(0, this.frameLen);
+                        if (this.frameCallback) {
+                            this.frameCallback(payload);
+                        }
+                        this.frameState = 'IDLE';
+                        this.framePos = 0;
+                    }
+                    break;
+            }
+        }
+    }
+
+    onFrame(callback) {
+        this.frameCallback = callback;
+    }
+}
+
+// ============================================================================
+// TRANSPORT: BleTransport (Nordic UART Service)
+// ============================================================================
+class BleTransport {
+    constructor() {
+        this.device = null;
+        this.rxChar = null;
+        this.txChar = null;
+        this.frameCallback = null;
+    }
+
+    async connect() {
+        const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        try {
+            this.device = await navigator.bluetooth.requestDevice({
+                filters: [{ services: [NUS_SERVICE_UUID] }],
+            });
+            const gatt = await this.device.gatt.connect();
+            const service = await gatt.getPrimaryService(NUS_SERVICE_UUID);
+            this.rxChar = await service.getCharacteristic('6e400002-b5a3-f393-e0a9-e50e24dcca9e');
+            this.txChar = await service.getCharacteristic('6e400003-b5a3-f393-e0a9-e50e24dcca9e');
+            await this.txChar.startNotifications();
+            this.txChar.addEventListener('characteristicvaluechanged', (e) => {
+                const payload = new Uint8Array(e.target.value.buffer);
+                if (this.frameCallback) {
+                    this.frameCallback(payload);
+                }
+            });
+        } catch (err) {
+            throw new Error(`BLE connect failed: ${err.message}`);
+        }
+    }
+
+    async disconnect() {
+        if (this.device && this.device.gatt.connected) {
+            await this.device.gatt.disconnect();
+        }
+        this.device = null;
+        this.rxChar = null;
+        this.txChar = null;
+    }
+
+    async send(payload) {
+        if (!this.rxChar) throw new Error('BLE not connected');
+        // BLE: no framing, just send the payload directly
+        await this.rxChar.writeValue(payload);
+        // Throttle writes: ~60ms apart
+        await new Promise(r => setTimeout(r, 60));
+    }
+
+    onFrame(callback) {
+        this.frameCallback = callback;
+    }
+}
+
+// ============================================================================
+// STATE MANAGEMENT
+// ============================================================================
+class SirenState {
+    constructor() {
+        this.self = null;
+        this.contacts = new Map(); // pubKeyPrefix -> {pubKeyPrefix, name, isRoom, type, lastAdvertTs}
+        this.channels = new Map(); // idx -> {idx, name}
+        this.messages = new Map(); // messageId -> message
+        this.nextMessageId = 1;
+        this.pendingAcks = new Map(); // expected_ack (u32) -> {messageId, ts}
+        this.onStateChange = null;
+        this.onMessage = null;
+        this.onLoginResult = null;
+    }
+
+    setSelf(contact) {
+        this.self = contact;
+        if (this.onStateChange) this.onStateChange();
+    }
+
+    addContact(contact) {
+        this.contacts.set(contact.pubKeyPrefix, contact);
+        if (this.onStateChange) this.onStateChange();
+    }
+
+    addChannel(channel) {
+        this.channels.set(channel.idx, channel);
+        if (this.onStateChange) this.onStateChange();
+    }
+
+    addMessage(msg) {
+        this.messages.set(msg.id, msg);
+        if (this.onMessage) this.onMessage(msg);
+    }
+
+    updateMessage(id, updates) {
+        const msg = this.messages.get(id);
+        if (msg) {
+            Object.assign(msg, updates);
+            if (this.onMessage) this.onMessage(msg);
+        }
+    }
+
+    getChannels() {
+        const result = [];
+        // Rooms
+        for (const c of this.contacts.values()) {
+            if (c.isRoom) {
+                result.push({
+                    id: `room:${c.pubKeyPrefix}`,
+                    kind: 'room',
+                    name: c.name,
+                    displayName: `#siren-${c.name}`,
+                    pubKeyPrefix: c.pubKeyPrefix,
+                });
+            }
+        }
+        // Channels
+        for (const ch of this.channels.values()) {
+            result.push({
+                id: `chan:${ch.idx}`,
+                kind: 'channel',
+                name: ch.name,
+                displayName: `#${ch.name}`,
+                channelIdx: ch.idx,
+            });
+        }
+        // DMs
+        for (const c of this.contacts.values()) {
+            if (!c.isRoom) {
+                result.push({
+                    id: `dm:${c.pubKeyPrefix}`,
+                    kind: 'dm',
+                    name: c.name,
+                    displayName: c.name,
+                    pubKeyPrefix: c.pubKeyPrefix,
+                });
+            }
+        }
+        return result;
+    }
+
+    getMessages(channelId) {
+        return Array.from(this.messages.values()).filter(m => m.channelId === channelId);
+    }
+}
+
+// ============================================================================
+// SIREN APP
+// ============================================================================
+class SirenApp {
+    constructor() {
+        this.transport = null;
+        this.state = new SirenState();
+        this.connected = false;
+        this.currentChannelId = null;
+        this.loginPendingRoom = null;
+        this.nextChannelIdx = 0;
+        this.debouncedHandleDrain = this.debounce(() => this.drainMessages(), 100);
+
+        this.setupUI();
+        this.setupStateListeners();
+        this.setupTransportListeners();
+        this.checkCompat();
+    }
+
+    checkCompat() {
+        const hasSerial = !!navigator.serial;
+        const hasBluetooth = !!navigator.bluetooth;
+        const btn = document.getElementById('btn-serial');
+        const btnBle = document.getElementById('btn-ble');
+        const banner = document.getElementById('compat-banner');
+
+        if (!hasSerial) btn.disabled = true;
+        if (!hasBluetooth) btnBle.disabled = true;
+        if (hasSerial && hasBluetooth) {
+            banner.classList.add('ok');
+            banner.innerHTML = '✅ Web Serial and Bluetooth available<button id="banner-close">Dismiss</button>';
+            document.getElementById('banner-close').addEventListener('click', () => {
+                banner.style.display = 'none';
+            });
+        }
+    }
+
+    setupUI() {
+        document.getElementById('btn-serial').addEventListener('click', () => this.connectSerial());
+        document.getElementById('btn-ble').addEventListener('click', () => this.connectBle());
+        document.getElementById('banner-close').addEventListener('click', () => {
+            document.getElementById('compat-banner').style.display = 'none';
+        });
+
+        const channelList = document.getElementById('channel-list');
+        channelList.addEventListener('click', (e) => {
+            const li = e.target.closest('li');
+            if (li) {
+                const id = li.dataset.id;
+                this.selectChannel(id);
+            }
+        });
+
+        const sendBtn = document.getElementById('send-btn');
+        const input = document.getElementById('message-input');
+        sendBtn.addEventListener('click', () => this.sendMessage());
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.sendMessage();
+            }
+        });
+
+        document.getElementById('login-ok').addEventListener('click', () => this.submitLogin());
+        document.getElementById('login-cancel').addEventListener('click', () => this.closeLoginModal());
+    }
+
+    setupStateListeners() {
+        this.state.onStateChange = () => this.updateUI();
+        this.state.onMessage = (msg) => {
+            if (msg.channelId === this.currentChannelId) {
+                this.renderMessages();
+            }
+        };
+        this.state.onLoginResult = (result) => {
+            if (result.ok) {
+                document.querySelector(`li[data-id="room:${result.pubKeyPrefix}"]`)?.classList.add('joined');
+            }
+        };
+    }
+
+    setupTransportListeners() {
+        this.state.onStateChange = () => {
+            // Debounced UI update
+            requestAnimationFrame(() => this.updateUI());
+        };
+    }
+
+    debounce(fn, ms) {
+        let timeout;
+        return function(...args) {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => fn.apply(this, args), ms);
+        };
+    }
+
+    async connectSerial() {
+        try {
+            this.transport = new SerialTransport();
+            await this.transport.connect();
+            this.transport.onFrame((payload) => this.handleFrame(payload));
+            this.connected = true;
+            document.getElementById('status-line').textContent = 'Connected (Serial)';
+            document.getElementById('btn-serial').disabled = true;
+            document.getElementById('btn-ble').disabled = true;
+            await this.handshake();
+        } catch (err) {
+            console.error('Serial connect error:', err);
+            document.getElementById('status-line').textContent = `Error: ${err.message}`;
+            this.connected = false;
+        }
+    }
+
+    async connectBle() {
+        try {
+            this.transport = new BleTransport();
+            await this.transport.connect();
+            this.transport.onFrame((payload) => this.handleFrame(payload));
+            this.connected = true;
+            document.getElementById('status-line').textContent = 'Connected (Bluetooth)';
+            document.getElementById('btn-serial').disabled = true;
+            document.getElementById('btn-ble').disabled = true;
+            await this.handshake();
+        } catch (err) {
+            console.error('BLE connect error:', err);
+            document.getElementById('status-line').textContent = `Error: ${err.message}`;
+            this.connected = false;
+        }
+    }
+
+    async handshake() {
+        // 1. CMD_DEVICE_QUERY
+        await this.transport.send(Codec.buildDeviceQuery(3));
+        // 2. CMD_APP_START
+        await new Promise(r => setTimeout(r, 100));
+        await this.transport.send(Codec.buildAppStart('siren-standalone'));
+        // 3. CMD_GET_CONTACTS
+        await new Promise(r => setTimeout(r, 100));
+        await this.transport.send(Codec.buildGetContacts());
+        // 4. Drain messages
+        await new Promise(r => setTimeout(r, 100));
+        this.debouncedHandleDrain();
+    }
+
+    async drainMessages() {
+        if (!this.connected) return;
+        try {
+            await this.transport.send(Codec.buildSyncNextMessage());
+        } catch (err) {
+            console.error('Drain error:', err);
+        }
+    }
+
+    handleFrame(payload) {
+        if (!payload || payload.length < 1) return;
+        const code = payload[0];
+
+        try {
+            if (code === RESP_CODE_DEVICE_INFO) {
+                // Informational, safe to ignore
+            } else if (code === RESP_CODE_SELF_INFO) {
+                const info = Codec.parseSelfInfo(payload);
+                if (info) {
+                    this.state.setSelf(info);
+                }
+            } else if (code === RESP_CODE_CONTACTS_START) {
+                // Expect CONTACT frames to follow
+            } else if (code === RESP_CODE_CONTACT) {
+                const contact = Codec.parseContactInfo(payload);
+                if (contact) {
+                    this.state.addContact(contact);
+                }
+            } else if (code === RESP_CODE_END_OF_CONTACTS) {
+                // Contacts finished, now get channels
+                this.getChannels();
+            } else if (code === RESP_CODE_CHANNEL_INFO) {
+                const ch = Codec.parseChannelInfo(payload);
+                if (ch) {
+                    this.state.addChannel(ch);
+                    // Continue fetching channels
+                    setTimeout(() => this.getNextChannel(), 50);
+                }
+            } else if (code === RESP_CODE_ERR) {
+                // No more channels, start drain
+                this.drainMessages();
+            } else if (code === RESP_CODE_CONTACT_MSG_RECV_V3) {
+                const msg = Codec.parseContactMsgRecvV3(payload);
+                if (msg) {
+                    const msgId = `msg-${this.state.nextMessageId++}`;
+                    this.state.addMessage({
+                        id: msgId,
+                        channelId: `dm:${msg.pubKeyPrefix}`,
+                        from: this.findContactName(msg.pubKeyPrefix),
+                        self: false,
+                        text: msg.text,
+                        ts: msg.ts,
+                        status: 'confirmed',
+                    });
+                }
+            } else if (code === RESP_CODE_CHANNEL_MSG_RECV_V3) {
+                const msg = Codec.parseChannelMsgRecvV3(payload);
+                if (msg) {
+                    const msgId = `msg-${this.state.nextMessageId++}`;
+                    this.state.addMessage({
+                        id: msgId,
+                        channelId: `chan:${msg.channelIdx}`,
+                        from: 'room',
+                        self: false,
+                        text: msg.text,
+                        ts: msg.ts,
+                        status: 'confirmed',
+                    });
+                }
+            } else if (code === RESP_CODE_SENT) {
+                // Mark message as sent; extract expected_ack at offset 2
+                if (payload.length >= 6) {
+                    const expectedAck = readUint32LE(payload, 2);
+                    this.state.pendingAcks.set(expectedAck, { ts: Date.now() });
+                }
+            } else if (code === RESP_CODE_NO_MORE_MESSAGES) {
+                // Drain complete, set up a listener for msg waiting pushes
+            } else if (code === PUSH_CODE_MSG_WAITING) {
+                this.debouncedHandleDrain();
+            } else if (code === PUSH_CODE_SEND_CONFIRMED) {
+                // Could map this to pending ack, but for now just acknowledge
+            } else if (code === PUSH_CODE_ADVERT || code === PUSH_CODE_NEW_ADVERT) {
+                // New contact advert, re-fetch contacts
+                setTimeout(() => this.transport.send(Codec.buildGetContacts()), 100);
+            } else if (code === PUSH_CODE_LOGIN_SUCCESS) {
+                if (this.loginPendingRoom) {
+                    this.state.onLoginResult?.({ ok: true, pubKeyPrefix: this.loginPendingRoom });
+                    this.loginPendingRoom = null;
+                }
+            } else if (code === PUSH_CODE_LOGIN_FAIL) {
+                if (this.loginPendingRoom) {
+                    this.state.onLoginResult?.({ ok: false, pubKeyPrefix: this.loginPendingRoom });
+                    this.loginPendingRoom = null;
+                }
+            }
+        } catch (err) {
+            console.error('Frame parse error:', err);
+        }
+    }
+
+    findContactName(pubKeyPrefix) {
+        const contact = this.state.contacts.get(pubKeyPrefix);
+        return contact ? contact.name : pubKeyPrefix;
+    }
+
+    getChannels() {
+        this.nextChannelIdx = 0;
+        this.getNextChannel();
+    }
+
+    getNextChannel() {
+        if (!this.connected) return;
+        this.transport.send(Codec.buildGetChannel(this.nextChannelIdx++)).catch(() => {
+            // Error or end of channels
+        });
+    }
+
+    selectChannel(channelId) {
+        this.currentChannelId = channelId;
+        document.querySelectorAll('#channel-list li').forEach(li => li.classList.remove('active'));
+        document.querySelector(`li[data-id="${channelId}"]`)?.classList.add('active');
+        document.getElementById('input-section').style.display = 'flex';
+        document.getElementById('chat-header').textContent = this.getChannelDisplayName(channelId) || 'Chat';
+        document.getElementById('message-input').focus();
+        this.renderMessages();
+    }
+
+    getChannelDisplayName(channelId) {
+        const parts = channelId.split(':');
+        if (parts[0] === 'room') {
+            const contact = this.state.contacts.get(parts[1]);
+            return contact ? `#siren-${contact.name}` : channelId;
+        } else if (parts[0] === 'chan') {
+            const idx = parseInt(parts[1]);
+            const ch = this.state.channels.get(idx);
+            return ch ? `#${ch.name}` : channelId;
+        } else if (parts[0] === 'dm') {
+            const contact = this.state.contacts.get(parts[1]);
+            return contact ? contact.name : parts[1];
+        }
+        return channelId;
+    }
+
+    renderMessages() {
+        const msgs = this.state.getMessages(this.currentChannelId);
+        const container = document.getElementById('messages');
+        container.innerHTML = '';
+        msgs.forEach(msg => {
+            const div = document.createElement('div');
+            div.className = `message ${msg.self ? 'self' : 'other'}`;
+            const sender = document.createElement('div');
+            sender.className = 'sender';
+            sender.textContent = msg.self ? 'You' : (msg.from || '?');
+            const bubble = document.createElement('div');
+            bubble.className = 'bubble';
+            bubble.textContent = msg.text;
+            const status = document.createElement('div');
+            status.className = 'status';
+            const statusText = { pending: '⏱', sent: '✓', confirmed: '✓✓', failed: '✗' };
+            status.textContent = msg.self ? (statusText[msg.status] || '') : '';
+            div.appendChild(sender);
+            div.appendChild(bubble);
+            if (msg.self) div.appendChild(status);
+            container.appendChild(div);
+        });
+        container.scrollTop = container.scrollHeight;
+    }
+
+    async sendMessage() {
+        const text = document.getElementById('message-input').value.trim();
+        if (!text || !this.currentChannelId || !this.connected) return;
+
+        const parts = this.currentChannelId.split(':');
+        const msgId = `msg-${this.state.nextMessageId++}`;
+
+        this.state.addMessage({
+            id: msgId,
+            channelId: this.currentChannelId,
+            from: '',
+            self: true,
+            text,
+            ts: Math.floor(Date.now() / 1000),
+            status: 'pending',
+        });
+
+        this.renderMessages();
+        document.getElementById('message-input').value = '';
+
+        try {
+            if (parts[0] === 'room' || parts[0] === 'dm') {
+                await this.transport.send(Codec.buildSendTxtMsg(parts[1], text));
+            } else if (parts[0] === 'chan') {
+                const idx = parseInt(parts[1]);
+                await this.transport.send(Codec.buildSendChannelTxtMsg(idx, text));
+            }
+            // Mark as sent after send
+            setTimeout(() => {
+                this.state.updateMessage(msgId, { status: 'sent' });
+                this.renderMessages();
+            }, 100);
+        } catch (err) {
+            console.error('Send error:', err);
+            this.state.updateMessage(msgId, { status: 'failed' });
+            this.renderMessages();
+        }
+    }
+
+    showLoginModal(roomId) {
+        this.loginPendingRoom = roomId;
+        const contact = this.state.contacts.get(roomId);
+        const roomName = contact ? contact.name : roomId;
+        document.getElementById('login-room-name').textContent = `Joining #siren-${roomName}`;
+        document.getElementById('login-password').value = '';
+        document.getElementById('login-modal').classList.add('show');
+        document.getElementById('login-password').focus();
+    }
+
+    submitLogin() {
+        if (!this.loginPendingRoom) return;
+        const password = document.getElementById('login-password').value;
+        if (!password) return;
+        this.transport.send(Codec.buildSendLogin(this.loginPendingRoom, password)).catch(err => {
+            console.error('Login send error:', err);
+        });
+        this.closeLoginModal();
+    }
+
+    closeLoginModal() {
+        document.getElementById('login-modal').classList.remove('show');
+        this.loginPendingRoom = null;
+    }
+
+    updateUI() {
+        // Update channel list
+        const channels = this.state.getChannels();
+        const list = document.getElementById('channel-list');
+        list.innerHTML = '';
+        channels.forEach(ch => {
+            const li = document.createElement('li');
+            li.dataset.id = ch.id;
+            li.textContent = ch.displayName;
+            if (ch.kind === 'room') {
+                li.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.showLoginModal(ch.pubKeyPrefix);
+                });
+            } else {
+                li.addEventListener('click', () => {
+                    this.selectChannel(ch.id);
+                });
+            }
+            list.appendChild(li);
+        });
+
+        // Update user list
+        const usersList = document.getElementById('users-list');
+        usersList.innerHTML = '';
+        for (const contact of this.state.contacts.values()) {
+            const li = document.createElement('li');
+            li.className = contact.isRoom ? 'room' : 'channel';
+            li.textContent = contact.name;
+            usersList.appendChild(li);
+        }
+    }
+}
+
+// ============================================================================
+// INIT
+// ============================================================================
+window.addEventListener('DOMContentLoaded', () => {
+    new SirenApp();
+    // Codec self-test
+    {
+        const test1 = Codec.buildDeviceQuery(3);
+        console.assert(test1.length === 2 && test1[0] === 22, 'buildDeviceQuery failed');
+        const test2 = Codec.buildAppStart('test');
+        console.assert(test2.length >= 8, 'buildAppStart failed');
+        console.log('✓ Codec self-tests passed');
+    }
+});
+    </script>
+</body>
+</html>
