@@ -15,8 +15,6 @@ export class BleTransport implements Transport {
   private listeners: Map<string, Set<(event: any) => void>> = new Map();
   private connState: ConnState = 'disconnected';
   private nextChannelIdx: number = 0;
-  private syncComplete: Promise<void> | null = null;
-  private syncResolver: (() => void) | null = null;
   private onDisconnectHandler: (() => void) | null = null;
   private onNotificationHandler: ((e: Event) => void) | null = null;
 
@@ -248,12 +246,10 @@ export class BleTransport implements Transport {
   }
 
   private async handshake(): Promise<void> {
+    // Send handshake commands; sync happens asynchronously via frame handlers.
+    // This matches the original siren-standalone.html behavior (no blocking wait).
+    // Frames arrive asynchronously and handleFrame() updates state and emits events.
     try {
-      // Create a promise that resolves when sync completes
-      this.syncComplete = new Promise((resolve) => {
-        this.syncResolver = resolve;
-      });
-
       // 1. CMD_DEVICE_QUERY
       await this.send(Codec.buildDeviceQuery(3));
       // 2. CMD_APP_START
@@ -262,15 +258,9 @@ export class BleTransport implements Transport {
       // 3. CMD_GET_CONTACTS
       await new Promise((r) => setTimeout(r, 100));
       await this.send(Codec.buildGetContacts());
-
-      // Wait for sync to complete (END_OF_CONTACTS + all channels)
-      // The async handlers will populate contacts/channels and signal completion via ERR
-      // Timeout after 5 seconds to avoid hanging
-      const timeoutPromise = new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error('BLE handshake timeout: no response from device')), 5000)
-      );
-
-      await Promise.race([this.syncComplete, timeoutPromise]);
+      // 4. Start message drain (will be triggered by frames)
+      await new Promise((r) => setTimeout(r, 100));
+      this.drainMessages();
     } catch (e) {
       console.error('BLE handshake error:', e);
       throw e;
@@ -321,12 +311,7 @@ export class BleTransport implements Transport {
           setTimeout(() => this.getNextChannel(), 50);
         }
       } else if (code === RESP_CODE_ERR) {
-        // No more channels, sync complete
-        if (this.syncResolver) {
-          this.syncResolver();
-          this.syncResolver = null;
-        }
-        // Start draining messages
+        // No more channels, start draining messages
         this.drainMessages();
       } else if (code === RESP_CODE_CONTACT_MSG_RECV_V3) {
         const msg = Codec.parseContactMsgRecvV3(payload);

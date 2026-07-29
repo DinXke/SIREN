@@ -97,6 +97,21 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
 
   _cli.loadPrefs(_fs);
 
+#ifdef FORCE_RADIO_PREFS
+  // One-shot radio settings correction: overwrite any stale prefs from a
+  // previous firmware's SPIFFS while preserving node name, identity, and all
+  // non-radio settings.  After this boot the corrected values are persisted so
+  // a subsequent normal OTA (without FORCE_RADIO_PREFS) will load them cleanly.
+  _prefs.freq        = LORA_FREQ;
+  _prefs.sf          = LORA_SF;
+  _prefs.bw          = LORA_BW;
+  _prefs.cr          = LORA_CR;
+  _prefs.tx_power_dbm = LORA_TX_POWER;
+  _cli.savePrefs(_fs);
+  Serial.printf("[SIREN] FORCE_RADIO_PREFS: freq=%.3f sf=%d bw=%.1f cr=%d tx=%d — saved\n",
+                _prefs.freq, _prefs.sf, _prefs.bw, _prefs.cr, _prefs.tx_power_dbm);
+#endif
+
   // Load or create room identities + config
   loadRoomConfig();   // loads name/password overrides from /room_cfg
   for (int i = 0; i < MAX_ROOMS; i++) {
