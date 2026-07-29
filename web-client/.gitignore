@@ -17,6 +17,9 @@ server/static/
 *.swo
 *~
 
+# SSL certificates (never commit private keys)
+.certs/
+
 # OS
 .DS_Store
 Thumbs.db

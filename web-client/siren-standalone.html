@@ -699,9 +699,16 @@ class SirenApp {
         const btn = document.getElementById('btn-serial');
         const btnBle = document.getElementById('btn-ble');
         const banner = document.getElementById('compat-banner');
+        const bleHint = document.getElementById('ble-hint');
 
         if (!hasSerial) btn.disabled = true;
         if (!hasBluetooth) btnBle.disabled = true;
+
+        // Show secure-context hint if BLE is unavailable due to non-secure context
+        if (!window.isSecureContext && bleHint) {
+            bleHint.textContent = 'Bluetooth vereist HTTPS. Start de server met de --https vlag voor remote toegang.';
+        }
+
         if (hasSerial && hasBluetooth) {
             banner.classList.add('ok');
             banner.innerHTML = '✅ Web Serial and Bluetooth available<button id="banner-close">Dismiss</button>';

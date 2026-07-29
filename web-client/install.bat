@@ -1,12 +1,13 @@
 @echo off
 REM SIREN Web Client -- install and start (Windows)
-REM Usage: install.bat [--port 8760] [--host 127.0.0.1]
+REM Usage: install.bat [--port 8760] [--host 127.0.0.1] [--https]
 
 setlocal EnableDelayedExpansion
 
 set SCRIPT_DIR=%~dp0
 set HOST=127.0.0.1
 set PORT=8760
+set USE_HTTPS=0
 
 REM Parse optional args
 :parse_args
@@ -19,6 +20,11 @@ if "%~1"=="--port" (
 if "%~1"=="--host" (
     set HOST=%~2
     shift & shift
+    goto parse_args
+)
+if "%~1"=="--https" (
+    set USE_HTTPS=1
+    shift
     goto parse_args
 )
 echo Unknown option: %~1
@@ -74,11 +80,47 @@ if exist "%FRONTEND_DIR%\package.json" (
     )
 )
 
+REM ---- SSL certificates (if --https) ----
+set SSL_ARGS=
+set SCHEME=http
+if "%USE_HTTPS%"=="1" (
+    where openssl >nul 2>&1
+    if errorlevel 1 (
+        echo ERROR: openssl not found.
+        echo openssl ships with Git for Windows. Add its usr\bin directory to PATH, e.g.:
+        echo   set PATH=C:\Program Files\Git\usr\bin;%%PATH%%
+        echo Alternatively, use mkcert to generate trusted certificates.
+        exit /b 1
+    )
+    set CERT_DIR=%SCRIPT_DIR%.certs
+    if not exist "%CERT_DIR%\" mkdir "%CERT_DIR%"
+    if not exist "%CERT_DIR%\cert.pem" if not exist "%CERT_DIR%\key.pem" (
+        echo [SSL] Generating self-signed certificate...
+        openssl req -x509 -newkey rsa:2048 -nodes ^
+            -keyout "%CERT_DIR%\key.pem" ^
+            -out "%CERT_DIR%\cert.pem" ^
+            -days 365 ^
+            -subj "/CN=SIREN" ^
+            -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+        if errorlevel 1 (
+            echo ERROR: Failed to generate SSL certificate.
+            exit /b 1
+        )
+    ) else (
+        echo [SSL] Using existing certificates in .certs\
+    )
+    set SSL_ARGS=--ssl-cert "%CERT_DIR%\cert.pem" --ssl-key "%CERT_DIR%\key.pem"
+    set SCHEME=https
+)
+
 REM ---- Start server ----
-echo [4/4] Starting SIREN bridge on http://%HOST%:%PORT% ...
+echo [4/4] Starting SIREN bridge on %SCHEME%://%HOST%:%PORT% ...
 echo.
-echo   Open http://%HOST%:%PORT% in your browser
+echo   Open %SCHEME%://%HOST%:%PORT% in your browser
+if "%USE_HTTPS%"=="1" (
+    echo   Browser will show a certificate warning - click Advanced -^> Proceed. This is normal for self-signed certs.
+)
 echo   Press Ctrl+C to stop.
 echo.
 
-"%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%server\app.py" --host "%HOST%" --port "%PORT%"
+"%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%server\app.py" --host "%HOST%" --port "%PORT%" %SSL_ARGS%
