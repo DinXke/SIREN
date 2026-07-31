@@ -10,6 +10,10 @@ This document defines the rules and process for keeping the SIREN documentation 
 
 If you merge code that adds, changes, or removes behaviour, you must also update the corresponding docs page(s). Documentation is part of the Definition of Done for every issue.
 
+**Every documentation change must be pushed to GitHub immediately after committing.**
+
+This applies to ALL agents who write or edit documentation (board directive, 2026-07-31). Documentation that only exists locally does not count as done — the GitHub copy at `https://github.com/DinXke/SIREN/tree/multiroom/docs` is the authoritative, always-current version. After any docs commit, run `git push origin multiroom` before closing the issue.
+
 ---
 
 ## Where Documentation Lives
@@ -69,6 +73,7 @@ When adding new documentation, ask which type it is and place it accordingly.
 4. Update `docs/README.md` if a new doc file was added.
 5. Commit the documentation changes alongside the code changes (or in a separate commit on the same branch).
 6. Add to the changelog section at the bottom of this file.
+7. **Push to GitHub (`git push origin multiroom`) immediately — do not leave docs commits local-only.**
 
 ### For a bug fix that changes observable behaviour
 
@@ -146,6 +151,7 @@ Track significant documentation updates here to help reviewers understand what c
 | Date | Author | Change |
 |---|---|---|
 | 2026-07-31 | DocuMaster (JES-785) | Initial documentation suite created: all 11 content areas, docs/README.md index, CONTRIBUTING-DOCS.md |
+| 2026-07-31 | CEO (JES-784) | Board directive codified: every docs change must be pushed to GitHub immediately after committing (applies to all agents) |
 
 ---
 
