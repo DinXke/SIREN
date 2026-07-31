@@ -206,8 +206,8 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          loadPostPool();
 
   /* ---- CLI helpers ---- */
-  void          handleRoomCommand(char* args, char* reply);
-  void          handlePeerCommand(char* args, char* reply);
+  void          handleRoomCommand(char* args, char* reply, bool serial);
+  void          handlePeerCommand(char* args, char* reply, bool serial);
   int           handleRequest(RoomSlot& slot, ClientInfo* sender,
                               uint32_t sender_timestamp,
                               uint8_t* payload, size_t payload_len);

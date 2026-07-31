@@ -1115,14 +1115,17 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     command += 3;
   }
 
+  // serial=true when called from the local serial CLI (sender_timestamp==0)
+  bool is_serial = (sender_timestamp == 0);
+
   // ---- room management commands ----
   if (memcmp(command, "room ", 5) == 0) {
-    handleRoomCommand(command + 5, reply);
+    handleRoomCommand(command + 5, reply, is_serial);
     return;
   }
 
   // ---- ACL commands scoped to active_slot (or room[0] for serial) ----
-  int scope = (sender_timestamp == 0) ? 0 : _active_slot;
+  int scope = is_serial ? 0 : _active_slot;
   if (memcmp(command, "setperm ", 8) == 0) {
     char* hex = &command[8];
     char* sp  = strchr(hex, ' ');
@@ -1207,7 +1210,7 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
 
   // ---- peer management commands (Phase 5 ground work) ----
   if (memcmp(command, "peer", 4) == 0 && (command[4] == ' ' || command[4] == 0)) {
-    handlePeerCommand(command + 4, reply);
+    handlePeerCommand(command + 4, reply, is_serial);
     return;
   }
 
@@ -1236,12 +1239,12 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
 /* ------------------------------------------------------------------ */
 /*  room * CLI sub-commands                                             */
 /* ------------------------------------------------------------------ */
-void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
+void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
   while (*args == ' ') args++;
 
   // "room list" — list all rooms
   if (strcmp(args, "list") == 0 || strcmp(args, "ls") == 0) {
-    if (_fs) {  // serial output
+    if (serial) {
       Serial.printf("Rooms (%d/%d active):\n", _num_active_rooms, MAX_ROOMS);
       for (int i = 0; i < MAX_ROOMS; i++) {
         Serial.printf("  [%d] %s  name='%s'  stealth=%s  id=", i,
@@ -1256,7 +1259,13 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "%d rooms active", _num_active_rooms);
+      // compact mesh-DM reply: "2/16: [0]Room0 c=1 [1]Room1 c=0"
+      int pos = sprintf(reply, "%d/%d:", _num_active_rooms, MAX_ROOMS);
+      for (int i = 0; i < MAX_ROOMS && pos < 140; i++) {
+        if (!rooms[i].active) continue;
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s c=%d",
+                        i, rooms[i].name, rooms[i].acl.getNumClients());
+      }
     }
     return;
   }
@@ -1331,8 +1340,9 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
-  // "room del <idx>"
+  // "room del <idx>" — serial-only (destructive; prevents accidental DM deletion)
   if (memcmp(args, "del ", 4) == 0) {
+    if (!serial) { strcpy(reply, "Err - room del only allowed via serial CLI"); return; }
     int idx = atoi(args + 4);
     if (idx <= 0 || idx >= MAX_ROOMS) {
       strcpy(reply, "Err - cannot delete room 0 or invalid idx");
@@ -1365,7 +1375,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     snprintf(uri, sizeof(uri),
              "meshcore://contact/add?name=%s&public_key=%s&type=3",
              rooms[idx].name, hex64);
-    if (_fs) {
+    if (serial) {
       Serial.printf("Room[%d] join URI:\n%s\n", idx, uri);
       reply[0] = 0;
     } else {
@@ -1385,7 +1395,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       return;
     }
     int n = rooms[idx].acl.getNumClients();
-    if (_fs) {
+    if (serial) {
       Serial.printf("room[%d] '%s' — %d client(s):\n", idx, rooms[idx].name, n);
       for (int i = 0; i < n; i++) {
         ClientInfo* c = rooms[idx].acl.getClientByIdx(i);
@@ -1399,7 +1409,16 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "room[%d] %d clients", idx, n);
+      // compact mesh-DM reply: "room[0] 2 clients: [0]admin [1]rw"
+      int pos = sprintf(reply, "room[%d] %d clients:", idx, n);
+      for (int i = 0; i < n && pos < 140; i++) {
+        ClientInfo* c = rooms[idx].acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        const char* role = c->isAdmin() ? "admin" :
+          ((c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_WRITE ? "rw" :
+           (c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_ONLY  ? "ro" : "guest");
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s", i, role);
+      }
     }
     return;
   }
@@ -1445,7 +1464,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     }
     RoomSlot& slot = rooms[idx];
     int n = slot.acl.getNumClients();
-    if (_fs) {
+    if (serial) {
       Serial.printf("room[%d] '%s'  posts=%d  clients=%d:\n",
                     idx, slot.name, (int)slot.num_posted, n);
       for (int i = 0; i < n; i++) {
@@ -1462,7 +1481,15 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "room[%d] posts=%d clients=%d", idx, (int)slot.num_posted, n);
+      // compact mesh-DM reply with per-client unsynced lag
+      int pos = sprintf(reply, "room[%d]'%s' posts=%d clients=%d:",
+                        idx, slot.name, (int)slot.num_posted, n);
+      for (int i = 0; i < n && pos < 130; i++) {
+        ClientInfo* c = slot.acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        uint8_t lag = getUnsyncedCount(slot, c);
+        pos += snprintf(reply + pos, 160 - pos, " [%d]lag=%d", i, (int)lag);
+      }
     }
     return;
   }
@@ -1730,12 +1757,12 @@ bool MultiRoomMesh::restorePostsFlatJson(const String& json) {
 /* ------------------------------------------------------------------ */
 /*  peer * CLI sub-commands                                             */
 /* ------------------------------------------------------------------ */
-void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
+void MultiRoomMesh::handlePeerCommand(char* args, char* reply, bool serial) {
   while (*args == ' ') args++;
 
   // "peer list" — list configured peer room servers
   if (strcmp(args, "list") == 0 || strcmp(args, "ls") == 0 || args[0] == 0) {
-    if (_fs) {
+    if (serial) {
       Serial.printf("Peers (%d/%d configured):\n", _num_peers, MAX_PEERS);
       for (int i = 0; i < MAX_PEERS; i++) {
         if (!peers[i].active) continue;
@@ -1745,13 +1772,19 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "%d peers", _num_peers);
+      // compact mesh-DM reply: "2/8: [0]Alice [1]Bob"
+      int pos = sprintf(reply, "%d/%d:", _num_peers, MAX_PEERS);
+      for (int i = 0; i < MAX_PEERS && pos < 140; i++) {
+        if (!peers[i].active) continue;
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s", i, peers[i].name);
+      }
     }
     return;
   }
 
-  // "peer add <hex64> <name>" — add a peer by 64-char hex public key
+  // "peer add <hex64> <name>" — serial-only (structural config change)
   if (memcmp(args, "add ", 4) == 0) {
+    if (!serial) { strcpy(reply, "Err - peer add only allowed via serial CLI"); return; }
     char* p = args + 4;
     while (*p == ' ') p++;
     // expect 64 hex chars = 32 bytes
@@ -1784,8 +1817,9 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
     return;
   }
 
-  // "peer del <idx>" — remove a peer
+  // "peer del <idx>" — serial-only (structural config change)
   if (memcmp(args, "del ", 4) == 0) {
+    if (!serial) { strcpy(reply, "Err - peer del only allowed via serial CLI"); return; }
     int idx = atoi(args + 4);
     if (idx < 0 || idx >= MAX_PEERS || !peers[idx].active) {
       strcpy(reply, "Err - peer not active or invalid idx");
@@ -1800,7 +1834,7 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
 
   // "peer status" — show peer liveness (Phase 5 replication not yet active)
   if (strcmp(args, "status") == 0) {
-    if (_fs) {
+    if (serial) {
       Serial.printf("Peer status (%d configured; Phase 5 replication not yet active):\n", _num_peers);
       for (int i = 0; i < MAX_PEERS; i++) {
         if (!peers[i].active) continue;
@@ -1809,7 +1843,13 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "peers=%d (Phase 5 replication not active)", _num_peers);
+      // compact mesh-DM reply with last-contact timestamps
+      int pos = sprintf(reply, "%d peers (Phase 5 inactive):", _num_peers);
+      for (int i = 0; i < MAX_PEERS && pos < 130; i++) {
+        if (!peers[i].active) continue;
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s@%lu",
+                        i, peers[i].name, (unsigned long)peers[i].last_contact);
+      }
     }
     return;
   }
