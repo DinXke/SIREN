@@ -13,6 +13,7 @@ Welcome. This is the documentation index for SIREN. If you are completely new to
 | Document | What you will learn |
 |---|---|
 | [Introduction](introduction.md) | What SIREN is, what LoRa radio is, what MeshCore is — with plain-language analogies |
+| [System Overview](system-overview.md) | The complete system structure in diagrams: all hardware, software, and communication paths shown schematically |
 | [Hardware Guide](hardware.md) | The physical device (Heltec LoRa32 V3), antennas, and known constraints of the board units |
 
 ### Level 2 — Getting the System Running
