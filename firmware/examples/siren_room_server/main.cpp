@@ -3,6 +3,9 @@
 
 #include "MyMesh.h"
 #include "SettingsMenu.h"
+#ifdef ENABLE_WIFI_MGMT
+  #include "WebManager.h"
+#endif
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -15,6 +18,9 @@ MultiRoomMesh the_mesh(board, radio_driver,
                        *new ArduinoMillis(), fast_rng,
                        rtc_clock, tables);
 SettingsMenu settings_menu(the_mesh);
+#ifdef ENABLE_WIFI_MGMT
+  WebManager web_manager(the_mesh);
+#endif
 
 void halt() { while (1); }
 
@@ -56,6 +62,10 @@ void setup() {
   sensors.begin();
   the_mesh.begin(fs);
 
+#ifdef ENABLE_WIFI_MGMT
+  web_manager.begin();
+#endif
+
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
 #endif
@@ -70,6 +80,9 @@ void setup() {
   Serial.println("[SIREN] Phase 1 — multi-room server ready");
   Serial.println("Commands: menu | room list | room add | room del <idx>");
   Serial.println("          room set <idx> name <n> | pass <p> | guest <p>");
+#ifdef ENABLE_WIFI_MGMT
+  Serial.println("          wifi ssid <n> | wifi pass <p> | wifi connect | wifi status");
+#endif
   Serial.println("Type 'menu' + Enter to open the interactive settings menu.");
 }
 
@@ -97,7 +110,15 @@ void loop() {
         settings_menu.enter();
       } else {
         char reply[160];
+#ifdef ENABLE_WIFI_MGMT
+        if (memcmp(command, "wifi ", 5) == 0) {
+          web_manager.handleWifiCommand(command + 5, reply);
+        } else {
+          the_mesh.handleCommand(0, command, reply);
+        }
+#else
         the_mesh.handleCommand(0, command, reply);
+#endif
         if (reply[0]) { Serial.print("  -> "); Serial.println(reply); }
       }
       command[0] = 0;
@@ -106,6 +127,9 @@ void loop() {
 
   the_mesh.loop();
   sensors.loop();
+#ifdef ENABLE_WIFI_MGMT
+  web_manager.loop();
+#endif
 #ifdef DISPLAY_CLASS
   ui_task.loop();
 #endif

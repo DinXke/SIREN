@@ -247,4 +247,18 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
+
+  /* ---- Public accessors for web management UI (Phase 9) ---- */
+  int  getNumActiveRooms() const  { return _num_active_rooms; }
+  bool isRoomActive(int i) const  { return (i >= 0 && i < MAX_ROOMS) && rooms[i].active; }
+  const char* getRoomName(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].name : "";
+  }
+  int  getRoomClientCount(int i) const {
+    return (i >= 0 && i < MAX_ROOMS && rooms[i].active)
+           ? rooms[i].acl.getNumClients() : 0;
+  }
+  int  getRoomPostCount(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? (int)rooms[i].num_posted : 0;
+  }
 };
