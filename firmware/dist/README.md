@@ -3,7 +3,7 @@
 **Target:** Heltec LoRa32 V3 (ESP32-S3, SX1262)
 **Environment:** `SIREN_v3_room_server`
 **Branch:** `multiroom`
-**Build date:** 2026-07-28
+**Build date:** 2026-07-31
 **Version:** `v1.0-siren-p1` (Phase 1, MAX_ROOMS=16)
 
 ---
@@ -91,7 +91,7 @@ by a previous firmware (MeshCore OTA does **not** reset SPIFFS prefs).
    - Frequency: **869.618 MHz**
    - Bandwidth: **62.5 kHz**
    - Spreading factor: **SF8**
-   - Coding rate: **CR 4/5**
+   - Coding rate: **CR 4/8**
    - TX power: **22 dBm**
 3. Saves the corrected prefs back to SPIFFS.
 4. Continues normal operation — the node is immediately on the correct frequency.
