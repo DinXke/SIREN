@@ -8,6 +8,7 @@
 #include <ESPAsyncWebServer.h>
 #include <SPIFFS.h>
 #include "MyMesh.h"
+#include "UITask.h"
 
 #define WIFI_CONFIG_PATH      "/wifi_sta.json"
 #define WIFI_CONNECT_TIMEOUT_MS  15000
@@ -39,6 +40,7 @@ private:
   AsyncWebServer   _server;
   DNSServer        _dns;
   MultiRoomMesh&   _mesh;
+  UITask*          _ui_task;
   bool             _started;
   bool             _dns_started;
 
@@ -65,15 +67,18 @@ private:
   void stopCaptivePortal();
   void connectSTA();
 
+  String buildStatusPage(const char* ip);
+
   String buildBackupJson();
   bool   applyRestore(const String& json);
 
-  static String buildStatusPage(MultiRoomMesh& mesh, const char* ip, WifiMode mode,
-                                 const char* ap_ssid, const char* sta_ssid);
   static String buildRoomsJson(MultiRoomMesh& mesh);
 
 public:
   explicit WebManager(MultiRoomMesh& mesh);
+
+  /** Wire up the UITask so the web UI can read/set screensaver config. */
+  void setUITask(UITask* t) { _ui_task = t; }
 
   /** Call once after the_mesh.begin() and SPIFFS is mounted. */
   void begin();

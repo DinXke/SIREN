@@ -304,6 +304,24 @@ public:
     return (i >= 0 && i < MAX_ROOMS) ? rooms[i].id.pub_key : nullptr;
   }
 
+  /* ---- Screensaver stats accessors (JES-781) ---- */
+  uint64_t getUptimeMillis() const { return uptime_millis; }
+  uint32_t getTotalPosts() const {
+    uint32_t n = 0;
+    for (int i = 0; i < MAX_ROOMS; i++)
+      if (rooms[i].active) n += rooms[i].num_posted;
+    return n;
+  }
+  uint8_t getTotalContacts() const {
+    uint8_t n = 0;
+    for (int i = 0; i < MAX_ROOMS; i++)
+      if (rooms[i].active) {
+        int c = rooms[i].acl.getNumClients();
+        n += (c > 0) ? (uint8_t)c : 0;
+      }
+    return n;
+  }
+
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {
     return (i >= 0 && i < MAX_ROOMS) ? rooms[i].password : "";

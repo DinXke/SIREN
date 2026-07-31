@@ -16,7 +16,7 @@
 //  Constructor
 // ---------------------------------------------------------------------------
 WebManager::WebManager(MultiRoomMesh& mesh)
-  : _server(80), _mesh(mesh), _started(false), _dns_started(false),
+  : _server(80), _mesh(mesh), _ui_task(nullptr), _started(false), _dns_started(false),
     _mode(MODE_AP),
     _connect_started(0), _connecting(false)
 {
@@ -371,9 +371,12 @@ static const char HTML_HEAD[] PROGMEM =
 
 static const char HTML_FOOT[] PROGMEM = "</body></html>";
 
-String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
-                                    WifiMode mode,
-                                    const char* ap_ssid, const char* sta_ssid) {
+String WebManager::buildStatusPage(const char* ip) {
+  MultiRoomMesh& mesh = _mesh;
+  WifiMode mode       = _mode;
+  const char* ap_ssid = _ap_ssid;
+  const char* sta_ssid = _sta_ssid;
+
   String page = FPSTR(HTML_HEAD);
 
   // Node info
@@ -552,6 +555,37 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
           "<button type='submit' onclick=\"return confirm('Restore will overwrite all settings and reboot. Continue?')\">Restore &amp; Reboot</button>"
           "</form></div>";
 
+  // Varia — screensaver / OLED settings
+  if (_ui_task) {
+    bool ss_on   = _ui_task->isSsEnabled();
+    bool keep_on = _ui_task->isSsKeepOn();
+    page += "<div class='card'><h2>Varia</h2>";
+    page += "<p><b>Screensaver (OLED)</b> &mdash; cycles stats on screen to prevent burn-in "
+            "and keeps the display alive on units with glued buttons.</p>";
+    page += "<form method='post' action='/api/screensaver'>"
+            "Screensaver: <select name='ss'>"
+            "<option value='on'";
+    page += ss_on ? " selected" : "";
+    page += ">ON (aanbevolen)</option>"
+            "<option value='off'";
+    page += !ss_on ? " selected" : "";
+    page += ">OFF</option>"
+            "</select> "
+            "Keep screen on (when SS off): <select name='keep'>"
+            "<option value='off'";
+    page += !keep_on ? " selected" : "";
+    page += ">Uit na 60s</option>"
+            "<option value='on'";
+    page += keep_on ? " selected" : "";
+    page += ">Altijd aan</option>"
+            "</select> "
+            "<button type='submit'>Opslaan</button></form>"
+            "<p style='font-size:0.85em;color:#aaa'>CLI: "
+            "<code>screensaver on|off</code> &nbsp; "
+            "<code>screensaver keep-on on|off</code></p>"
+            "</div>";
+  }
+
   // OTA link
   page += "<div class='card'><a href='/update'>OTA Firmware Update</a></div>";
 
@@ -697,8 +731,7 @@ void WebManager::setupRoutes() {
     String ip = (_mode == MODE_AP)
       ? WiFi.softAPIP().toString()
       : WiFi.localIP().toString();
-    req->send(200, "text/html",
-              buildStatusPage(_mesh, ip.c_str(), _mode, _ap_ssid, _sta_ssid));
+    req->send(200, "text/html", buildStatusPage(ip.c_str()));
   });
 
   // API: add room
@@ -780,6 +813,20 @@ void WebManager::setupRoutes() {
       int sec = req->getParam("seconds", true)->value().toInt();
       if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
       _mesh.setAdvertIntervalSec((uint16_t)sec);
+      req->redirect("/");
+    });
+
+  // API: screensaver / Varia settings
+  _server.on("/api/screensaver", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!_ui_task) { req->redirect("/"); return; }
+      if (req->hasParam("ss", true)) {
+        _ui_task->setSsEnabled(req->getParam("ss", true)->value() == "on");
+      }
+      if (req->hasParam("keep", true)) {
+        _ui_task->setSsKeepOn(req->getParam("keep", true)->value() == "on");
+      }
       req->redirect("/");
     });
 

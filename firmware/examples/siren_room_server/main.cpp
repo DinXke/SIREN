@@ -68,6 +68,9 @@ void setup() {
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
+  #ifdef ENABLE_WIFI_MGMT
+    web_manager.setUITask(&ui_task);
+  #endif
 #endif
 
 #if ENABLE_ADVERT_ON_BOOT == 1
@@ -113,16 +116,24 @@ void loop() {
       if (strcmp(command, "menu") == 0) {
         settings_menu.enter();
       } else {
-        char reply[160];
+        char reply[160] = {};
+        bool handled = false;
+#ifdef DISPLAY_CLASS
+        if (!handled && memcmp(command, "screensaver", 11) == 0 &&
+            (command[11] == 0 || command[11] == ' ')) {
+          ui_task.handleCommand(command, reply);
+          handled = true;
+        }
+#endif
 #ifdef ENABLE_WIFI_MGMT
-        if (memcmp(command, "wifi ", 5) == 0) {
+        if (!handled && memcmp(command, "wifi ", 5) == 0) {
           web_manager.handleWifiCommand(command + 5, reply);
-        } else {
+          handled = true;
+        }
+#endif
+        if (!handled) {
           the_mesh.handleCommand(0, command, reply);
         }
-#else
-        the_mesh.handleCommand(0, command, reply);
-#endif
         if (reply[0]) { Serial.print("  -> "); Serial.println(reply); }
       }
       command[0] = 0;
@@ -135,6 +146,26 @@ void loop() {
   web_manager.loop();
 #endif
 #ifdef DISPLAY_CLASS
+  {
+    UiStats ui_stats;
+    ui_stats.room_count    = (uint8_t)the_mesh.getNumActiveRooms();
+    ui_stats.total_posts   = the_mesh.getTotalPosts();
+    ui_stats.uptime_ms     = (uint32_t)the_mesh.getUptimeMillis();
+    ui_stats.wifi_mode     = 0;
+    ui_stats.wifi_ip[0]    = 0;
+    ui_stats.contact_count = the_mesh.getTotalContacts();
+#ifdef ENABLE_WIFI_MGMT
+    ui_stats.wifi_mode = (uint8_t)(web_manager.getMode() + 1);  // MODE_AP=0->1, MODE_STA=1->2
+    {
+      String ip = (web_manager.getMode() == WebManager::MODE_AP)
+                  ? WiFi.softAPIP().toString()
+                  : WiFi.localIP().toString();
+      strncpy(ui_stats.wifi_ip, ip.c_str(), sizeof(ui_stats.wifi_ip) - 1);
+      ui_stats.wifi_ip[sizeof(ui_stats.wifi_ip) - 1] = 0;
+    }
+#endif
+    ui_task.setStats(ui_stats);
+  }
   ui_task.loop();
 #endif
   rtc_clock.tick();
