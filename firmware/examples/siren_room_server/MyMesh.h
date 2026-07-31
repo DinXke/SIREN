@@ -269,6 +269,11 @@ public:
   /** Set stealth for one room and persist; idx -1 = all rooms. */
   void setRoomStealth(int idx, bool s);
 
+  /** Return pointer to room i's 32-byte Ed25519 public key (PUB_KEY_SIZE bytes). */
+  const uint8_t* getRoomPubKey(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].id.pub_key : nullptr;
+  }
+
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {
     return (i >= 0 && i < MAX_ROOMS) ? rooms[i].password : "";

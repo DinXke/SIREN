@@ -3,6 +3,7 @@
 
 #include "WebManager.h"
 #include <AsyncElegantOTA.h>
+#include <qrcode.h>
 
 #ifndef ADMIN_PASSWORD
   #define ADMIN_PASSWORD "password"
@@ -328,6 +329,26 @@ bool WebManager::applyRestore(const String& json) {
 }
 
 // ---------------------------------------------------------------------------
+//  Base64 encoder (used for QR module bitmap)
+// ---------------------------------------------------------------------------
+static String base64Encode(const uint8_t* data, size_t len) {
+  static const char enc[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  String out;
+  out.reserve(((len + 2) / 3) * 4);
+  for (size_t i = 0; i < len; i += 3) {
+    uint32_t b = ((uint32_t)data[i] << 16)
+               | (i + 1 < len ? (uint32_t)data[i + 1] << 8 : 0)
+               | (i + 2 < len ? (uint32_t)data[i + 2]      : 0);
+    out += enc[(b >> 18) & 63];
+    out += enc[(b >> 12) & 63];
+    out += (i + 1 < len ? enc[(b >>  6) & 63] : '=');
+    out += (i + 2 < len ? enc[ b        & 63] : '=');
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 //  HTML page builders
 // ---------------------------------------------------------------------------
 static const char HTML_HEAD[] PROGMEM =
@@ -387,6 +408,9 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
     page += "'><button type='submit'>";
     page += stealth_i ? "Make Visible" : "Hide";
     page += "</button></form>";
+    // QR join code button
+    page += " <a href='/api/room/qr?idx="; page += i;
+    page += "' style='text-decoration:none'><button>QR</button></a>";
     if (i > 0) {
       page += " <form method='post' action='/api/room/del' style='display:inline'>"
               "<input type='hidden' name='idx' value='"; page += i;
@@ -469,6 +493,130 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
   // OTA link
   page += "<div class='card'><a href='/update'>OTA Firmware Update</a></div>";
 
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
+
+// ---------------------------------------------------------------------------
+//  QR code page — per-room join QR rendered via inline canvas JS
+// ---------------------------------------------------------------------------
+static String buildQrPage(MultiRoomMesh& mesh, int idx) {
+  String page = FPSTR(HTML_HEAD);
+
+  if (idx < 0 || idx >= MAX_ROOMS || !mesh.isRoomActive(idx)) {
+    page += "<div class='card'><p class='err'>Room ";
+    page += idx;
+    page += " is not active.</p><p><a href='/'>&#8592; Back</a></p></div>";
+    page += FPSTR(HTML_FOOT);
+    return page;
+  }
+
+  // Build 64-char hex public key
+  char hex64[65] = {};
+  const uint8_t* pub = mesh.getRoomPubKey(idx);
+  for (int b = 0; b < PUB_KEY_SIZE; b++) {
+    snprintf(hex64 + b * 2, 3, "%02x", (unsigned int)pub[b]);
+  }
+
+  // URL-encode room name for use in URI
+  char enc_name[80] = {};
+  const char* room_name = mesh.getRoomName(idx);
+  int ei = 0;
+  for (int ni = 0; room_name[ni] && ei < (int)sizeof(enc_name) - 4; ni++) {
+    unsigned char c = (unsigned char)room_name[ni];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+        || c == '-' || c == '_' || c == '.' || c == '~') {
+      enc_name[ei++] = (char)c;
+    } else if (c == ' ') {
+      enc_name[ei++] = '+';
+    } else {
+      snprintf(enc_name + ei, 4, "%%%02X", (unsigned int)c);
+      ei += 3;
+    }
+  }
+  enc_name[ei] = 0;
+
+  // Build meshcore:// contact import URI (verified format from docs/qr_codes.md)
+  // type=3 = ADV_TYPE_ROOM — room server contact
+  String uri = "meshcore://contact/add?name=";
+  uri += enc_name;
+  uri += "&public_key=";
+  uri += hex64;
+  uri += "&type=3";
+
+  page += "<div class='card'><h2>Join QR &mdash; ";
+  page += room_name;
+  page += "</h2>";
+
+  // Generate QR code server-side using ricmoo/QRCode
+  // Version 7 (45x45): holds up to 154 bytes at ECC_LOW — enough for our URI (~136 chars max)
+  const int QR_VER = 7;
+  QRCode qrcode;
+  uint8_t qrData[qrcode_getBufferSize(QR_VER)];
+  int qr_ok = qrcode_initText(&qrcode, qrData, QR_VER, ECC_LOW, uri.c_str());
+
+  if (qr_ok != 0) {
+    page += "<p class='err'>QR generation failed (URI may be too long).</p>";
+  } else {
+    // Pack module bits: 1 bit per module, MSB-first, row by row
+    int sz = qrcode.size;
+    int byte_count = (sz * sz + 7) / 8;
+    uint8_t bits[256] = {};  // 254 bytes max for v7 45x45 QR
+    for (int y = 0; y < sz; y++) {
+      for (int x = 0; x < sz; x++) {
+        int bit_idx = y * sz + x;
+        if (qrcode_getModule(&qrcode, x, y)) {
+          bits[bit_idx >> 3] |= (uint8_t)(0x80u >> (bit_idx & 7));
+        }
+      }
+    }
+    String b64 = base64Encode(bits, (size_t)byte_count);
+
+    // Inline canvas renderer — all QR data is baked into the page, no external deps
+    page += "<div style='text-align:center;margin:12px 0'><canvas id='q'></canvas></div>"
+            "<script>(function(){"
+            "var d='";
+    page += b64;
+    page += "',sz=";
+    page += sz;
+    page += ",s=6,p=4;"  // s=pixel scale, p=quiet-zone modules
+            "var c=document.getElementById('q');"
+            "c.width=c.height=(sz+p*2)*s;"
+            "var ctx=c.getContext('2d');"
+            "ctx.fillStyle='white';ctx.fillRect(0,0,c.width,c.height);"
+            "ctx.fillStyle='black';"
+            "var b=atob(d);"
+            "for(var y=0;y<sz;y++)for(var x=0;x<sz;x++){"
+            "var i=y*sz+x;"
+            "if(b.charCodeAt(i>>3)&(0x80>>(i&7)))"
+            "ctx.fillRect((x+p)*s,(y+p)*s,s,s);}"
+            "})();</script>";
+  }
+
+  // URI as clickable text (on mobile, tapping may open companion app directly)
+  page += "<p style='font-size:0.8em;word-break:break-all'>"
+          "<b>URI:</b><br><a href='";
+  page += uri;
+  page += "'>";
+  page += uri;
+  page += "</a></p>";
+
+  // Security notice
+  page += "<p class='warn' style='font-size:0.85em'>&#9888; Anyone who scans this QR can add the room as a contact. ";
+  if (mesh.getRoomGuestPassword(idx)[0] == 0) {
+    page += "<b>No guest password set</b> &mdash; login is open to all.";
+  } else {
+    page += "Login still requires the room password.";
+  }
+  page += "</p>";
+
+  if (mesh.isRoomStealth(idx)) {
+    page += "<p style='font-size:0.85em;color:#aaa'>"
+            "&#128272; Stealth ON &mdash; room is not advertising. "
+            "This QR is the only out-of-band join path.</p>";
+  }
+
+  page += "<p><a href='/'>&#8592; Back</a></p></div>";
   page += FPSTR(HTML_FOOT);
   return page;
 }
@@ -560,6 +708,15 @@ void WebManager::setupRoutes() {
       bool s  = (req->getParam("stealth", true)->value() == "on");
       _mesh.setRoomStealth(idx, s);
       req->redirect("/");
+    });
+
+  // API: QR code page for a room
+  _server.on("/api/room/qr", HTTP_GET,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("idx")) { req->send(400, "text/plain", "missing idx"); return; }
+      int idx = req->getParam("idx")->value().toInt();
+      req->send(200, "text/html", buildQrPage(_mesh, idx));
     });
 
   // API: switch WiFi mode

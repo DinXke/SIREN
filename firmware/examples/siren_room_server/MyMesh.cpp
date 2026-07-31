@@ -1242,7 +1242,36 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off");
+  // "room qr <idx>" — print meshcore:// join URI to serial (or put in reply)
+  if (memcmp(args, "qr ", 3) == 0 || strcmp(args, "qr") == 0) {
+    const char* p = args + 2;
+    while (*p == ' ') p++;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    // Build 64-char hex public key
+    char hex64[65] = {};
+    for (int b = 0; b < PUB_KEY_SIZE; b++) {
+      snprintf(hex64 + b * 2, 3, "%02x", (unsigned int)rooms[idx].id.pub_key[b]);
+    }
+    // Build URI (room name used raw — ASCII names work fine in serial output)
+    char uri[160] = {};
+    snprintf(uri, sizeof(uri),
+             "meshcore://contact/add?name=%s&public_key=%s&type=3",
+             rooms[idx].name, hex64);
+    if (_fs) {
+      Serial.printf("Room[%d] join URI:\n%s\n", idx, uri);
+      reply[0] = 0;
+    } else {
+      strncpy(reply, uri, 159);
+      reply[159] = 0;
+    }
+    return;
+  }
+
+  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>");
 }
 
 /* ------------------------------------------------------------------ */
