@@ -48,6 +48,8 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _logging = false;
   region_load_active = false;
   set_radio_at = revert_radio_at = 0;
+  _mqtt_post_cb  = nullptr;
+  _mqtt_post_ctx = nullptr;
 
   memset(&_prefs, 0, sizeof(_prefs));
   _prefs.airtime_factor       = 1.0f;
@@ -733,6 +735,13 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   slot.num_posted++;
   savePostPool();   // persist to SPIFFS (JES-787)
+
+  // Notify MQTT transport (JES-792 Phase a) — publish encrypted envelope
+  if (_mqtt_post_cb) {
+    _mqtt_post_cb((int)ridx, free_slot->post_timestamp,
+                  free_slot->author.pub_key, free_slot->text,
+                  _mqtt_post_ctx);
+  }
 }
 
 void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post) {

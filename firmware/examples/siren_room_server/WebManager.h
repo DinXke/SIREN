@@ -10,6 +10,8 @@
 #include "MyMesh.h"
 #include "UITask.h"
 
+class MqttManager;  // forward declaration to avoid circular include
+
 #define WIFI_CONFIG_PATH      "/wifi_sta.json"
 #define WIFI_CONNECT_TIMEOUT_MS  15000
 
@@ -41,6 +43,7 @@ private:
   DNSServer        _dns;
   MultiRoomMesh&   _mesh;
   UITask*          _ui_task;
+  MqttManager*     _mqtt_mgr;
   bool             _started;
   bool             _dns_started;
 
@@ -79,6 +82,9 @@ public:
 
   /** Wire up the UITask so the web UI can read/set screensaver config. */
   void setUITask(UITask* t) { _ui_task = t; }
+
+  /** Wire up the MqttManager so the web UI can show MQTT status and config. */
+  void setMqttManager(MqttManager* m) { _mqtt_mgr = m; }
 
   /** Call once after the_mesh.begin() and SPIFFS is mounted. */
   void begin();

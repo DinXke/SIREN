@@ -235,8 +235,27 @@ Phase 5 must be completed and hardware-proven before Phase 6 begins.
 
 ---
 
+## MQTT as a Second Replication Transport (JES-792)
+
+MQTT provides a parallel, infrastructure-backed transport alongside the LoRa mesh anti-entropy:
+
+| Property | LoRa Mesh | MQTT |
+|---|---|---|
+| Range | RF-limited, mesh-extended | IP network (WiFi STA required) |
+| Encryption | ECDH per-sender-receiver | AES-256-CTR per-room key |
+| Duty cycle | 1% shared | No RF cost |
+| Availability | Mesh-resilient, no infrastructure | Requires broker + WiFi |
+
+**Phase (a)** (publish-only, JES-792) is independent of JES-723/724.
+**Phases (b) and (c)** build on the same version-vector model as LoRa anti-entropy — a single reconciliation function handles both transports.
+
+See `docs/mqtt.md` for the full MQTT specification and encryption details.
+
+---
+
 ## Related Issues
 
 - **JES-723**: Phase 5 — anti-entropy replication, two nodes
 - **JES-724**: Phase 6 — three-node triangle test
 - **JES-732**: Dest-hash collision fix (prerequisite for correct multi-room replication)
+- **JES-792**: MQTT transport + dual-path sync

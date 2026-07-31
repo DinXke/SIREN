@@ -172,6 +172,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   float         pending_freq, pending_bw;
   uint8_t       pending_sf, pending_cr;
 
+  /* ---- MQTT publish callback (JES-792) ---- */
+  typedef void (*PostPublishCallback)(int room_idx, uint32_t timestamp,
+                                      const uint8_t* author_pub,
+                                      const char* text, void* ctx);
+  PostPublishCallback _mqtt_post_cb;
+  void*               _mqtt_post_ctx;
+
   /* ---- Per-slot helpers ---- */
   void          addPost(RoomSlot& slot, ClientInfo* client, const char* text);
   void          pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post);
@@ -331,6 +338,13 @@ public:
   String getPostsFlatJson() const;
   /** Parse flat post key-value pairs from a full backup JSON and restore the pool. */
   bool   restorePostsFlatJson(const String& backup_json);
+
+  /* ---- MQTT publish callback (JES-792 Phase a) ---- */
+  /** Register the post-publish callback (called once from MqttManager::begin()). */
+  void setPostPublishCallback(PostPublishCallback cb, void* ctx) {
+    _mqtt_post_cb  = cb;
+    _mqtt_post_ctx = ctx;
+  }
 
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {

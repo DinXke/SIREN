@@ -2,6 +2,7 @@
 #ifdef ENABLE_WIFI_MGMT
 
 #include "WebManager.h"
+#include "MqttManager.h"
 #include <AsyncElegantOTA.h>
 #include <qrcode.h>
 
@@ -16,7 +17,8 @@
 //  Constructor
 // ---------------------------------------------------------------------------
 WebManager::WebManager(MultiRoomMesh& mesh)
-  : _server(80), _mesh(mesh), _ui_task(nullptr), _started(false), _dns_started(false),
+  : _server(80), _mesh(mesh), _ui_task(nullptr), _mqtt_mgr(nullptr),
+    _started(false), _dns_started(false),
     _mode(MODE_AP),
     _connect_started(0), _connecting(false)
 {
@@ -595,6 +597,11 @@ String WebManager::buildStatusPage(const char* ip) {
             "</div>";
   }
 
+  // MQTT section (JES-792)
+  if (_mqtt_mgr) {
+    page += _mqtt_mgr->buildWebSection();
+  }
+
   // OTA link
   page += "<div class='card'><a href='/update'>OTA Firmware Update</a></div>";
 
@@ -981,6 +988,85 @@ void WebManager::setupRoutes() {
         snprintf(cmd, sizeof(cmd), "set txpower %s",
                  req->getParam("txpower", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
+      }
+      req->redirect("/");
+    });
+
+  // API: MQTT enable/disable toggle (JES-792)
+  _server.on("/api/mqtt/toggle", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      if (!req->hasParam("enable", true)) { req->send(400, "text/plain", "missing enable"); return; }
+      char reply[160] = {};
+      bool en = (req->getParam("enable", true)->value() == "on");
+      _mqtt_mgr->handleMqttCommand(en ? "enable" : "disable", reply);
+      req->redirect("/");
+    });
+
+  // API: MQTT config form save (JES-792)
+  // Password: if submitted empty, keep existing; if non-empty, update.
+  _server.on("/api/mqtt/set", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      char reply[160] = {};
+      char cmd[200];
+
+      auto param = [&](const char* n) -> const char* {
+        return req->hasParam(n, true) ? req->getParam(n, true)->value().c_str() : nullptr;
+      };
+
+      const char* host = param("host");
+      if (host && host[0]) {
+        snprintf(cmd, sizeof(cmd), "set host %s", host);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* port = param("port");
+      if (port && port[0]) {
+        snprintf(cmd, sizeof(cmd), "set port %s", port);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* tls_v = param("tls");
+      if (tls_v) {
+        snprintf(cmd, sizeof(cmd), "set tls %s", (strcmp(tls_v, "on") == 0) ? "on" : "off");
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* ca_fp = param("ca_fp");
+      if (ca_fp) {
+        snprintf(cmd, sizeof(cmd), "set ca_fp %s", ca_fp);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* mu = param("user");
+      if (mu) {
+        snprintf(cmd, sizeof(cmd), "set user %s", mu);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      // Password: only update if non-empty (write-only — never echoed)
+      const char* mp = param("pass");
+      if (mp && mp[0]) {
+        snprintf(cmd, sizeof(cmd), "set pass %s", mp);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* cid = param("client_id");
+      if (cid) {
+        snprintf(cmd, sizeof(cmd), "set client_id %s", cid);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* nid = param("net_id");
+      if (nid && nid[0]) {
+        snprintf(cmd, sizeof(cmd), "set net_id %s", nid);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* qos_v = param("qos");
+      if (qos_v) {
+        snprintf(cmd, sizeof(cmd), "set qos %s", qos_v);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* intv = param("interval");
+      if (intv && intv[0]) {
+        snprintf(cmd, sizeof(cmd), "set interval %s", intv);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
       }
       req->redirect("/");
     });

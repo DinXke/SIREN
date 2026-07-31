@@ -221,3 +221,33 @@ For production deployments:
 - Store backups in a secure location (they contain private cryptographic keys)
 
 Loss of room identity keys means users need to re-join the room from scratch (the old room's history is also lost if the device is reset).
+
+**Note on MQTT credentials**: The MQTT password (`mqtt.pass`) is stored in `/mqtt_cfg.json` and is **NOT included in the backup export**. After restoring a backup, reconfigure MQTT credentials manually via web UI or CLI.
+
+---
+
+## MQTT Integration (JES-792)
+
+SIREN room servers optionally publish to an MQTT broker for remote monitoring and future cross-site synchronisation.
+
+### Enabling MQTT via CLI
+```
+mqtt set host broker.example.com
+mqtt set port 8883
+mqtt set tls on
+mqtt set ca_fp AA:BB:CC:...
+mqtt set user siren
+mqtt set pass <secret>
+mqtt enable
+mqtt status
+```
+
+### What is published
+| Topic | Description |
+|---|---|
+| `siren/<net_id>/room/<hash>/msg` | Encrypted post envelope (AES-256-CTR) |
+| `siren/<net_id>/room/<hash>/meta` | Room metadata (retained) |
+| `siren/<net_id>/node/<id>/status` | Online/offline + LWT (retained) |
+| `siren/<net_id>/node/<id>/vv` | Post watermarks per room (retained) |
+
+Post content is always encrypted — the broker never sees plaintext. See `docs/mqtt.md` for decryption instructions and the full specification.
