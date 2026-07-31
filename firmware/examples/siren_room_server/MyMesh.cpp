@@ -1599,6 +1599,119 @@ void MultiRoomMesh::loadPostPool() {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Post pool backup / restore (JES-790)                               */
+/* ------------------------------------------------------------------ */
+
+/** Extract a JSON quoted-string value, handling \" and \\ escapes.    */
+static bool extractJsonString(const String& json, const char* key,
+                              char* dest, size_t dlen) {
+  String k = String("\"") + key + "\":\"";
+  int pos = json.indexOf(k);
+  if (pos < 0) return false;
+  pos += k.length();
+
+  size_t out = 0;
+  while (pos < (int)json.length() && out < dlen - 1) {
+    char c = json[pos];
+    if (c == '\\' && pos + 1 < (int)json.length()) {
+      char n = json[pos + 1];
+      if      (n == '"')  { dest[out++] = '"';  pos += 2; }
+      else if (n == '\\') { dest[out++] = '\\'; pos += 2; }
+      else                { dest[out++] = n;    pos += 2; }
+    } else if (c == '"') {
+      break;
+    } else {
+      dest[out++] = c;
+      pos++;
+    }
+  }
+  dest[out] = '\0';
+  return true;
+}
+
+String MultiRoomMesh::getPostsFlatJson() const {
+  char hex[PUB_KEY_SIZE * 2 + 1];
+  String j;
+  int count = 0;
+
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    const PostInfo& p = _post_pool[i];
+    if (p.room_idx == 0xFF) continue;
+
+    char pfx[16];
+    snprintf(pfx, sizeof(pfx), "post%d_", count);
+
+    // room index, timestamp (stored as quoted strings for uniform parsing)
+    j += "\""; j += pfx; j += "ri\":\""; j += (int)p.room_idx;    j += "\",";
+    j += "\""; j += pfx; j += "ts\":\""; j += p.post_timestamp;   j += "\",";
+
+    // author public key (hex)
+    mesh::Utils::toHex(hex, p.author.pub_key, PUB_KEY_SIZE);
+    j += "\""; j += pfx; j += "ak\":\""; j += hex; j += "\",";
+
+    // text (escape " and \)
+    j += "\""; j += pfx; j += "tx\":\"";
+    for (const char* c = p.text; *c; c++) {
+      if      (*c == '"')  { j += "\\\""; }
+      else if (*c == '\\') { j += "\\\\"; }
+      else                 { j += *c; }
+    }
+    j += "\",";
+
+    count++;
+  }
+
+  j += "\"post_count\":\""; j += count; j += "\"";
+  return j;
+}
+
+bool MultiRoomMesh::restorePostsFlatJson(const String& json) {
+  char buf[12];
+  if (!extractJsonString(json, "post_count", buf, sizeof(buf))) return false;
+  int count = atoi(buf);
+  if (count <= 0) return true;
+
+  // Clear pool and per-room post counts
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    memset(&_post_pool[i], 0, sizeof(PostInfo));
+    _post_pool[i].room_idx = 0xFF;
+  }
+  for (int i = 0; i < MAX_ROOMS; i++) rooms[i].num_posted = 0;
+
+  char ri_str[4], ts_str[12], ak_hex[PUB_KEY_SIZE * 2 + 2];
+  char tx_str[MAX_POST_TEXT_LEN + 2];
+  char ri_k[24], ts_k[24], ak_k[24], tx_k[24];
+  int pool_idx = 0;
+
+  for (int n = 0; n < count && pool_idx < MAX_TOTAL_POSTS; n++) {
+    snprintf(ri_k, sizeof(ri_k), "post%d_ri", n);
+    snprintf(ts_k, sizeof(ts_k), "post%d_ts", n);
+    snprintf(ak_k, sizeof(ak_k), "post%d_ak", n);
+    snprintf(tx_k, sizeof(tx_k), "post%d_tx", n);
+
+    if (!extractJsonString(json, ri_k, ri_str, sizeof(ri_str))) continue;
+    if (!extractJsonString(json, ts_k, ts_str, sizeof(ts_str))) continue;
+    if (!extractJsonString(json, ak_k, ak_hex, sizeof(ak_hex))) continue;
+    extractJsonString(json, tx_k, tx_str, sizeof(tx_str));  // empty text OK
+
+    int ri = atoi(ri_str);
+    if (ri < 0 || ri >= MAX_ROOMS || !rooms[ri].active) continue;
+
+    PostInfo& entry = _post_pool[pool_idx];
+    if (!mesh::Utils::fromHex(entry.author.pub_key, PUB_KEY_SIZE, ak_hex)) continue;
+    entry.post_timestamp = (uint32_t)strtoul(ts_str, nullptr, 10);
+    strncpy(entry.text, tx_str, MAX_POST_TEXT_LEN);
+    entry.text[MAX_POST_TEXT_LEN] = '\0';
+    entry.room_idx = (uint8_t)ri;
+    rooms[ri].num_posted++;
+    pool_idx++;
+  }
+
+  savePostPool();
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
 /*  peer * CLI sub-commands                                             */
 /* ------------------------------------------------------------------ */
 void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {

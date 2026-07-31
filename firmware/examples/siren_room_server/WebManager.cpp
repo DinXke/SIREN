@@ -164,7 +164,7 @@ String WebManager::buildBackupJson() {
   const NodePrefs* p = _mesh.getNodePrefs();
 
   String j = "{";
-  j += "\"version\":\"1\",";
+  j += "\"version\":\"2\",";
   j += "\"node_name\":\"" + jsonEscape(p->node_name) + "\",";
   j += "\"admin_pass\":\"" + jsonEscape(p->password)  + "\",";
 
@@ -214,6 +214,9 @@ String WebManager::buildBackupJson() {
     if (i < MAX_ROOMS - 1) j += ",";
   }
 
+  // Post pool (JES-790): flat key-value pairs for all active posts
+  j += ",";
+  j += _mesh.getPostsFlatJson();
   j += "}";
   return j;
 }
@@ -243,7 +246,8 @@ bool WebManager::applyRestore(const String& json) {
 
   // Validate version
   char ver[4] = {};
-  if (!extractField("version", ver, sizeof(ver)) || strcmp(ver, "1") != 0) return false;
+  if (!extractField("version", ver, sizeof(ver)) ||
+      (strcmp(ver, "1") != 0 && strcmp(ver, "2") != 0)) return false;
 
   char reply[160];
   char val[128];
@@ -323,6 +327,11 @@ bool WebManager::applyRestore(const String& json) {
         _mesh.setRoomIdentityFromBytes(i, id_buf, n);
       }
     }
+  }
+
+  // Restore post pool for version 2 backups (JES-790)
+  if (strcmp(ver, "2") == 0) {
+    _mesh.restorePostsFlatJson(json);
   }
 
   return true;
@@ -947,7 +956,7 @@ void WebManager::setupRoutes() {
     [this](AsyncWebServerRequest* req, const String& filename,
            size_t index, uint8_t* data, size_t len, bool final) {
       if (index == 0) _restore_buf = "";
-      if (_restore_buf.length() + len < 32768) {  // 32 KB safety cap
+      if (_restore_buf.length() + len < 65536) {  // 64 KB cap (v2 backups include posts)
         _restore_buf += String((char*)data, len);
       }
     });

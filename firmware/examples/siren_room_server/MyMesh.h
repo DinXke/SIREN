@@ -326,6 +326,12 @@ public:
     return n;
   }
 
+  /* ---- Post pool backup / restore (JES-790) ---- */
+  /** Serialise active posts as flat JSON key-value pairs for inclusion in backup. */
+  String getPostsFlatJson() const;
+  /** Parse flat post key-value pairs from a full backup JSON and restore the pool. */
+  bool   restorePostsFlatJson(const String& backup_json);
+
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {
     return (i >= 0 && i < MAX_ROOMS) ? rooms[i].password : "";
