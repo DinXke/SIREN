@@ -20,6 +20,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 import uuid
 from typing import Optional
 
@@ -36,11 +37,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # App factory
 
-def create_app(host: str = "127.0.0.1", port: int = 8760) -> Flask:
+def create_app(host: str = "127.0.0.1", port: int = 8760, ssl: bool = False) -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="")
     app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
     app.config["_HOST"] = host
     app.config["_PORT"] = port
+    app.config["_SSL"] = ssl
 
     sock = Sock(app)
 
@@ -76,15 +78,32 @@ def create_app(host: str = "127.0.0.1", port: int = 8760) -> Flask:
     # -----------------------------------------------------------------------
     # Helpers
 
-    def _allowed_origin(origin: Optional[str], host: str, port: int) -> bool:
-        """Return True if the Origin is the local app or missing (same-origin)."""
+    def _allowed_origin(origin: Optional[str], host: str, port: int, ssl_mode: bool) -> bool:
+        """Return True if the Origin is the local app or missing (same-origin).
+
+        In SSL/remote mode (ssl_mode=True) also accepts any https:// origin whose
+        port matches the configured port (scheme+port check; host is not validated
+        because binding to 0.0.0.0 means the real client IP is unknown).
+        """
         if not origin:
             return True
-        return origin in (
+        # Always allow local origins (both http and https variants)
+        local_allowed = {
             f"http://{host}:{port}",
             f"http://localhost:{port}",
             f"http://127.0.0.1:{port}",
-        )
+            f"https://{host}:{port}",
+            f"https://localhost:{port}",
+            f"https://127.0.0.1:{port}",
+        }
+        if origin in local_allowed:
+            return True
+        # In remote SSL mode: accept https:// origins whose port matches
+        if ssl_mode:
+            parsed = urllib.parse.urlparse(origin)
+            if parsed.scheme == "https" and parsed.port == port:
+                return True
+        return False
 
     def _validate_text(text) -> Optional[str]:
         """Strip, validate and clamp text. Returns cleaned text or None on error."""
@@ -273,7 +292,8 @@ def create_app(host: str = "127.0.0.1", port: int = 8760) -> Flask:
         origin = request.headers.get("Origin")
         h = app.config["_HOST"]
         p = app.config["_PORT"]
-        if not _allowed_origin(origin, h, p):
+        s = app.config["_SSL"]
+        if not _allowed_origin(origin, h, p, s):
             log.warning("Rejected WS upgrade from non-local origin: %s", origin)
             return  # flask-sock will close the connection
 
@@ -337,8 +357,25 @@ if __name__ == "__main__":
                         help="Bind address (default: 127.0.0.1). "
                              "WARNING: binding to 0.0.0.0 exposes the mesh API with no auth.")
     parser.add_argument("--port", type=int, default=8760, help="Port (default: 8760)")
+    parser.add_argument("--ssl-cert", default=None,
+                        help="Path to SSL certificate file (PEM). Enables HTTPS when combined with --ssl-key.")
+    parser.add_argument("--ssl-key", default=None,
+                        help="Path to SSL private key file (PEM). Enables HTTPS when combined with --ssl-cert.")
     args = parser.parse_args()
 
-    app = create_app(host=args.host, port=args.port)
-    print(f"SIREN bridge listening on http://{args.host}:{args.port}")
-    app.run(host=args.host, port=args.port)
+    ssl_context = None
+    if args.ssl_cert and args.ssl_key:
+        if not os.path.isfile(args.ssl_cert):
+            print(f"ERROR: SSL certificate file not found: {args.ssl_cert}")
+            raise SystemExit(1)
+        if not os.path.isfile(args.ssl_key):
+            print(f"ERROR: SSL key file not found: {args.ssl_key}")
+            raise SystemExit(1)
+        ssl_context = (args.ssl_cert, args.ssl_key)
+
+    use_ssl = ssl_context is not None
+    scheme = "https" if use_ssl else "http"
+
+    app = create_app(host=args.host, port=args.port, ssl=use_ssl)
+    print(f"SIREN bridge listening on {scheme}://{args.host}:{args.port}")
+    app.run(host=args.host, port=args.port, ssl_context=ssl_context)

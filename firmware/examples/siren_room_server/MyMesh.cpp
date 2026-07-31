@@ -73,9 +73,13 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   memset(rooms, 0, sizeof(rooms));
   memset(_post_pool, 0, sizeof(_post_pool));
   for (int i = 0; i < MAX_TOTAL_POSTS; i++) _post_pool[i].room_idx = 0xFF;
+  memset(peers, 0, sizeof(peers));
+  _num_peers = 0;
+  _advert_interval_sec = 120;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
     rooms[i].active          = false;
+    rooms[i].stealth         = true;  // default: no adverts (stealth by default)
     rooms[i].next_client_idx = 0;
     rooms[i].num_posted      = 0;
     rooms[i].num_post_pushes = 0;
@@ -97,6 +101,21 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
 
   _cli.loadPrefs(_fs);
 
+#ifdef FORCE_RADIO_PREFS
+  // One-shot radio settings correction: overwrite any stale prefs from a
+  // previous firmware's SPIFFS while preserving node name, identity, and all
+  // non-radio settings.  After this boot the corrected values are persisted so
+  // a subsequent normal OTA (without FORCE_RADIO_PREFS) will load them cleanly.
+  _prefs.freq        = LORA_FREQ;
+  _prefs.sf          = LORA_SF;
+  _prefs.bw          = LORA_BW;
+  _prefs.cr          = LORA_CR;
+  _prefs.tx_power_dbm = LORA_TX_POWER;
+  _cli.savePrefs(_fs);
+  Serial.printf("[SIREN] FORCE_RADIO_PREFS: freq=%.3f sf=%d bw=%.1f cr=%d tx=%d — saved\n",
+                _prefs.freq, _prefs.sf, _prefs.bw, _prefs.cr, _prefs.tx_power_dbm);
+#endif
+
   // Load or create room identities + config
   loadRoomConfig();   // loads name/password overrides from /room_cfg
   for (int i = 0; i < MAX_ROOMS; i++) {
@@ -115,6 +134,8 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
     saveRoomConfig();
   }
 
+  loadPeerConfig();
+
   region_map.load(_fs);
 
   // Establish default scope
@@ -129,12 +150,15 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 
-  // Stagger initial advert timers per room to avoid collision
+  // Stagger initial advert timers per room to avoid collision.
+  // Stealth rooms keep timers at 0 (disabled) until visibility is enabled.
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
-    uint32_t offset_ms = (uint32_t)i * 15000;  // 15 s stagger
-    rooms[i].next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + offset_ms);
-    rooms[i].next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + offset_ms);
+    if (!rooms[i].stealth) {
+      uint32_t offset_ms = (uint32_t)i * 15000;  // 15 s stagger
+      rooms[i].next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + offset_ms);
+      rooms[i].next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + offset_ms);
+    }
   }
 
   board.setAdcMultiplier(_prefs.adc_multiplier);
@@ -169,14 +193,35 @@ void MultiRoomMesh::loadOrCreateRoomIdentity(int idx) {
   char key[16];
   snprintf(key, sizeof(key), "_room%d", idx);
 
-  if (!store.load(key, rooms[idx].id)) {
-    rooms[idx].id = radio_new_identity();
-    int attempts = 0;
-    while (attempts < 10 &&
-           (rooms[idx].id.pub_key[0] == 0x00 ||
-            rooms[idx].id.pub_key[0] == 0xFF)) {
+  // Backward-compat: if _room0 not found, fall back to legacy "_main" key
+  bool loaded = store.load(key, rooms[idx].id);
+  if (!loaded && idx == 0) {
+    loaded = store.load("_main", rooms[idx].id);
+    if (loaded) store.save(key, rooms[idx].id);  // migrate to _room0
+  }
+
+  if (!loaded) {
+    bool loaded_baked = false;
+#if defined(SIREN_DEFAULT_PRV_KEY_HEX)
+    if (idx == 0) {
+      uint8_t prv[64];
+      if (mesh::Utils::fromHex(prv, 64, SIREN_DEFAULT_PRV_KEY_HEX) &&
+          mesh::LocalIdentity::validatePrivateKey(prv)) {
+        rooms[idx].id.readFrom(prv, 64);
+        loaded_baked = true;
+      }
+      // else: baked key invalid or wrong length — fall through to random
+    }
+#endif
+    if (!loaded_baked) {
       rooms[idx].id = radio_new_identity();
-      attempts++;
+      int attempts = 0;
+      while (attempts < 10 &&
+             (rooms[idx].id.pub_key[0] == 0x00 ||
+              rooms[idx].id.pub_key[0] == 0xFF)) {
+        rooms[idx].id = radio_new_identity();
+        attempts++;
+      }
     }
     store.save(key, rooms[idx].id);
   }
@@ -219,14 +264,19 @@ void MultiRoomMesh::saveRoomConfig() {
   uint8_t n = MAX_ROOMS;
   f.write(&n, 1);
   for (int i = 0; i < MAX_ROOMS; i++) {
-    uint8_t active = rooms[i].active ? 1 : 0;
+    uint8_t active      = rooms[i].active  ? 1 : 0;
+    uint8_t stealth_b   = rooms[i].stealth ? 1 : 0;
     f.write(&active, 1);
     f.write((uint8_t*)rooms[i].name,          sizeof(rooms[i].name));
     f.write((uint8_t*)rooms[i].password,      sizeof(rooms[i].password));
     f.write((uint8_t*)rooms[i].guest_password,sizeof(rooms[i].guest_password));
     f.write((uint8_t*)&rooms[i].lat, 4);
     f.write((uint8_t*)&rooms[i].lon, 4);
+    f.write(&stealth_b, 1);   // appended last for backward compat
   }
+  // Global advert interval (seconds) — appended after all rooms for backward compat
+  uint16_t ais = _advert_interval_sec;
+  f.write((uint8_t*)&ais, 2);
   f.close();
 }
 
@@ -253,11 +303,60 @@ void MultiRoomMesh::loadRoomConfig() {
     if (f.read((uint8_t*)rooms[i].guest_password,  sizeof(rooms[i].guest_password))!= (int)sizeof(rooms[i].guest_password)) break;
     if (f.read((uint8_t*)&rooms[i].lat, 4) != 4) break;
     if (f.read((uint8_t*)&rooms[i].lon, 4) != 4) break;
+    // Stealth byte — appended in v2 of this format; default=1 (stealth) on EOF
+    uint8_t stealth_b = 1;
+    f.read(&stealth_b, 1);  // ignore return; default holds on short read
 
-    rooms[i].active = (active != 0);
+    rooms[i].active  = (active != 0);
+    rooms[i].stealth = (stealth_b != 0);
     if (rooms[i].active) _num_active_rooms++;
   }
+  // Global advert interval — appended after all rooms; default=120 on EOF
+  uint16_t ais = 120;
+  f.read((uint8_t*)&ais, 2);  // ignore return; default holds on short read
+  if (ais < 10 || ais > 3600) ais = 120;
+  _advert_interval_sec = ais;
   f.close();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stealth: visibility control per-room or all-rooms                  */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::setRoomStealth(int idx, bool s) {
+  int first = (idx < 0) ? 0 : idx;
+  int last  = (idx < 0) ? MAX_ROOMS - 1 : idx;
+  for (int i = first; i <= last; i++) {
+    if (idx >= 0 && i != idx) continue;
+    if (i < 0 || i >= MAX_ROOMS) continue;
+    rooms[i].stealth = s;
+    if (s) {
+      // Going stealth: disable advert timers
+      rooms[i].next_local_advert = 0;
+      rooms[i].next_flood_advert = 0;
+    } else if (rooms[i].active) {
+      // Becoming visible: schedule first advert soon (staggered per slot)
+      uint32_t offset_ms = (uint32_t)i * 3000;
+      rooms[i].next_local_advert = futureMillis(5000 + offset_ms);
+      rooms[i].next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + offset_ms);
+    }
+  }
+  saveRoomConfig();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Advert interval: global local advert period in seconds             */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::setAdvertIntervalSec(uint16_t sec) {
+  if (sec < 10) sec = 10;
+  if (sec > 3600) sec = 3600;
+  _advert_interval_sec = sec;
+  // Reschedule local advert timers for all visible active rooms
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!rooms[i].active || rooms[i].stealth) continue;
+    uint32_t offset_ms = (uint32_t)i * 3000;
+    rooms[i].next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + offset_ms);
+  }
+  saveRoomConfig();
 }
 
 /* ------------------------------------------------------------------ */
@@ -742,6 +841,7 @@ void MultiRoomMesh::sendRoomAdvertisement(RoomSlot& slot, int delay_millis, bool
 void MultiRoomMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
+    if (rooms[i].stealth) continue;  // stealth rooms never advertise
     sendRoomAdvertisement(rooms[i], delay_millis + (uint32_t)i * 1000, flood);
   }
 }
@@ -752,8 +852,10 @@ void MultiRoomMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
 void MultiRoomMesh::updateAdvertTimer() {
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
-    if (_prefs.advert_interval > 0) {
-      rooms[i].next_local_advert = futureMillis((uint32_t)_prefs.advert_interval * 2 * 60 * 1000);
+    if (rooms[i].stealth) {
+      rooms[i].next_local_advert = 0;  // stealth: disable
+    } else if (_advert_interval_sec > 0) {
+      rooms[i].next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000);
     } else {
       rooms[i].next_local_advert = 0;
     }
@@ -763,7 +865,9 @@ void MultiRoomMesh::updateAdvertTimer() {
 void MultiRoomMesh::updateFloodAdvertTimer() {
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
-    if (_prefs.flood_advert_interval > 0) {
+    if (rooms[i].stealth) {
+      rooms[i].next_flood_advert = 0;  // stealth: disable
+    } else if (_prefs.flood_advert_interval > 0) {
       rooms[i].next_flood_advert = futureMillis((uint32_t)_prefs.flood_advert_interval * 60 * 60 * 1000);
     } else {
       rooms[i].next_flood_advert = 0;
@@ -916,16 +1020,18 @@ void MultiRoomMesh::loop() {
 
     loopSlot(slot);
 
-    // Flood advert timer
-    if (slot.next_flood_advert && millisHasNowPassed(slot.next_flood_advert)) {
-      self_id = slot.id;
-      sendRoomAdvertisement(slot, 0, true);
-      slot.next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
-      slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
-    } else if (slot.next_local_advert && millisHasNowPassed(slot.next_local_advert)) {
-      self_id = slot.id;
-      sendRoomAdvertisement(slot, 0, false);
-      slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+    // Advert timers — stealth rooms never advertise; timers stay 0 (never fire)
+    if (!slot.stealth) {
+      if (slot.next_flood_advert && millisHasNowPassed(slot.next_flood_advert)) {
+        self_id = slot.id;
+        sendRoomAdvertisement(slot, 0, true);
+        slot.next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+        slot.next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + (uint32_t)i * 15000);
+      } else if (slot.next_local_advert && millisHasNowPassed(slot.next_local_advert)) {
+        self_id = slot.id;
+        sendRoomAdvertisement(slot, 0, false);
+        slot.next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + (uint32_t)i * 15000);
+      }
     }
   }
 
@@ -1032,6 +1138,79 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- stealth on|off|status — global (all rooms) visibility control ----
+  if (memcmp(command, "stealth", 7) == 0) {
+    const char* arg = command + 7;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "on") == 0) {
+      setRoomStealth(-1, true);   // all rooms
+      strcpy(reply, "OK - stealth ON (all rooms hidden, no adverts)");
+    } else if (strcmp(arg, "off") == 0) {
+      setRoomStealth(-1, false);  // all rooms
+      strcpy(reply, "OK - stealth OFF (all rooms visible, adverts enabled)");
+    } else {
+      // "stealth status" or just "stealth"
+      bool any_visible = false;
+      for (int i = 0; i < MAX_ROOMS; i++) {
+        if (rooms[i].active && !rooms[i].stealth) { any_visible = true; break; }
+      }
+      sprintf(reply, "stealth=%s (%d active rooms)",
+              any_visible ? "partial/off" : "on",
+              _num_active_rooms);
+    }
+    return;
+  }
+
+  // ---- set txpower <n> — applies live and persists ----
+  if (memcmp(command, "set txpower ", 12) == 0) {
+    int8_t pwr = (int8_t)atoi(command + 12);
+    if (pwr < 2 || pwr > 22) {
+      strcpy(reply, "Err: txpower must be 2-22 dBm");
+    } else {
+      _prefs.tx_power_dbm = pwr;
+      _cli.savePrefs(_fs);
+      setTxPower(pwr);
+      sprintf(reply, "OK - txpower %d dBm applied", pwr);
+    }
+    return;
+  }
+
+  // ---- repeater / global-settings guard: management room only ----
+  // Commands that touch global node-prefs (repeat, flood limits, region)
+  // must only be issued from room[0] (management room) or serial CLI.
+  if (sender_timestamp != 0 && _active_slot != 0) {
+    if (memcmp(command, "set repeat", 10) == 0 ||
+        memcmp(command, "set flood.max", 13) == 0 ||
+        memcmp(command, "region ", 7) == 0) {
+      strcpy(reply, "Err - repeater settings only available on management room");
+      return;
+    }
+  }
+
+  // ---- peer management commands (Phase 5 ground work) ----
+  if (memcmp(command, "peer", 4) == 0 && (command[4] == ' ' || command[4] == 0)) {
+    handlePeerCommand(command + 4, reply);
+    return;
+  }
+
+  // ---- advert interval [<seconds>] — global local advert period ----
+  if (memcmp(command, "advert interval", 15) == 0) {
+    const char* arg = command + 15;
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+      sprintf(reply, "advert interval=%d s (range 10-3600)", (int)_advert_interval_sec);
+    } else {
+      int sec = atoi(arg);
+      if (sec < 10 || sec > 3600) {
+        strcpy(reply, "Err: interval must be 10-3600 seconds");
+      } else {
+        setAdvertIntervalSec((uint16_t)sec);
+        sprintf(reply, "OK - advert interval %d s", (int)_advert_interval_sec);
+      }
+    }
+    return;
+  }
+
   // Fall through to shared CommonCLI
   _cli.handleCommand(sender_timestamp, command, reply);
 }
@@ -1047,8 +1226,9 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     if (_fs) {  // serial output
       Serial.printf("Rooms (%d/%d active):\n", _num_active_rooms, MAX_ROOMS);
       for (int i = 0; i < MAX_ROOMS; i++) {
-        Serial.printf("  [%d] %s  name='%s'  id=", i,
-                      rooms[i].active ? "ON " : "OFF", rooms[i].name);
+        Serial.printf("  [%d] %s  name='%s'  stealth=%s  id=", i,
+                      rooms[i].active ? "ON " : "OFF", rooms[i].name,
+                      rooms[i].stealth ? "on" : "off");
         if (rooms[i].active) {
           mesh::Utils::printHex(Serial, rooms[i].id.pub_key, 4);
           Serial.printf("...  clients=%d  posts=%d",
@@ -1114,6 +1294,25 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
+  // "room stealth <idx> on|off" — per-room visibility
+  if (memcmp(args, "stealth ", 8) == 0) {
+    char* p = args + 8;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS) { strcpy(reply, "Err - invalid room idx"); return; }
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    if (strcmp(p, "on") == 0) {
+      setRoomStealth(idx, true);
+      sprintf(reply, "OK - room[%d] stealth ON", idx);
+    } else if (strcmp(p, "off") == 0) {
+      setRoomStealth(idx, false);
+      sprintf(reply, "OK - room[%d] stealth OFF (visible)", idx);
+    } else {
+      sprintf(reply, "room[%d] stealth=%s", idx, rooms[idx].stealth ? "on" : "off");
+    }
+    return;
+  }
+
   // "room del <idx>"
   if (memcmp(args, "del ", 4) == 0) {
     int idx = atoi(args + 4);
@@ -1129,7 +1328,276 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <value>");
+  // "room qr <idx>" — print meshcore:// join URI to serial (or put in reply)
+  if (memcmp(args, "qr ", 3) == 0 || strcmp(args, "qr") == 0) {
+    const char* p = args + 2;
+    while (*p == ' ') p++;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    // Build 64-char hex public key
+    char hex64[65] = {};
+    for (int b = 0; b < PUB_KEY_SIZE; b++) {
+      snprintf(hex64 + b * 2, 3, "%02x", (unsigned int)rooms[idx].id.pub_key[b]);
+    }
+    // Build URI (room name used raw — ASCII names work fine in serial output)
+    char uri[160] = {};
+    snprintf(uri, sizeof(uri),
+             "meshcore://contact/add?name=%s&public_key=%s&type=3",
+             rooms[idx].name, hex64);
+    if (_fs) {
+      Serial.printf("Room[%d] join URI:\n%s\n", idx, uri);
+      reply[0] = 0;
+    } else {
+      strncpy(reply, uri, 159);
+      reply[159] = 0;
+    }
+    return;
+  }
+
+  // "room clients <idx>" — list clients in a room with permissions + last seen
+  if (memcmp(args, "clients", 7) == 0) {
+    const char* p = args + 7;
+    while (*p == ' ') p++;
+    int idx = (*p >= '0' && *p <= '9') ? atoi(p) : 0;
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    int n = rooms[idx].acl.getNumClients();
+    if (_fs) {
+      Serial.printf("room[%d] '%s' — %d client(s):\n", idx, rooms[idx].name, n);
+      for (int i = 0; i < n; i++) {
+        ClientInfo* c = rooms[idx].acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        const char* role = c->isAdmin() ? "admin" :
+          ((c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_WRITE ? "rw" :
+           (c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_ONLY  ? "ro" : "guest");
+        Serial.printf("  [%d] %s  ", i, role);
+        mesh::Utils::printHex(Serial, c->id.pub_key, 6);
+        Serial.printf("...  last=%lu\n", (unsigned long)c->last_activity);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "room[%d] %d clients", idx, n);
+    }
+    return;
+  }
+
+  // "room setperm <room_idx> <hex_pubkey> <perms>" — set ACL permissions in a specific room
+  if (memcmp(args, "setperm ", 8) == 0) {
+    char* p = args + 8;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // p now points to "<hex_pubkey> <perms>"
+    char* sp = strchr(p, ' ');
+    if (!sp) { strcpy(reply, "Err - usage: room setperm <idx> <hex> <perms>"); return; }
+    *sp++ = 0;
+    uint8_t pubkey[PUB_KEY_SIZE];
+    int hex_len = min((int)strlen(p), PUB_KEY_SIZE * 2);
+    if (mesh::Utils::fromHex(pubkey, hex_len / 2, p)) {
+      uint8_t perms = atoi(sp);
+      if (rooms[idx].acl.applyPermissions(rooms[idx].id, pubkey, hex_len / 2, perms)) {
+        rooms[idx].dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+        sprintf(reply, "OK - room[%d] perm set", idx);
+      } else {
+        strcpy(reply, "Err - pubkey not found or invalid");
+      }
+    } else {
+      strcpy(reply, "Err - bad pubkey hex");
+    }
+    return;
+  }
+
+  // "room status <idx>" — per-client last-contact + unsynced post count
+  if (memcmp(args, "status", 6) == 0) {
+    const char* p = args + 6;
+    while (*p == ' ') p++;
+    int idx = (*p >= '0' && *p <= '9') ? atoi(p) : 0;
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    RoomSlot& slot = rooms[idx];
+    int n = slot.acl.getNumClients();
+    if (_fs) {
+      Serial.printf("room[%d] '%s'  posts=%d  clients=%d:\n",
+                    idx, slot.name, (int)slot.num_posted, n);
+      for (int i = 0; i < n; i++) {
+        ClientInfo* c = slot.acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        const char* role = c->isAdmin() ? "admin" :
+          ((c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_WRITE ? "rw" :
+           (c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_ONLY  ? "ro" : "guest");
+        uint8_t lag = getUnsyncedCount(slot, c);
+        Serial.printf("  [%d] %s  ", i, role);
+        mesh::Utils::printHex(Serial, c->id.pub_key, 6);
+        Serial.printf("...  last_act=%lu  unsynced=%d\n",
+                      (unsigned long)c->last_activity, (int)lag);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "room[%d] posts=%d clients=%d", idx, (int)slot.num_posted, n);
+    }
+    return;
+  }
+
+  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Peer config persistence                                             */
+/* ------------------------------------------------------------------ */
+#define PEER_CFG_PATH "/peer_cfg"
+
+void MultiRoomMesh::savePeerConfig() {
+  if (!_fs) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(PEER_CFG_PATH, "w");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(PEER_CFG_PATH);
+  File f = _fs->open(PEER_CFG_PATH, FILE_O_WRITE);
+#else
+  File f = _fs->open(PEER_CFG_PATH, "w", true);
+#endif
+  if (!f) return;
+  uint8_t n = MAX_PEERS;
+  f.write(&n, 1);
+  for (int i = 0; i < MAX_PEERS; i++) {
+    uint8_t active = peers[i].active ? 1 : 0;
+    f.write(&active, 1);
+    f.write((uint8_t*)peers[i].name, sizeof(peers[i].name));
+    f.write(peers[i].pub_key, PUB_KEY_SIZE);
+    f.write((uint8_t*)&peers[i].last_contact, 4);
+  }
+  f.close();
+}
+
+void MultiRoomMesh::loadPeerConfig() {
+  if (!_fs || !_fs->exists(PEER_CFG_PATH)) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(PEER_CFG_PATH, "r");
+#else
+  File f = _fs->open(PEER_CFG_PATH);
+#endif
+  if (!f) return;
+  uint8_t n = 0;
+  if (f.read(&n, 1) != 1) { f.close(); return; }
+  if (n > MAX_PEERS) n = MAX_PEERS;
+  _num_peers = 0;
+  for (int i = 0; i < n; i++) {
+    uint8_t active = 0;
+    if (f.read(&active, 1) != 1) break;
+    if (f.read((uint8_t*)peers[i].name, sizeof(peers[i].name)) != (int)sizeof(peers[i].name)) break;
+    if (f.read(peers[i].pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+    if (f.read((uint8_t*)&peers[i].last_contact, 4) != 4) break;
+    peers[i].active = (active != 0);
+    if (peers[i].active) _num_peers++;
+  }
+  f.close();
+}
+
+/* ------------------------------------------------------------------ */
+/*  peer * CLI sub-commands                                             */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
+  while (*args == ' ') args++;
+
+  // "peer list" — list configured peer room servers
+  if (strcmp(args, "list") == 0 || strcmp(args, "ls") == 0 || args[0] == 0) {
+    if (_fs) {
+      Serial.printf("Peers (%d/%d configured):\n", _num_peers, MAX_PEERS);
+      for (int i = 0; i < MAX_PEERS; i++) {
+        if (!peers[i].active) continue;
+        Serial.printf("  [%d] '%s'  key=", i, peers[i].name);
+        mesh::Utils::printHex(Serial, peers[i].pub_key, 6);
+        Serial.printf("...  last_contact=%lu\n", (unsigned long)peers[i].last_contact);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "%d peers", _num_peers);
+    }
+    return;
+  }
+
+  // "peer add <hex64> <name>" — add a peer by 64-char hex public key
+  if (memcmp(args, "add ", 4) == 0) {
+    char* p = args + 4;
+    while (*p == ' ') p++;
+    // expect 64 hex chars = 32 bytes
+    int hex_chars = 0;
+    while (p[hex_chars] && p[hex_chars] != ' ') hex_chars++;
+    if (hex_chars < 8) { strcpy(reply, "Err - need at least 4-byte hex pubkey"); return; }
+    int byte_len = hex_chars / 2;
+    if (byte_len > PUB_KEY_SIZE) byte_len = PUB_KEY_SIZE;
+    uint8_t key[PUB_KEY_SIZE] = {};
+    if (!mesh::Utils::fromHex(key, byte_len, p)) {
+      strcpy(reply, "Err - bad hex pubkey");
+      return;
+    }
+    char* name_p = p + hex_chars;
+    while (*name_p == ' ') name_p++;
+    // Find free slot
+    for (int i = 0; i < MAX_PEERS; i++) {
+      if (!peers[i].active) {
+        peers[i].active = true;
+        memcpy(peers[i].pub_key, key, PUB_KEY_SIZE);
+        StrHelper::strncpy(peers[i].name, name_p[0] ? name_p : "peer", sizeof(peers[i].name));
+        peers[i].last_contact = 0;
+        _num_peers++;
+        savePeerConfig();
+        sprintf(reply, "OK - peer[%d] '%s' added", i, peers[i].name);
+        return;
+      }
+    }
+    strcpy(reply, "Err - peer list full");
+    return;
+  }
+
+  // "peer del <idx>" — remove a peer
+  if (memcmp(args, "del ", 4) == 0) {
+    int idx = atoi(args + 4);
+    if (idx < 0 || idx >= MAX_PEERS || !peers[idx].active) {
+      strcpy(reply, "Err - peer not active or invalid idx");
+      return;
+    }
+    peers[idx].active = false;
+    _num_peers--;
+    savePeerConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+
+  // "peer status" — show peer liveness (Phase 5 replication not yet active)
+  if (strcmp(args, "status") == 0) {
+    if (_fs) {
+      Serial.printf("Peer status (%d configured; Phase 5 replication not yet active):\n", _num_peers);
+      for (int i = 0; i < MAX_PEERS; i++) {
+        if (!peers[i].active) continue;
+        Serial.printf("  [%d] '%s'  last_contact=%lu\n",
+                      i, peers[i].name, (unsigned long)peers[i].last_contact);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "peers=%d (Phase 5 replication not active)", _num_peers);
+    }
+    return;
+  }
+
+  // "peer sync" — stub until Phase 5
+  if (strcmp(args, "sync") == 0) {
+    strcpy(reply, "OK - sync stub (Phase 5 anti-entropy not yet active)");
+    return;
+  }
+
+  strcpy(reply, "Err - usage: peer list|add <hex> <name>|del <idx>|status|sync");
 }
 
 /* ------------------------------------------------------------------ */

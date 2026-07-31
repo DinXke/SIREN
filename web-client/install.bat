@@ -1,12 +1,13 @@
 @echo off
 REM SIREN Web Client -- install and start (Windows)
-REM Usage: install.bat [--port 8760] [--host 127.0.0.1]
+REM Usage: install.bat [--port 8760] [--host 127.0.0.1] [--https]
 
 setlocal EnableDelayedExpansion
 
 set SCRIPT_DIR=%~dp0
 set HOST=127.0.0.1
 set PORT=8760
+set USE_HTTPS=0
 
 REM Parse optional args
 :parse_args
@@ -19,6 +20,11 @@ if "%~1"=="--port" (
 if "%~1"=="--host" (
     set HOST=%~2
     shift & shift
+    goto parse_args
+)
+if "%~1"=="--https" (
+    set USE_HTTPS=1
+    shift
     goto parse_args
 )
 echo Unknown option: %~1
@@ -74,11 +80,60 @@ if exist "%FRONTEND_DIR%\package.json" (
     )
 )
 
+REM ---- SSL certificates (if --https) ----
+set SSL_ARGS=
+set SCHEME=http
+if "%USE_HTTPS%"=="1" (
+    where openssl >nul 2>&1
+    if errorlevel 1 (
+        REM openssl not on PATH -- try to locate it next to a Git for Windows install
+        set "GIT_OPENSSL="
+        for /f "delims=" %%G in ('where git 2^>nul') do (
+            if not defined GIT_OPENSSL (
+                REM git.exe lives in <git-root>\cmd\ or <git-root>\bin\; go one level up
+                for %%P in ("%%~dpG..") do set "GIT_ROOT=%%~fP"
+                if exist "!GIT_ROOT!\usr\bin\openssl.exe" (
+                    set "GIT_OPENSSL=!GIT_ROOT!\usr\bin"
+                )
+            )
+        )
+        if defined GIT_OPENSSL (
+            echo [SSL] Found openssl via Git for Windows: !GIT_OPENSSL!
+            set "PATH=!GIT_OPENSSL!;!PATH!"
+        ) else (
+            echo ERROR: openssl not found.
+            echo openssl ships with Git for Windows ^(usr\bin\openssl.exe inside your Git install^).
+            echo Make sure Git for Windows is installed, then either:
+            echo   1. Re-run this script -- it will locate openssl automatically via 'where git'
+            echo   2. Add the usr\bin folder inside your Git install to PATH manually
+            echo Alternatively, install mkcert to generate trusted certificates.
+            exit /b 1
+        )
+    )
+    set CERT_DIR=!SCRIPT_DIR!.certs
+    if not exist "!CERT_DIR!\" mkdir "!CERT_DIR!"
+    if not exist "!CERT_DIR!\cert.pem" if not exist "!CERT_DIR!\key.pem" (
+        echo [SSL] Generating self-signed certificate...
+        openssl req -x509 -newkey rsa:2048 -nodes -keyout "!CERT_DIR!\key.pem" -out "!CERT_DIR!\cert.pem" -days 365 -subj "/CN=SIREN" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+        if errorlevel 1 (
+            echo ERROR: Failed to generate SSL certificate.
+            exit /b 1
+        )
+    ) else (
+        echo [SSL] Using existing certificates in .certs\
+    )
+    set SSL_ARGS=--ssl-cert "!CERT_DIR!\cert.pem" --ssl-key "!CERT_DIR!\key.pem"
+    set SCHEME=https
+)
+
 REM ---- Start server ----
-echo [4/4] Starting SIREN bridge on http://%HOST%:%PORT% ...
+echo [4/4] Starting SIREN bridge on %SCHEME%://%HOST%:%PORT% ...
 echo.
-echo   Open http://%HOST%:%PORT% in your browser
+echo   Open %SCHEME%://%HOST%:%PORT% in your browser
+if "%USE_HTTPS%"=="1" (
+    echo   Browser will show a certificate warning - click Advanced -^> Proceed. This is normal for self-signed certs.
+)
 echo   Press Ctrl+C to stop.
 echo.
 
-"%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%server\app.py" --host "%HOST%" --port "%PORT%"
+"%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%server\app.py" --host "%HOST%" --port "%PORT%" %SSL_ARGS%

@@ -27,6 +27,7 @@
             border-radius: 4px; cursor: pointer; font-size: 13px; }
         #connect-section button:hover { background: #14919b; }
         #connect-section button:disabled { background: #666; cursor: not-allowed; }
+        #ble-hint { font-size: 11px; color: #888; margin-top: 4px; margin-bottom: 4px; }
         #status-line { font-size: 12px; color: #aaa; margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.05);
             border-radius: 4px; }
 
@@ -98,6 +99,7 @@
                     <button id="btn-serial">Serial</button>
                     <button id="btn-ble">Bluetooth</button>
                 </div>
+                <div id="ble-hint">Vereist eenmalig koppelen in Windows (PIN 123456).</div>
                 <div id="status-line">Disconnected</div>
             </div>
             <ul id="channel-list"></ul>
@@ -308,11 +310,11 @@ class Codec {
     static parseContactInfo(payload) {
         // RESP_CODE_CONTACT: [3, pub_key[32], type(1), flags(1), out_path_len(1),
         //   out_path[64], name[32 z-padded], last_advert_ts_u32, gps_lat_i32, gps_lon_i32, lastmod_u32]
-        if (payload.length < 1 + 32 + 1 + 1 + 1 + 64 + 32 + 4) return null;
+        if (payload.length < 36 + 64 + 32 + 4) return null;
         const pubKey = payload.slice(1, 1 + PUB_KEY_SIZE);
         const type = payload[33];
-        const name = readString(payload, 37 + 64, 32);
-        const lastAdvertTs = readUint32LE(payload, 37 + 64 + 32);
+        const name = readString(payload, 36 + 64, 32);
+        const lastAdvertTs = readUint32LE(payload, 36 + 64 + 32);
         const isRoom = type === ADV_TYPE_ROOM;
         return {
             pubKeyPrefix: bytesToHex(pubKey.slice(0, 6)),
@@ -503,22 +505,61 @@ class BleTransport {
 
     async connect() {
         const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        const NUS_RX_UUID    = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+        const NUS_TX_UUID    = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
         try {
             this.device = await navigator.bluetooth.requestDevice({
                 filters: [{ services: [NUS_SERVICE_UUID] }],
             });
-            const gatt = await this.device.gatt.connect();
-            const service = await gatt.getPrimaryService(NUS_SERVICE_UUID);
-            this.rxChar = await service.getCharacteristic('6e400002-b5a3-f393-e0a9-e50e24dcca9e');
-            this.txChar = await service.getCharacteristic('6e400003-b5a3-f393-e0a9-e50e24dcca9e');
-            await this.txChar.startNotifications();
-            this.txChar.addEventListener('characteristicvaluechanged', (e) => {
-                const payload = new Uint8Array(e.target.value.buffer);
-                if (this.frameCallback) {
-                    this.frameCallback(payload);
+
+            // SC/MITM bonding causes a transient GATT disconnect right after pairing.
+            // Retry the connect + service-discovery sequence with exponential back-off.
+            // Bonded devices may still trigger transient disconnects; give them time to settle.
+            let lastErr;
+            const maxAttempts = 5;
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                try {
+                    if (attempt > 0) {
+                        const delayMs = Math.min(500 * Math.pow(2, attempt - 1), 10000);
+                        await new Promise(r => setTimeout(r, delayMs));
+                    }
+                    const server = await this.device.gatt.connect();
+                    const service = await server.getPrimaryService(NUS_SERVICE_UUID);
+                    this.rxChar = await service.getCharacteristic(NUS_RX_UUID);
+                    this.txChar = await service.getCharacteristic(NUS_TX_UUID);
+                    await this.txChar.startNotifications();
+                    this.txChar.addEventListener('characteristicvaluechanged', (e) => {
+                        const payload = new Uint8Array(e.target.value.buffer);
+                        if (this.frameCallback) this.frameCallback(payload);
+                    });
+                    // Register disconnect handler only AFTER full setup so bonding
+                    // disconnects during connect() don't null out state mid-sequence.
+                    this.device.addEventListener('gattserverdisconnected', () => {
+                        this.rxChar = null;
+                        this.txChar = null;
+                    });
+                    return; // success
+                } catch (e) {
+                    lastErr = e;
+                    // Check for transient GATT errors that should be retried
+                    const errMsg = (e.message || '').toLowerCase();
+                    const isGattErr = errMsg.includes('gatt') ||
+                                      errMsg.includes('disconnected') ||
+                                      e.name === 'NetworkError';
+                    if (!isGattErr || attempt === maxAttempts - 1) {
+                        throw e; // non-GATT error or final attempt — don't retry further
+                    }
                 }
-            });
+            }
+            throw lastErr;
         } catch (err) {
+            const errMsg = (err.message || '').toLowerCase();
+            const isGattDisconnect = errMsg.includes('gatt') && errMsg.includes('disconnected');
+            if (isGattDisconnect) {
+                throw new Error(
+                    `Bluetooth-koppeling vereist. Zorg dat de radio is gekoppeld in Windows-instellingen > Bluetooth (PIN 123456). Sluit andere Bluetooth-apps, start de browser opnieuw, en probeer het opnieuw. Of gebruik de Serial-verbinding via USB. [${err.name}]`
+                );
+            }
             throw new Error(`BLE connect failed: ${err.message}`);
         }
     }
@@ -658,9 +699,16 @@ class SirenApp {
         const btn = document.getElementById('btn-serial');
         const btnBle = document.getElementById('btn-ble');
         const banner = document.getElementById('compat-banner');
+        const bleHint = document.getElementById('ble-hint');
 
         if (!hasSerial) btn.disabled = true;
         if (!hasBluetooth) btnBle.disabled = true;
+
+        // Show secure-context hint if BLE is unavailable due to non-secure context
+        if (!window.isSecureContext && bleHint) {
+            bleHint.textContent = 'Bluetooth vereist HTTPS. Start de server met de --https vlag voor remote toegang.';
+        }
+
         if (hasSerial && hasBluetooth) {
             banner.classList.add('ok');
             banner.innerHTML = '✅ Web Serial and Bluetooth available<button id="banner-close">Dismiss</button>';
@@ -758,8 +806,18 @@ class SirenApp {
             await this.handshake();
         } catch (err) {
             console.error('BLE connect error:', err);
-            document.getElementById('status-line').textContent = `Error: ${err.message}`;
+            const errMsg = err.message || '';
+            // Check if it's a pairing-related error or something else
+            if (errMsg.includes('Bluetooth-koppeling vereist')) {
+                document.getElementById('status-line').textContent = `Error: ${errMsg}`;
+            } else if (errMsg.includes('BLE connect failed')) {
+                document.getElementById('status-line').textContent = `Error: ${errMsg}`;
+            } else {
+                // Handshake or other error - provide context
+                document.getElementById('status-line').textContent = `Error: Verbinding verbroken (${errMsg.substring(0, 60)}...)`;
+            }
             this.connected = false;
+            this.transport = null;
         }
     }
 
@@ -832,6 +890,8 @@ class SirenApp {
                         status: 'confirmed',
                     });
                 }
+                // Drain next message
+                this.drainMessages();
             } else if (code === RESP_CODE_CHANNEL_MSG_RECV_V3) {
                 const msg = Codec.parseChannelMsgRecvV3(payload);
                 if (msg) {
@@ -846,6 +906,8 @@ class SirenApp {
                         status: 'confirmed',
                     });
                 }
+                // Drain next message
+                this.drainMessages();
             } else if (code === RESP_CODE_SENT) {
                 // Mark message as sent; extract expected_ack at offset 2
                 if (payload.length >= 6) {
@@ -1051,11 +1113,167 @@ window.addEventListener('DOMContentLoaded', () => {
     new SirenApp();
     // Codec self-test
     {
-        const test1 = Codec.buildDeviceQuery(3);
-        console.assert(test1.length === 2 && test1[0] === 22, 'buildDeviceQuery failed');
-        const test2 = Codec.buildAppStart('test');
-        console.assert(test2.length >= 8, 'buildAppStart failed');
-        console.log('✓ Codec self-tests passed');
+        const tests = [];
+
+        // Test 1: SerialTransport framing round-trip
+        {
+            const originalPayload = Codec.buildDeviceQuery(3);
+            const transport = new SerialTransport();
+            let receivedPayload = null;
+            transport.onFrame((payload) => {
+                receivedPayload = payload;
+            });
+
+            // Frame the payload: 0x3e, lenLSB, lenMSB, payload
+            const framedBytes = new Uint8Array(1 + 2 + originalPayload.length);
+            framedBytes[0] = 0x3e;
+            framedBytes[1] = originalPayload.length & 0xff;
+            framedBytes[2] = (originalPayload.length >> 8) & 0xff;
+            framedBytes.set(originalPayload, 3);
+
+            // Split into two chunks and feed separately
+            const chunk1 = framedBytes.slice(0, Math.ceil(framedBytes.length / 2));
+            const chunk2 = framedBytes.slice(Math.ceil(framedBytes.length / 2));
+            transport.processBytes(chunk1);
+            transport.processBytes(chunk2);
+
+            tests.push({
+                ok: receivedPayload &&
+                    receivedPayload.length === originalPayload.length &&
+                    Array.from(receivedPayload).every((b, i) => b === originalPayload[i]),
+                name: 'SerialTransport framing round-trip'
+            });
+        }
+
+        // Test 2: Parse RESP_CODE_CONTACT (code 3)
+        {
+            const payload = new Uint8Array(1 + 32 + 1 + 1 + 1 + 64 + 32 + 4);
+            payload[0] = RESP_CODE_CONTACT;
+            // pubKey[32] at [1..32]
+            for (let i = 1; i < 33; i++) payload[i] = 0xaa;
+            payload[33] = ADV_TYPE_ROOM; // type
+            payload[34] = 0; // flags
+            payload[35] = 0; // out_path_len
+            // path[64] at [36..99]
+            // name[32] at [100..131]
+            const name = 'TestRoom';
+            new TextEncoder().encode(name).forEach((b, i) => {
+                payload[100 + i] = b;
+            });
+            // lastAdvertTs at [132..135]
+            writeUint32LE(payload, 132, 0x12345678);
+
+            const contact = Codec.parseContactInfo(payload);
+            tests.push({
+                ok: contact &&
+                    contact.pubKeyPrefix === 'aaaaaaaaaaaa' &&
+                    contact.name === 'TestRoom' &&
+                    contact.isRoom === true,
+                name: 'Parse RESP_CODE_CONTACT'
+            });
+        }
+
+        // Test 3: Parse RESP_CODE_CONTACT_MSG_RECV_V3 (code 16, txt_type 0 = PLAIN)
+        {
+            const text = 'Hello';
+            const textBytes = new TextEncoder().encode(text);
+            const payload = new Uint8Array(1 + 1 + 2 + 6 + 1 + 1 + 4 + textBytes.length);
+            payload[0] = RESP_CODE_CONTACT_MSG_RECV_V3;
+            payload[1] = 0; // snr
+            payload[2] = 0; // reserved
+            payload[3] = 0; // reserved
+            // pubKeyPrefix[6] at [4..9]
+            for (let i = 4; i < 10; i++) payload[i] = 0xbb;
+            payload[10] = 0; // pathLen
+            payload[11] = TXT_TYPE_PLAIN; // txt_type = 0
+            writeUint32LE(payload, 12, 0x87654321); // ts
+            payload.set(textBytes, 16);
+
+            const msg = Codec.parseContactMsgRecvV3(payload);
+            tests.push({
+                ok: msg &&
+                    msg.pubKeyPrefix === 'bbbbbbbbbbbb' &&
+                    msg.txtType === 0 &&
+                    msg.ts === 0x87654321 &&
+                    msg.text === 'Hello',
+                name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=0)'
+            });
+        }
+
+        // Test 4: Parse RESP_CODE_CONTACT_MSG_RECV_V3 (code 16, txt_type 1 = SIGNED)
+        {
+            const text = 'Signed';
+            const textBytes = new TextEncoder().encode(text);
+            const payload = new Uint8Array(1 + 1 + 2 + 6 + 1 + 1 + 4 + 4 + textBytes.length);
+            payload[0] = RESP_CODE_CONTACT_MSG_RECV_V3;
+            payload[1] = 0; // snr
+            payload[2] = 0; // reserved
+            payload[3] = 0; // reserved
+            for (let i = 4; i < 10; i++) payload[i] = 0xcc;
+            payload[10] = 0; // pathLen
+            payload[11] = 1; // txt_type = 1 (SIGNED)
+            writeUint32LE(payload, 12, 0x11223344); // ts
+            for (let i = 16; i < 20; i++) payload[i] = 0xdd; // sender_prefix[4]
+            payload.set(textBytes, 20);
+
+            const msg = Codec.parseContactMsgRecvV3(payload);
+            tests.push({
+                ok: msg &&
+                    msg.pubKeyPrefix === 'cccccccccccc' &&
+                    msg.txtType === 1 &&
+                    msg.ts === 0x11223344 &&
+                    msg.text === 'Signed',
+                name: 'Parse RESP_CODE_CONTACT_MSG_RECV_V3 (txt_type=1/SIGNED)'
+            });
+        }
+
+        // Test 5: Truncated frame returns null
+        {
+            const payload = new Uint8Array(5); // Too short for CONTACT
+            payload[0] = RESP_CODE_CONTACT;
+            const result = Codec.parseContactInfo(payload);
+            tests.push({
+                ok: result === null,
+                name: 'Truncated frame returns null'
+            });
+        }
+
+        // Test 6: Oversized frame handling (SerialTransport rejects it)
+        {
+            const transport = new SerialTransport();
+            let receivedPayload = null;
+            transport.onFrame((payload) => {
+                receivedPayload = payload;
+            });
+
+            // Frame with oversized length
+            const framedBytes = new Uint8Array(3);
+            framedBytes[0] = 0x3e;
+            framedBytes[1] = 0xff; // lenLSB = 255
+            framedBytes[2] = 0xff; // lenMSB = 255 => len = 65535, exceeds MAX_FRAME_SIZE
+
+            transport.processBytes(framedBytes);
+            // Should not crash and not call onFrame for malformed size
+            tests.push({
+                ok: receivedPayload === null,
+                name: 'Oversized frame rejected safely'
+            });
+        }
+
+        // Summary
+        let allPassed = true;
+        for (const test of tests) {
+            if (!test.ok) {
+                console.error(`✗ ${test.name}`);
+                allPassed = false;
+            }
+        }
+
+        if (allPassed) {
+            console.log(`✓ Codec self-test: ${tests.length}/${tests.length} passed`);
+        } else {
+            console.error('✗ Codec self-test failed');
+        }
     }
 });
     </script>

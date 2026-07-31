@@ -1,4 +1,9 @@
 // API client for SIREN web-client
+// Uses pluggable Transport abstraction (Serial, BLE, etc.)
+
+import { Transport } from './transport/types';
+import { SerialTransport } from './transport/serialTransport';
+import { BleTransport } from './ble/bleTransport';
 
 export type ConnState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -80,11 +85,11 @@ export interface NoticeEvent extends WSEvent {
   text: string;
 }
 
-const BASE_URL = 'http://127.0.0.1:8760';
+// Derive base URL from current page so HTTP (localhost) and HTTPS (remote) both work
+const BASE_URL = `${window.location.protocol}//${window.location.host}`;
 
 class APIClient {
-  private ws: WebSocket | null = null;
-  private wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private transport: Transport | null = null;
   private listeners: Map<string, Set<(event: any) => void>> = new Map();
 
   async getPorts(): Promise<SerialPort[]> {
@@ -94,32 +99,96 @@ class APIClient {
     return data.ports || [];
   }
 
-  async connect(path: string, baud?: number): Promise<{ state: ConnState; self?: User }> {
-    const res = await fetch(`${BASE_URL}/api/connect`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, baud }),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error || 'Connection failed');
+  async connectSerial(path: string, baud?: number): Promise<{ state: ConnState; self?: User }> {
+    try {
+      this.transport = new SerialTransport();
+      // Proxy events from transport
+      this.transport.on('conn', (e) => this.emit('conn', e));
+      this.transport.on('channels', (e) => this.emit('channels', e));
+      this.transport.on('users', (e) => this.emit('users', e));
+      this.transport.on('message', (e) => this.emit('message', e));
+      this.transport.on('login', (e) => this.emit('login', e));
+      this.transport.on('notice', (e) => this.emit('notice', e));
+
+      // Connect to serial
+      const res = await fetch(`${BASE_URL}/api/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, baud }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Connection failed');
+      }
+      const result = await res.json();
+
+      // Connect WebSocket
+      const serialTransport = this.transport as SerialTransport;
+      try {
+        await serialTransport.connectWebSocket();
+      } catch (e) {
+        console.error('WebSocket connection failed:', e);
+      }
+
+      return result;
+    } catch (e) {
+      this.transport = null;
+      throw e;
     }
-    return res.json();
+  }
+
+  async connectBle(): Promise<{ state: ConnState; self?: User }> {
+    const transport = new BleTransport();
+    try {
+      this.transport = transport;
+      // Proxy events from transport
+      this.transport.on('conn', (e) => this.emit('conn', e));
+      this.transport.on('channels', (e) => this.emit('channels', e));
+      this.transport.on('users', (e) => this.emit('users', e));
+      this.transport.on('message', (e) => this.emit('message', e));
+      this.transport.on('login', (e) => this.emit('login', e));
+      this.transport.on('notice', (e) => this.emit('notice', e));
+
+      await this.transport.connect();
+      const state = await this.transport.getState();
+      return { state: state.conn, self: state.self };
+    } catch (e) {
+      // Ensure proper cleanup on connection failure
+      if (this.transport) {
+        try {
+          await this.transport.disconnect();
+        } catch (disconnectErr) {
+          console.error('Error during cleanup after connect failure:', disconnectErr);
+        }
+      }
+      this.transport = null;
+      throw e;
+    }
   }
 
   async disconnect(): Promise<{ state: ConnState }> {
+    if (this.transport) {
+      await this.transport.disconnect();
+      this.transport = null;
+    }
     const res = await fetch(`${BASE_URL}/api/disconnect`, { method: 'POST' });
     if (!res.ok) throw new Error('Disconnect failed');
     return res.json();
   }
 
   async getState(): Promise<AppState> {
+    if (this.transport) {
+      return this.transport.getState();
+    }
     const res = await fetch(`${BASE_URL}/api/state`);
     if (!res.ok) throw new Error('Failed to get state');
     return res.json();
   }
 
   async getMessages(channelId: string, limit: number = 100): Promise<Message[]> {
+    if (this.transport) {
+      return this.transport.getMessages(channelId, limit);
+    }
     const res = await fetch(`${BASE_URL}/api/channels/${encodeURIComponent(channelId)}/messages?limit=${limit}`);
     if (!res.ok) throw new Error('Failed to get messages');
     const data = await res.json();
@@ -127,6 +196,9 @@ class APIClient {
   }
 
   async joinChannel(channelId: string, password?: string): Promise<{ ok: boolean; channel: Channel; error?: string }> {
+    if (this.transport) {
+      return this.transport.joinChannel(channelId, password);
+    }
     const res = await fetch(`${BASE_URL}/api/channels/${encodeURIComponent(channelId)}/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -137,6 +209,9 @@ class APIClient {
   }
 
   async partChannel(channelId: string): Promise<{ ok: boolean }> {
+    if (this.transport) {
+      return this.transport.partChannel(channelId);
+    }
     const res = await fetch(`${BASE_URL}/api/channels/${encodeURIComponent(channelId)}/part`, {
       method: 'POST',
     });
@@ -145,6 +220,9 @@ class APIClient {
   }
 
   async sendMessage(channelId: string, text: string): Promise<{ ok: boolean; message: Message }> {
+    if (this.transport) {
+      return this.transport.sendMessage(channelId, text);
+    }
     const res = await fetch(`${BASE_URL}/api/channels/${encodeURIComponent(channelId)}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -155,6 +233,9 @@ class APIClient {
   }
 
   async setAdvert(name?: string, flood?: boolean): Promise<{ ok: boolean }> {
+    if (this.transport) {
+      return this.transport.setAdvert(name, flood);
+    }
     const res = await fetch(`${BASE_URL}/api/advert`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -165,74 +246,33 @@ class APIClient {
   }
 
   connectWebSocket(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      try {
-        this.ws = new WebSocket('ws://127.0.0.1:8760/ws');
-
-        this.ws.onopen = () => {
-          console.log('WebSocket connected');
-          resolve();
-        };
-
-        this.ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            this.emit(msg.type, msg);
-          } catch (e) {
-            console.error('Failed to parse WS message:', e);
-          }
-        };
-
-        this.ws.onerror = (event) => {
-          console.error('WebSocket error:', event);
-          reject(event);
-        };
-
-        this.ws.onclose = () => {
-          console.log('WebSocket closed');
-          this.ws = null;
-          this.scheduleReconnect();
-        };
-      } catch (e) {
-        reject(e);
-      }
-    });
-  }
-
-  private scheduleReconnect() {
-    if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
-    this.wsReconnectTimer = setTimeout(() => {
-      console.log('Attempting WebSocket reconnect...');
-      this.connectWebSocket().catch((e) => console.error('Reconnect failed:', e));
-    }, 3000);
-  }
-
-  disconnectWebSocket() {
-    if (this.wsReconnectTimer) {
-      clearTimeout(this.wsReconnectTimer);
-      this.wsReconnectTimer = null;
+    if (this.transport && 'connectWebSocket' in this.transport) {
+      return (this.transport as any).connectWebSocket();
     }
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    return Promise.resolve();
+  }
+
+  disconnectWebSocket(): void {
+    if (this.transport && 'disconnectWebSocket' in this.transport) {
+      (this.transport as any).disconnectWebSocket();
     }
   }
 
-  on(type: string, listener: (event: any) => void) {
+  on(type: string, listener: (event: any) => void): void {
     if (!this.listeners.has(type)) {
       this.listeners.set(type, new Set());
     }
     this.listeners.get(type)!.add(listener);
   }
 
-  off(type: string, listener: (event: any) => void) {
+  off(type: string, listener: (event: any) => void): void {
     const set = this.listeners.get(type);
     if (set) {
       set.delete(listener);
     }
   }
 
-  private emit(type: string, event: any) {
+  private emit(type: string, event: any): void {
     const set = this.listeners.get(type);
     if (set) {
       set.forEach((listener) => listener(event));

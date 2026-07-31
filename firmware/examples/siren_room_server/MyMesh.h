@@ -70,12 +70,28 @@
   #define MAX_ROOMS  16
 #endif
 
+/* Maximum peer room-server nodes tracked for Phase 5 replication. */
+#ifndef MAX_PEERS
+  #define MAX_PEERS  8
+#endif
+
 #define FIRMWARE_ROLE        "siren_room"
 #define MAX_POST_TEXT_LEN    (160 - 9)
 
 /* ------------------------------------------------------------------ */
 /*  Data types                                                          */
 /* ------------------------------------------------------------------ */
+
+/**
+ * A known peer room-server node (for Phase 5 anti-entropy replication).
+ * Stored in /peer_cfg on SPIFFS.
+ */
+struct PeerInfo {
+  bool     active;
+  char     name[24];
+  uint8_t  pub_key[PUB_KEY_SIZE];  // 32 bytes
+  uint32_t last_contact;           // RTC timestamp of last packet; 0 = never
+};
 
 struct PostInfo {
   mesh::Identity  author;
@@ -103,6 +119,8 @@ struct RoomSlot {
   uint16_t   num_posted;
   uint16_t   num_post_pushes;
 
+  bool          stealth;           // if true: no adverts/location sent (default)
+
   unsigned long next_push;
   unsigned long next_local_advert;
   unsigned long next_flood_advert;
@@ -124,11 +142,16 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Global post pool (shared budget across all rooms) ---- */
   PostInfo      _post_pool[MAX_TOTAL_POSTS];
 
+  /* ---- Peer room-server list (Phase 5 replication ground work) ---- */
+  PeerInfo      peers[MAX_PEERS];
+  int           _num_peers;
+
   /* ---- Shared mesh state ---- */
   uint32_t      last_millis;
   uint64_t      uptime_millis;
   bool          _logging;
   bool          region_load_active;
+  uint16_t      _advert_interval_sec;  // local advert period in seconds (10-3600, default 120)
 
   NodePrefs         _prefs;         // radio / mesh settings (shared)
   TransportKeyStore key_store;
@@ -164,8 +187,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          saveRoomConfig();
   void          loadRoomConfig();
 
+  /* ---- Peer persistence (Phase 5 ground work) ---- */
+  void          savePeerConfig();
+  void          loadPeerConfig();
+
   /* ---- CLI helpers ---- */
   void          handleRoomCommand(char* args, char* reply);
+  void          handlePeerCommand(char* args, char* reply);
   int           handleRequest(RoomSlot& slot, ClientInfo* sender,
                               uint32_t sender_timestamp,
                               uint8_t* payload, size_t payload_len);
@@ -247,4 +275,99 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
+
+  /* ---- Public accessors for web management UI (Phase 9) ---- */
+  int  getNumActiveRooms() const  { return _num_active_rooms; }
+  bool isRoomActive(int i) const  { return (i >= 0 && i < MAX_ROOMS) && rooms[i].active; }
+  const char* getRoomName(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].name : "";
+  }
+  int  getRoomClientCount(int i) const {
+    return (i >= 0 && i < MAX_ROOMS && rooms[i].active)
+           ? rooms[i].acl.getNumClients() : 0;
+  }
+  int  getRoomPostCount(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? (int)rooms[i].num_posted : 0;
+  }
+  bool isRoomStealth(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].stealth : true;
+  }
+  /** Set stealth for one room and persist; idx -1 = all rooms. */
+  void setRoomStealth(int idx, bool s);
+
+  /** Get/set local advert interval in seconds (10-3600). Persisted to SPIFFS. */
+  uint16_t getAdvertIntervalSec() const { return _advert_interval_sec; }
+  void     setAdvertIntervalSec(uint16_t sec);
+
+  /** Return pointer to room i's 32-byte Ed25519 public key (PUB_KEY_SIZE bytes). */
+  const uint8_t* getRoomPubKey(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].id.pub_key : nullptr;
+  }
+
+  /* ---- Screensaver stats accessors (JES-781) ---- */
+  uint64_t getUptimeMillis() const { return uptime_millis; }
+  uint32_t getTotalPosts() const {
+    uint32_t n = 0;
+    for (int i = 0; i < MAX_ROOMS; i++)
+      if (rooms[i].active) n += rooms[i].num_posted;
+    return n;
+  }
+  uint8_t getTotalContacts() const {
+    uint8_t n = 0;
+    for (int i = 0; i < MAX_ROOMS; i++)
+      if (rooms[i].active) {
+        int c = rooms[i].acl.getNumClients();
+        n += (c > 0) ? (uint8_t)c : 0;
+      }
+    return n;
+  }
+
+  /* ---- Backup / restore accessors (JES-766) ---- */
+  const char* getRoomPassword(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].password : "";
+  }
+  const char* getRoomGuestPassword(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].guest_password : "";
+  }
+  /**
+   * Serialise room[i] LocalIdentity to buf (prv_key[64] || pub_key[32] = 96 bytes).
+   * Returns bytes written, or 0 on error.
+   */
+  size_t getRoomIdentityBytes(int i, uint8_t* buf, size_t max) {
+    if (i < 0 || i >= MAX_ROOMS) return 0;
+    return rooms[i].id.writeTo(buf, max);
+  }
+  /**
+   * Restore room[i] LocalIdentity from raw bytes and persist to SPIFFS.
+   * Activates the slot if it was inactive.
+   */
+  void setRoomIdentityFromBytes(int i, const uint8_t* buf, size_t len) {
+    if (i < 0 || i >= MAX_ROOMS) return;
+    rooms[i].id.readFrom(buf, len);
+    saveRoomIdentity(i);
+  }
+  /**
+   * Activate room slot i (if not already active) and save config.
+   * Used during restore to enable rooms that were in the backup.
+   */
+  void activateRoom(int i, const char* name, const char* pass, const char* guest) {
+    if (i < 0 || i >= MAX_ROOMS) return;
+    if (!rooms[i].active) {
+      rooms[i].active = true;
+      _num_active_rooms++;
+    }
+    if (name && name[0]) StrHelper::strncpy(rooms[i].name, name, sizeof(rooms[i].name));
+    if (pass)  StrHelper::strncpy(rooms[i].password,       pass,  sizeof(rooms[i].password));
+    if (guest) StrHelper::strncpy(rooms[i].guest_password, guest, sizeof(rooms[i].guest_password));
+    saveRoomConfig();
+  }
+  /** Deactivate room slot i (i>0 only) and save config. */
+  void deactivateRoom(int i) {
+    if (i <= 0 || i >= MAX_ROOMS) return;
+    if (rooms[i].active) {
+      rooms[i].active = false;
+      _num_active_rooms--;
+      saveRoomConfig();
+    }
+  }
 };
