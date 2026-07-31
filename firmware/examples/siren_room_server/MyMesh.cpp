@@ -75,6 +75,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   for (int i = 0; i < MAX_TOTAL_POSTS; i++) _post_pool[i].room_idx = 0xFF;
   memset(peers, 0, sizeof(peers));
   _num_peers = 0;
+  _advert_interval_sec = 120;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
     rooms[i].active          = false;
@@ -273,6 +274,9 @@ void MultiRoomMesh::saveRoomConfig() {
     f.write((uint8_t*)&rooms[i].lon, 4);
     f.write(&stealth_b, 1);   // appended last for backward compat
   }
+  // Global advert interval (seconds) — appended after all rooms for backward compat
+  uint16_t ais = _advert_interval_sec;
+  f.write((uint8_t*)&ais, 2);
   f.close();
 }
 
@@ -307,6 +311,11 @@ void MultiRoomMesh::loadRoomConfig() {
     rooms[i].stealth = (stealth_b != 0);
     if (rooms[i].active) _num_active_rooms++;
   }
+  // Global advert interval — appended after all rooms; default=120 on EOF
+  uint16_t ais = 120;
+  f.read((uint8_t*)&ais, 2);  // ignore return; default holds on short read
+  if (ais < 10 || ais > 3600) ais = 120;
+  _advert_interval_sec = ais;
   f.close();
 }
 
@@ -330,6 +339,22 @@ void MultiRoomMesh::setRoomStealth(int idx, bool s) {
       rooms[i].next_local_advert = futureMillis(5000 + offset_ms);
       rooms[i].next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + offset_ms);
     }
+  }
+  saveRoomConfig();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Advert interval: global local advert period in seconds             */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::setAdvertIntervalSec(uint16_t sec) {
+  if (sec < 10) sec = 10;
+  if (sec > 3600) sec = 3600;
+  _advert_interval_sec = sec;
+  // Reschedule local advert timers for all visible active rooms
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!rooms[i].active || rooms[i].stealth) continue;
+    uint32_t offset_ms = (uint32_t)i * 3000;
+    rooms[i].next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + offset_ms);
   }
   saveRoomConfig();
 }
@@ -829,8 +854,8 @@ void MultiRoomMesh::updateAdvertTimer() {
     if (!rooms[i].active) continue;
     if (rooms[i].stealth) {
       rooms[i].next_local_advert = 0;  // stealth: disable
-    } else if (_prefs.advert_interval > 0) {
-      rooms[i].next_local_advert = futureMillis((uint32_t)_prefs.advert_interval * 2 * 60 * 1000);
+    } else if (_advert_interval_sec > 0) {
+      rooms[i].next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000);
     } else {
       rooms[i].next_local_advert = 0;
     }
@@ -1001,11 +1026,11 @@ void MultiRoomMesh::loop() {
         self_id = slot.id;
         sendRoomAdvertisement(slot, 0, true);
         slot.next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
-        slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+        slot.next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + (uint32_t)i * 15000);
       } else if (slot.next_local_advert && millisHasNowPassed(slot.next_local_advert)) {
         self_id = slot.id;
         sendRoomAdvertisement(slot, 0, false);
-        slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+        slot.next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + (uint32_t)i * 15000);
       }
     }
   }
@@ -1165,6 +1190,24 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
   // ---- peer management commands (Phase 5 ground work) ----
   if (memcmp(command, "peer", 4) == 0 && (command[4] == ' ' || command[4] == 0)) {
     handlePeerCommand(command + 4, reply);
+    return;
+  }
+
+  // ---- advert interval [<seconds>] — global local advert period ----
+  if (memcmp(command, "advert interval", 15) == 0) {
+    const char* arg = command + 15;
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+      sprintf(reply, "advert interval=%d s (range 10-3600)", (int)_advert_interval_sec);
+    } else {
+      int sec = atoi(arg);
+      if (sec < 10 || sec > 3600) {
+        strcpy(reply, "Err: interval must be 10-3600 seconds");
+      } else {
+        setAdvertIntervalSec((uint16_t)sec);
+        sprintf(reply, "OK - advert interval %d s", (int)_advert_interval_sec);
+      }
+    }
     return;
   }
 

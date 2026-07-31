@@ -453,7 +453,16 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
             "<button name='stealth' value='on' onclick=\"return confirm('Hide all rooms? They stop broadcasting adverts.')\">Hide All (Stealth)</button>"
             "</form>"
             "<p style='font-size:0.85em;color:#aaa'>Per-room: use the toggle buttons in the Rooms table above, "
-            "or CLI: <code>room stealth &lt;idx&gt; on|off</code></p>"
+            "or CLI: <code>room stealth &lt;idx&gt; on|off</code></p>";
+    char adv_sec_str[8];
+    snprintf(adv_sec_str, sizeof(adv_sec_str), "%d", (int)mesh.getAdvertIntervalSec());
+    page += "<form method='post' action='/api/advert/interval' style='margin-top:0.5em'>"
+            "Advert interval (when visible): <input name='seconds' type='number' min='10' max='3600' value='";
+    page += adv_sec_str;
+    page += "' size='6'> s "
+            "<button type='submit'>Save</button></form>"
+            "<p style='font-size:0.85em;color:#aaa'>Range 10&ndash;3600 s, default 120 s. "
+            "CLI: <code>advert interval &lt;seconds&gt;</code></p>"
             "</div>";
   }
 
@@ -760,6 +769,17 @@ void WebManager::setupRoutes() {
       int idx = req->getParam("idx", true)->value().toInt();
       bool s  = (req->getParam("stealth", true)->value() == "on");
       _mesh.setRoomStealth(idx, s);
+      req->redirect("/");
+    });
+
+  // API: set global advert interval (seconds)
+  _server.on("/api/advert/interval", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("seconds", true)) { req->send(400, "text/plain", "missing seconds"); return; }
+      int sec = req->getParam("seconds", true)->value().toInt();
+      if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
+      _mesh.setAdvertIntervalSec((uint16_t)sec);
       req->redirect("/");
     });
 

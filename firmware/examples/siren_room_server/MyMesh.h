@@ -151,6 +151,7 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint64_t      uptime_millis;
   bool          _logging;
   bool          region_load_active;
+  uint16_t      _advert_interval_sec;  // local advert period in seconds (10-3600, default 120)
 
   NodePrefs         _prefs;         // radio / mesh settings (shared)
   TransportKeyStore key_store;
@@ -293,6 +294,10 @@ public:
   }
   /** Set stealth for one room and persist; idx -1 = all rooms. */
   void setRoomStealth(int idx, bool s);
+
+  /** Get/set local advert interval in seconds (10-3600). Persisted to SPIFFS. */
+  uint16_t getAdvertIntervalSec() const { return _advert_interval_sec; }
+  void     setAdvertIntervalSec(uint16_t sec);
 
   /** Return pointer to room i's 32-byte Ed25519 public key (PUB_KEY_SIZE bytes). */
   const uint8_t* getRoomPubKey(int i) const {
