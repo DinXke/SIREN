@@ -457,6 +457,59 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
             "</div>";
   }
 
+  // LoRa radio settings
+  {
+    const NodePrefs* p = mesh.getNodePrefs();
+    char freq_str[16], bw_str[16], sf_str[8], cr_str[8], tx_str[8];
+    snprintf(freq_str, sizeof(freq_str), "%.3f", (double)p->freq);
+    snprintf(bw_str,   sizeof(bw_str),   "%.2f", (double)p->bw);
+    snprintf(sf_str,   sizeof(sf_str),   "%d",   (int)p->sf);
+    snprintf(cr_str,   sizeof(cr_str),   "%d",   (int)p->cr);
+    snprintf(tx_str,   sizeof(tx_str),   "%d",   (int)p->tx_power_dbm);
+
+    page += "<div class='card'><h2>LoRa Radio</h2>";
+    page += "<table>"
+            "<tr><th>Freq (MHz)</th><td>"; page += freq_str;
+    page += "</td></tr><tr><th>BW (kHz)</th><td>"; page += bw_str;
+    page += "</td></tr><tr><th>SF</th><td>SF"; page += sf_str;
+    page += "</td></tr><tr><th>CR</th><td>4/"; page += cr_str;
+    page += "</td></tr><tr><th>TX Power</th><td>"; page += tx_str;
+    page += " dBm</td></tr></table>";
+
+    page += "<form method='post' action='/api/lora'>"
+            "Freq (MHz): <input name='freq' value='"; page += freq_str;
+    page += "' size='10'> "
+            "BW (kHz): <select name='bw'>";
+
+    static const float BW_OPTS[]   = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f};
+    static const char* BW_LABELS[] = {"7.80","10.40","15.60","20.80","31.25","41.70","62.50","125.00","250.00","500.00"};
+    for (int i = 0; i < 10; i++) {
+      page += "<option value='"; page += BW_LABELS[i];
+      if (fabsf(BW_OPTS[i] - p->bw) < 0.5f) page += "' selected='selected";
+      page += "'>"; page += BW_LABELS[i]; page += "</option>";
+    }
+    page += "</select> "
+            "SF: <select name='sf'>";
+    for (int sf = 5; sf <= 12; sf++) {
+      page += "<option value='"; page += sf;
+      if (sf == (int)p->sf) page += "' selected='selected";
+      page += "'>SF"; page += sf; page += "</option>";
+    }
+    page += "</select> "
+            "CR: <select name='cr'>";
+    for (int cr = 5; cr <= 8; cr++) {
+      page += "<option value='"; page += cr;
+      if (cr == (int)p->cr) page += "' selected='selected";
+      page += "'>4/"; page += cr; page += "</option>";
+    }
+    page += "</select> "
+            "TX (dBm): <input name='txpower' value='"; page += tx_str;
+    page += "' size='4' type='number' min='2' max='22'> "
+            "<button type='submit'>Save LoRa</button></form>"
+            "<p style='font-size:0.85em;color:#aaa'>Freq/BW/SF/CR changes require reboot to apply. TX power is live.</p>"
+            "</div>";
+  }
+
   // WiFi config
   page += "<div class='card'><h2>WiFi</h2>";
   page += "<form method='post' action='/api/wifi/mode'>"
@@ -830,6 +883,30 @@ void WebManager::setupRoutes() {
       if (_restore_buf.length() + len < 32768) {  // 32 KB safety cap
         _restore_buf += String((char*)data, len);
       }
+    });
+
+  // API: LoRa radio settings
+  _server.on("/api/lora", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      char cmd[128], reply[160];
+      // set radio <freq> <bw> <sf> <cr> — all four required; persists, reboot to apply
+      if (req->hasParam("freq", true) && req->hasParam("bw", true) &&
+          req->hasParam("sf", true)   && req->hasParam("cr", true)) {
+        snprintf(cmd, sizeof(cmd), "set radio %s %s %s %s",
+                 req->getParam("freq",    true)->value().c_str(),
+                 req->getParam("bw",      true)->value().c_str(),
+                 req->getParam("sf",      true)->value().c_str(),
+                 req->getParam("cr",      true)->value().c_str());
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      // set txpower <n> — applies live and persists
+      if (req->hasParam("txpower", true)) {
+        snprintf(cmd, sizeof(cmd), "set txpower %s",
+                 req->getParam("txpower", true)->value().c_str());
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      req->redirect("/");
     });
 
   // ---------------------------------------------------------------------------
