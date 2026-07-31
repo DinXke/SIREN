@@ -95,6 +95,7 @@ void setup() {
   Serial.println("  room list | add | del <idx> | set <idx> name|pass|guest <v>");
   Serial.println("  room clients <idx> | setperm <idx> <hex> <perms> | status <idx>");
   Serial.println("  room stealth <idx> on|off | qr <idx>");
+  Serial.println("  rooms | msgs <idx> [n] | nicks <idx> | say <idx> <text>");
   Serial.println("  peer list | add <hex64> <name> | del <idx> | status | sync");
 #ifdef ENABLE_WIFI_MGMT
   Serial.println("  wifi mode ap|sta | wifi ap ssid <n> | wifi ap pass <p>");

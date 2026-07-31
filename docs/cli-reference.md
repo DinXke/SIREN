@@ -190,6 +190,72 @@ Manually trigger a synchronisation attempt with all configured peers (Phase 5 fe
 
 ---
 
+## IRC / Chat Commands
+
+These commands let operators inspect room messages and the user list, and post messages as the server operator. They work over both **serial CLI** and **mesh CLI** (Phase 4 admin DM).
+
+### `rooms`
+
+List all active rooms with their index, name, connected client count, post count, and stealth status.
+
+```
+rooms
+```
+
+**Example output:**
+```
+Active rooms (2):
+  [0] SIREN                   clients=3  posts=12  stealth=off
+  [1] ICT-Extern              clients=1  posts=4   stealth=on
+```
+
+---
+
+### `msgs <room-idx> [n]`
+
+Show the last `n` posts from the specified room (default: 10, max: 50). Author names are resolved from the advert name table; unknown nodes fall back to an 8-character hex prefix.
+
+```
+msgs 0
+msgs 0 20
+```
+
+**Example output (serial):**
+```
+Room [0] 'SIREN' — 10/12 posts shown:
+  [1753000001] <Alice> Afdeling 2 bevrijd, kom naar post Noord
+  [1753000045] <[OP]> Noodprotocol geactiveerd
+```
+
+---
+
+### `nicks <room-idx>`
+
+Show the connected user list (nicklist) for the specified room, including each user's resolved name, role, and last-activity timestamp.
+
+```
+nicks 0
+```
+
+Roles: `guest` (0), `ro` read-only (1), `rw` read-write (2), `admin` (3).
+
+---
+
+### `say <room-idx> <text>`
+
+Post a server-authored message to the specified room. The message is prefixed with `[OP]` to identify it as an operator post, and is pushed to all connected companions.
+
+```
+say 0 Noodprotocol geactiveerd — volg instructies van teamleider
+```
+
+**Notes:**
+- Text is clamped to `MAX_POST_TEXT_LEN` (151 characters).
+- Operator posts are stored in the global post pool and survive reboots.
+- The operator identity is the room's own key pair, not a companion.
+
+---
+
 ## WiFi Commands
 
 WiFi commands are available when the `ENABLE_WIFI_MGMT` build flag is set (default in SIREN builds).

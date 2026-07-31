@@ -191,13 +191,52 @@ The firmware was compiled with `FORCE_RADIO_PREFS=1` (the radio-fix build). This
 
 ---
 
+## IRC Chat Web UI
+
+The web management UI at `http://<node-ip>/` includes a link to the **IRC Chat** page (`/chat`). This page requires admin basic-auth (same credentials as the management UI).
+
+### What the chat page shows
+
+- **Kanaal** (channel) dropdown — select the active room to view.
+- **Messages pane** — displays all posts for the selected room in chronological order. Author names are resolved from the advert name table; unknown nodes show an 8-character hex prefix. Messages auto-refresh every 4 seconds.
+- **Users pane** — shows connected companions with their role colour:
+  - Yellow: admin
+  - Green: read-write
+  - Grey: read-only / guest
+  Auto-refreshes every 5 seconds.
+- **Post form** — post a message as the room operator (`[OP]`). The post is pushed to all connected companions immediately.
+
+### Security
+
+- All `/chat`, `/api/chat/messages`, `/api/chat/nicks`, and `/api/chat/post` endpoints require admin basic-auth.
+- Message text is displayed using `textContent` (never `innerHTML`) to prevent XSS.
+- Server-authored posts are stored with the room's own key as author and prefixed with `[OP]`.
+
+### Name resolution
+
+Node names are learned from LoRa advertisements (`onAdvertRecv`). The name table holds up to 32 entries (LRU eviction) and is persisted in SPIFFS at `/names`. It is included in the backup/restore (`GET /api/backup`, `POST /api/restore`).
+
+If a node has never advertised or is in stealth mode, its name appears as an 8-character hex prefix of its public key.
+
+---
+
 ## Monitoring in Production
 
 Useful commands to run periodically on a deployed node:
 
 ```bash
 # Check all rooms and their client/post counts
+rooms
 room list
+
+# Show recent messages in room 0
+msgs 0 10
+
+# Show connected users in room 0
+nicks 0
+
+# Post an operator announcement to room 0
+say 0 Onderhoud gepland: 14:00-15:00
 
 # Check sync status for a specific room
 room status 0

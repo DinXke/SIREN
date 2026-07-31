@@ -75,6 +75,24 @@
   #define MAX_PEERS  8
 #endif
 
+/* Phase 5: version-vector replication constants. */
+#define MAX_VV_ORIGINS  8    // per-room VV entries (one per known origin server)
+#define MAX_SYNC_POSTS  8    // SYNCDAT frames per SYNCREQ response (airtime guard)
+/* Periodic anti-entropy pull interval. 3-min default; boot delay is 45 s per peer. */
+#define PEER_SYNC_INTERVAL_MS   (3UL * 60 * 1000)
+#define PEER_SYNC_BOOT_DELAY_MS 45000UL
+
+/* Server-to-server sync TXT sub-types (data[4] >> 2).
+   Range 4-6 is free above the existing SIGNED_PLAIN=2, CLI_DATA=1, PLAIN=0. */
+#define TXT_TYPE_SYNCREQ  4   // A→B pull request  [ts][flags][num_vv][VV...]
+#define TXT_TYPE_SYNCDAT  5   // B→A one post       [ts][flags][post_ts][orig[4]][auth[4]][text]
+#define TXT_TYPE_SYNCEND  6   // B→A end of stream  [ts][flags][num_vv][VV...]
+
+/* Name resolution table — maps pubkey prefix → advertised node name.
+   Populated from onAdvertRecv(); persisted to SPIFFS /names.          */
+#define NAME_TABLE_SIZE 32
+#define NAME_KEY_SIZE    8   // first 8 bytes of pubkey used as lookup key
+
 #define FIRMWARE_ROLE        "siren_room"
 #define MAX_POST_TEXT_LEN    (160 - 9)
 
@@ -83,21 +101,43 @@
 /* ------------------------------------------------------------------ */
 
 /**
+ * Version-vector entry: highest post_timestamp seen from a given room-server origin.
+ * Used for Phase 5 anti-entropy replication.
+ */
+struct VVEntry {
+  uint8_t  origin_id[4];  // 4-byte prefix of originating room-server pubkey
+  uint32_t seq;           // highest post_timestamp from that origin (0 = unknown)
+};
+
+/**
  * A known peer room-server node (for Phase 5 anti-entropy replication).
- * Stored in /peer_cfg on SPIFFS.
+ * PERSISTED fields (active/name/pub_key/last_contact) stored in /peer_cfg.
+ * RUNTIME fields (shared_secret/secret_valid/next_sync_at) recomputed each boot.
  */
 struct PeerInfo {
+  /* PERSISTED */
   bool     active;
   char     name[24];
   uint8_t  pub_key[PUB_KEY_SIZE];  // 32 bytes
   uint32_t last_contact;           // RTC timestamp of last packet; 0 = never
+  /* RUNTIME — not saved */
+  uint8_t  shared_secret[PUB_KEY_SIZE]; // ECDH(rooms[0].priv, pub_key)
+  bool     secret_valid;                // true once calcPeerSecret() called
+  unsigned long next_sync_at;           // millis() deadline for next SYNCREQ
+};
+
+struct NameEntry {
+  uint8_t  pub_prefix[NAME_KEY_SIZE];   // first 8 bytes of pubkey
+  char     name[24];                    // advertised name (NUL-terminated)
+  uint32_t lru_seq;                     // 0 = empty; higher = more recently seen
 };
 
 struct PostInfo {
   mesh::Identity  author;
   uint32_t        post_timestamp;
   char            text[MAX_POST_TEXT_LEN + 1];
-  uint8_t         room_idx;     // owning room (0xFF = free slot)
+  uint8_t         room_idx;       // owning room (0xFF = free slot)
+  uint8_t         origin_id[4];   // Phase 5: 4-byte prefix of room-server that originated post
 };
 
 /**
@@ -125,6 +165,9 @@ struct RoomSlot {
   unsigned long next_local_advert;
   unsigned long next_flood_advert;
   unsigned long dirty_contacts_expiry;
+
+  /* Phase 5: per-room version vector (one entry per known origin room-server). */
+  VVEntry       vv[MAX_VV_ORIGINS];
 };
 
 /* ------------------------------------------------------------------ */
@@ -175,6 +218,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Post-pool dirty timer (JES-794) ---- */
   unsigned long _post_dirty_at;   // 0 = not dirty; set to futureMillis(5000) on new post
 
+  /* ---- Name resolution table (JES-798) ---- */
+  NameEntry     _names[NAME_TABLE_SIZE];
+  uint32_t      _name_lru_ctr;
+
+  void          saveNameTable();
+  void          loadNameTable();
+
   /* ---- MQTT publish callback (JES-792) ---- */
   typedef void (*PostPublishCallback)(int room_idx, uint32_t timestamp,
                                       const uint8_t* author_pub,
@@ -197,9 +247,20 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          saveRoomConfig();
   void          loadRoomConfig();
 
-  /* ---- Peer persistence (Phase 5 ground work) ---- */
+  /* ---- Peer persistence (Phase 5 replication) ---- */
   void          savePeerConfig();
   void          loadPeerConfig();
+
+  /* ---- Phase 5 anti-entropy helpers ---- */
+  void          calcPeerSecret(int pi);
+  bool          vvUpdate(RoomSlot& slot, const uint8_t* origin_id, uint32_t ts);
+  void          sendSyncReq(int pi);
+  void          handleSyncReq(int pi, uint8_t* data, size_t len);
+  void          handleSyncDat(int pi, uint8_t* data, size_t len);
+  void          handleSyncEnd(int pi, uint8_t* data, size_t len);
+  void          pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post);
+  bool          ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
+                               uint32_t ts, const uint8_t* author_pub, const char* text);
 
   /* ---- Post pool persistence (JES-787) ---- */
   void          savePostPool();
@@ -215,6 +276,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
 protected:
   /* ---- Override packet dispatch for multi-room routing ---- */
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
+
+  /* ---- Advert receive: populate name table ---- */
+  void onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id, uint32_t ts,
+                    const uint8_t* app_data, size_t app_data_len) override;
 
   /* ---- Tuning overrides (unchanged from simple_room_server) ---- */
   float    getAirtimeBudgetFactor() const override { return _prefs.airtime_factor; }
@@ -348,6 +413,16 @@ public:
     _mqtt_post_cb  = cb;
     _mqtt_post_ctx = ctx;
   }
+
+  /* ---- IRC / chat accessors (JES-798) ---- */
+  /** Resolve a 32-byte pubkey to an advertised name. Falls back to 8-char hex prefix. */
+  const char* resolveName(const uint8_t* pubkey);
+  /** Direct access to the global post pool for web/CLI inspection. */
+  const PostInfo* getPostPool() const { return _post_pool; }
+  /** Post a server-authored message to a room. Pushes to connected companions. */
+  void addServerPost(int room_idx, const char* text);
+  /** Build JSON array of nick objects for /api/chat/nicks. */
+  String buildNickJson(int room_idx);
 
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {

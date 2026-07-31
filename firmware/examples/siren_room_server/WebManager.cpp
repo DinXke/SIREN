@@ -159,6 +159,19 @@ static String jsonEscape(const char* s) {
   return r;
 }
 
+// Escape a C-string for safe HTML display (XSS prevention)
+static String htmlEscape(const char* s) {
+  String r;
+  for (; *s; s++) {
+    if      (*s == '&')  r += "&amp;";
+    else if (*s == '<')  r += "&lt;";
+    else if (*s == '>')  r += "&gt;";
+    else if (*s == '"')  r += "&quot;";
+    else                 r += *s;
+  }
+  return r;
+}
+
 // ---------------------------------------------------------------------------
 //  Backup JSON builder
 // ---------------------------------------------------------------------------
@@ -219,6 +232,24 @@ String WebManager::buildBackupJson() {
   // Post pool (JES-790): flat key-value pairs for all active posts
   j += ",";
   j += _mesh.getPostsFlatJson();
+
+  // Name table (JES-798): hex-encode raw SPIFFS /names file
+  {
+    File nf = SPIFFS.open("/names", "r");
+    if (nf) {
+      size_t sz = nf.size();
+      j += ",\"names_hex\":\"";
+      while (sz-- > 0) {
+        uint8_t b = nf.read();
+        static const char hx[] = "0123456789abcdef";
+        j += hx[b >> 4];
+        j += hx[b & 0x0f];
+      }
+      nf.close();
+      j += "\"";
+    }
+  }
+
   j += "}";
   return j;
 }
@@ -336,6 +367,26 @@ bool WebManager::applyRestore(const String& json) {
     _mesh.restorePostsFlatJson(json);
   }
 
+  // Restore name table hex blob (JES-798) — present in v2 backups that include it
+  {
+    String k = String("\"names_hex\":\"");
+    int pos = json.indexOf(k);
+    if (pos >= 0) {
+      pos += k.length();
+      int end_pos = json.indexOf("\"", pos);
+      if (end_pos > pos) {
+        File nf = SPIFFS.open("/names", "w");
+        if (nf) {
+          for (int i = pos; i + 1 < end_pos; i += 2) {
+            uint8_t b = (hexNibble(json[i]) << 4) | hexNibble(json[i + 1]);
+            nf.write(b);
+          }
+          nf.close();
+        }
+      }
+    }
+  }
+
   return true;
 }
 
@@ -382,6 +433,110 @@ static const char HTML_HEAD[] PROGMEM =
 
 static const char HTML_FOOT[] PROGMEM = "</body></html>";
 
+String WebManager::buildChatPage() {
+  String page = FPSTR(HTML_HEAD);
+
+  // Nav back to management UI
+  page += "<div class='card'><h2>SIREN IRC &mdash; "
+          "<a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
+
+  // Room selector
+  page += "<label><b>Kanaal:</b> <select id='room-sel' onchange='roomChanged()'>";
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!_mesh.isRoomActive(i)) continue;
+    page += "<option value='"; page += i; page += "'>";
+    page += htmlEscape(_mesh.getRoomName(i));
+    page += "</option>";
+  }
+  page += "</select></label></div>";
+
+  // Chat pane: messages + nicklist
+  page += "<div style='display:flex;gap:10px;align-items:flex-start'>";
+
+  // Messages column
+  page += "<div class='card' style='flex:1;min-width:0'>";
+  page += "<div id='msgs' style='height:320px;overflow-y:auto;background:#0d0d1a;"
+          "border:1px solid #333;padding:6px;font-size:0.9em'></div>";
+  page += "<form id='post-form' onsubmit='postMsg(event)' style='margin-top:6px'>"
+          "<input id='post-txt' style='width:75%' maxlength='140' "
+          "placeholder='Bericht als operator (max 140 tekens)...'> "
+          "<button type='submit'>Post</button></form>";
+  page += "</div>";
+
+  // Nicklist column
+  page += "<div class='card' style='min-width:120px;width:140px'>"
+          "<b style='color:#00d4ff'>Users</b>"
+          "<div id='nicks' style='font-size:0.85em;margin-top:6px'></div>"
+          "</div>";
+
+  page += "</div>";  // flex pane
+
+  // Inline JS — uses textContent (not innerHTML) for safe display
+  page += "<script>\n"
+          "var room=0,since=0,pollT=null,nickT=null;\n"
+          "function roomChanged(){\n"
+          "  room=parseInt(document.getElementById('room-sel').value);\n"
+          "  since=0;\n"
+          "  document.getElementById('msgs').innerHTML='';\n"
+          "  clearTimeout(pollT);clearTimeout(nickT);\n"
+          "  fetchMsgs();fetchNicks();\n"
+          "}\n"
+          "function fetchMsgs(){\n"
+          "  fetch('/api/chat/messages?room='+room+'&since='+since,{credentials:'include'})\n"
+          "  .then(function(r){return r.json();})\n"
+          "  .then(function(data){\n"
+          "    var box=document.getElementById('msgs');\n"
+          "    var atBottom=(box.scrollHeight-box.scrollTop-box.clientHeight<30);\n"
+          "    data.forEach(function(m){\n"
+          "      var row=document.createElement('div');\n"
+          "      row.style.marginBottom='3px';\n"
+          "      var ts=new Date(m.ts*1000).toLocaleTimeString();\n"
+          "      var s1=document.createElement('span');\n"
+          "      s1.style.color='#888';s1.style.fontSize='0.8em';\n"
+          "      s1.textContent='['+ts+'] ';\n"
+          "      var s2=document.createElement('span');\n"
+          "      s2.style.color='#00d4ff';\n"
+          "      s2.textContent='<'+m.author+'> ';\n"
+          "      var s3=document.createTextNode(m.text);\n"
+          "      row.appendChild(s1);row.appendChild(s2);row.appendChild(s3);\n"
+          "      box.appendChild(row);\n"
+          "      if(m.ts>since)since=m.ts;\n"
+          "    });\n"
+          "    if(atBottom)box.scrollTop=box.scrollHeight;\n"
+          "  }).catch(function(){});\n"
+          "  pollT=setTimeout(fetchMsgs,4000);\n"
+          "}\n"
+          "function fetchNicks(){\n"
+          "  fetch('/api/chat/nicks?room='+room,{credentials:'include'})\n"
+          "  .then(function(r){return r.json();})\n"
+          "  .then(function(data){\n"
+          "    var box=document.getElementById('nicks');\n"
+          "    box.innerHTML='';\n"
+          "    data.forEach(function(n){\n"
+          "      var d=document.createElement('div');\n"
+          "      d.style.color=(n.role>=3?'#ffcc00':(n.role>=2?'#00ff88':'#aaa'));\n"
+          "      d.textContent=n.name+(n.role>=3?' [op]':(n.role>=2?' [rw]':(n.role>=1?' [ro]':'')));\n"
+          "      box.appendChild(d);\n"
+          "    });\n"
+          "  }).catch(function(){});\n"
+          "  nickT=setTimeout(fetchNicks,5000);\n"
+          "}\n"
+          "function postMsg(e){\n"
+          "  e.preventDefault();\n"
+          "  var txt=document.getElementById('post-txt').value.trim();\n"
+          "  if(!txt)return;\n"
+          "  fetch('/api/chat/post',{method:'POST',credentials:'include',\n"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
+          "    body:'room='+encodeURIComponent(room)+'&text='+encodeURIComponent(txt)})\n"
+          "  .then(function(r){if(r.ok)document.getElementById('post-txt').value='';});\n"
+          "}\n"
+          "roomChanged();\n"
+          "</script>\n";
+
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
+
 String WebManager::buildStatusPage(const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
@@ -399,7 +554,10 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "<tr><th>Firmware</th><td>" FIRMWARE_VERSION " (" FIRMWARE_BUILD_DATE ")</td></tr>";
   page += "<tr><th>Active Rooms</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
-  page += "</table></div>";
+  page += "</table>";
+  page += "<p><a href='/chat'><button>&#128172; IRC Chat</button></a>"
+          " &mdash; berichten per kanaal bekijken en posten als operator</p>"
+          "</div>";
 
   // Rooms table
   page += "<div class='card'><h2>Rooms</h2>";
@@ -1085,6 +1243,98 @@ void WebManager::setupRoutes() {
       }
       req->redirect("/");
     });
+
+  // ---------------------------------------------------------------------------
+  // IRC chat UI (JES-798) — all routes behind admin basic-auth
+  // ---------------------------------------------------------------------------
+
+  // GET /chat — IRC-style channel/messages/nicklist page
+  _server.on("/chat", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    req->send(200, "text/html", buildChatPage());
+  });
+
+  // GET /api/chat/messages?room=<idx>&since=<ts>
+  _server.on("/api/chat/messages", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
+    uint32_t since_ts = req->hasParam("since") ? (uint32_t)req->getParam("since")->value().toInt() : 0;
+
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;
+    }
+
+    const PostInfo* pool = _mesh.getPostPool();
+    // Collect posts for room, sorted ascending by timestamp
+    const PostInfo* sorted[MAX_TOTAL_POSTS];
+    int cnt = 0;
+    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+      if (pool[i].room_idx == (uint8_t)room_idx) sorted[cnt++] = &pool[i];
+    }
+    // Insertion sort by timestamp
+    for (int i = 1; i < cnt; i++) {
+      const PostInfo* k = sorted[i]; int j = i - 1;
+      while (j >= 0 && sorted[j]->post_timestamp > k->post_timestamp) {
+        sorted[j + 1] = sorted[j]; j--;
+      }
+      sorted[j + 1] = k;
+    }
+
+    String json = "[";
+    bool first = true;
+    for (int i = 0; i < cnt; i++) {
+      // Only send posts newer than since_ts (strictly greater, or all if since==0)
+      if (since_ts > 0 && sorted[i]->post_timestamp <= since_ts) continue;
+      if (!first) json += ",";
+      first = false;
+      json += "{\"ts\":";
+      json += (unsigned long)sorted[i]->post_timestamp;
+      json += ",\"author\":\"";
+      json += jsonEscape(_mesh.resolveName(sorted[i]->author.pub_key));
+      json += "\",\"text\":\"";
+      json += jsonEscape(sorted[i]->text);
+      json += "\"}";
+    }
+    json += "]";
+
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", json);
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // GET /api/chat/nicks?room=<idx>
+  _server.on("/api/chat/nicks", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;
+    }
+
+    String json = _mesh.buildNickJson(room_idx);
+
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", json);
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // POST /api/chat/post — server-authored post (admin auth only)
+  _server.on("/api/chat/post", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room", true) || !req->hasParam("text", true)) {
+      req->send(400, "text/plain", "missing room or text"); return;
+    }
+    int room_idx = req->getParam("room", true)->value().toInt();
+    const String& text = req->getParam("text", true)->value();
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "text/plain", "invalid room"); return;
+    }
+    if (text.length() == 0) { req->send(400, "text/plain", "empty text"); return; }
+    // Length clamp happens inside addServerPost -> addPost
+    _mesh.addServerPost(room_idx, text.c_str());
+    req->send(200, "text/plain", "OK");
+  });
 
   // ---------------------------------------------------------------------------
   // Captive portal detection — respond to OS probes so device opens the UI
