@@ -24,6 +24,7 @@ class UITask {
   // Screensaver settings (persisted to SPIFFS /ss_cfg)
   bool            _ss_enabled;    // screensaver on/off (default: true)
   bool            _ss_keep_on;    // keep screen alive when ss=off (default: false)
+  uint8_t         _ss_page_sec;   // seconds per screensaver page (default: 3, range 1-60)
 
   // Stats from main loop
   UiStats         _stats;
@@ -46,7 +47,7 @@ public:
   UITask(DisplayDriver& display)
     : _display(&display), _next_read(0), _next_refresh(0), _auto_off(0),
       _prevBtnState(0), _node_prefs(nullptr),
-      _ss_enabled(true), _ss_keep_on(false),
+      _ss_enabled(true), _ss_keep_on(false), _ss_page_sec(3),
       _in_screensaver(false), _ss_page(0), _ss_next_page(0),
       _ss_offset_x(0), _ss_offset_y(0)
   { memset(&_stats, 0, sizeof(_stats)); }
@@ -56,11 +57,13 @@ public:
   /** Called by the main loop every iteration to update stats. Lightweight struct copy. */
   void setStats(const UiStats& s) { _stats = s; }
 
-  bool isSsEnabled() const { return _ss_enabled; }
-  bool isSsKeepOn()  const { return _ss_keep_on; }
+  bool    isSsEnabled()  const { return _ss_enabled; }
+  bool    isSsKeepOn()   const { return _ss_keep_on; }
+  uint8_t getSsPageSec() const { return _ss_page_sec; }
 
   void setSsEnabled(bool v);
   void setSsKeepOn(bool v);
+  void setSsPageSec(uint8_t sec);
 
   /** Handle "screensaver ..." CLI command (serial + mesh CLI). */
   void handleCommand(const char* cmd, char* reply);

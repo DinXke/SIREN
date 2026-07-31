@@ -568,8 +568,9 @@ String WebManager::buildStatusPage(const char* ip) {
 
   // Varia — screensaver / OLED settings
   if (_ui_task) {
-    bool ss_on   = _ui_task->isSsEnabled();
-    bool keep_on = _ui_task->isSsKeepOn();
+    bool    ss_on    = _ui_task->isSsEnabled();
+    bool    keep_on  = _ui_task->isSsKeepOn();
+    uint8_t page_sec = _ui_task->getSsPageSec();
     page += "<div class='card'><h2>Varia</h2>";
     page += "<p><b>Screensaver (OLED)</b> &mdash; cycles stats on screen to prevent burn-in "
             "and keeps the display alive on units with glued buttons.</p>";
@@ -589,11 +590,21 @@ String WebManager::buildStatusPage(const char* ip) {
             "<option value='on'";
     page += keep_on ? " selected" : "";
     page += ">Altijd aan</option>"
-            "</select> "
+            "</select>"
+            " &nbsp; Wisseltijd: <select name='interval'>";
+    // Selectable page-dwell times in seconds
+    const uint8_t opts[] = {1, 2, 3, 5, 10, 15, 20, 30, 60};
+    for (int i = 0; i < (int)(sizeof(opts)/sizeof(opts[0])); i++) {
+      page += String("<option value='") + opts[i] + "'";
+      if (opts[i] == page_sec) page += " selected";
+      page += String(">") + opts[i] + "s</option>";
+    }
+    page += "</select> "
             "<button type='submit'>Opslaan</button></form>"
             "<p style='font-size:0.85em;color:#aaa'>CLI: "
             "<code>screensaver on|off</code> &nbsp; "
-            "<code>screensaver keep-on on|off</code></p>"
+            "<code>screensaver keep-on on|off</code> &nbsp; "
+            "<code>screensaver interval &lt;1-60&gt;</code></p>"
             "</div>";
   }
 
@@ -842,6 +853,10 @@ void WebManager::setupRoutes() {
       }
       if (req->hasParam("keep", true)) {
         _ui_task->setSsKeepOn(req->getParam("keep", true)->value() == "on");
+      }
+      if (req->hasParam("interval", true)) {
+        int sec = req->getParam("interval", true)->value().toInt();
+        if (sec >= 1 && sec <= 60) _ui_task->setSsPageSec((uint8_t)sec);
       }
       req->redirect("/");
     });
