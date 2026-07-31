@@ -81,6 +81,7 @@ void setup() {
   Serial.println("Commands: menu | room list | room add | room del <idx>");
   Serial.println("          room set <idx> name <n> | pass <p> | guest <p>");
 #ifdef ENABLE_WIFI_MGMT
+  Serial.println("          wifi mode ap|sta | wifi ap ssid <n> | wifi ap pass <p>");
   Serial.println("          wifi ssid <n> | wifi pass <p> | wifi connect | wifi status");
 #endif
   Serial.println("Type 'menu' + Enter to open the interactive settings menu.");
