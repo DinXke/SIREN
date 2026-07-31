@@ -172,6 +172,9 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   float         pending_freq, pending_bw;
   uint8_t       pending_sf, pending_cr;
 
+  /* ---- Post-pool dirty timer (JES-794) ---- */
+  unsigned long _post_dirty_at;   // 0 = not dirty; set to futureMillis(5000) on new post
+
   /* ---- MQTT publish callback (JES-792) ---- */
   typedef void (*PostPublishCallback)(int room_idx, uint32_t timestamp,
                                       const uint8_t* author_pub,

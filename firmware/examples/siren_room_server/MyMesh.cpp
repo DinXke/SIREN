@@ -48,6 +48,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _logging = false;
   region_load_active = false;
   set_radio_at = revert_radio_at = 0;
+  _post_dirty_at = 0;
   _mqtt_post_cb  = nullptr;
   _mqtt_post_ctx = nullptr;
 
@@ -734,7 +735,7 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
 
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   slot.num_posted++;
-  savePostPool();   // persist to SPIFFS (JES-787)
+  _post_dirty_at = futureMillis(5000);  // debounced persist (JES-794)
 
   // Notify MQTT transport (JES-792 Phase a) — publish encrypted envelope
   if (_mqtt_post_cb) {
@@ -1054,6 +1055,12 @@ void MultiRoomMesh::loop() {
   if (revert_radio_at && millisHasNowPassed(revert_radio_at)) {
     revert_radio_at = 0;
     radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  }
+
+  // Debounced post-pool persistence (JES-794): write SPIFFS ~5s after last new post
+  if (_post_dirty_at && millisHasNowPassed(_post_dirty_at)) {
+    _post_dirty_at = 0;
+    savePostPool();
   }
 
   // Uptime tracking
