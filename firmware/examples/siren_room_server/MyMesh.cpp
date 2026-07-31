@@ -189,13 +189,27 @@ void MultiRoomMesh::loadOrCreateRoomIdentity(int idx) {
   snprintf(key, sizeof(key), "_room%d", idx);
 
   if (!store.load(key, rooms[idx].id)) {
-    rooms[idx].id = radio_new_identity();
-    int attempts = 0;
-    while (attempts < 10 &&
-           (rooms[idx].id.pub_key[0] == 0x00 ||
-            rooms[idx].id.pub_key[0] == 0xFF)) {
+    bool loaded_baked = false;
+#if defined(SIREN_DEFAULT_PRV_KEY_HEX)
+    if (idx == 0) {
+      uint8_t prv[64];
+      if (mesh::Utils::fromHex(prv, 64, SIREN_DEFAULT_PRV_KEY_HEX) &&
+          mesh::LocalIdentity::validatePrivateKey(prv)) {
+        rooms[idx].id.readFrom(prv, 64);
+        loaded_baked = true;
+      }
+      // else: baked key invalid or wrong length — fall through to random
+    }
+#endif
+    if (!loaded_baked) {
       rooms[idx].id = radio_new_identity();
-      attempts++;
+      int attempts = 0;
+      while (attempts < 10 &&
+             (rooms[idx].id.pub_key[0] == 0x00 ||
+              rooms[idx].id.pub_key[0] == 0xFF)) {
+        rooms[idx].id = radio_new_identity();
+        attempts++;
+      }
     }
     store.save(key, rooms[idx].id);
   }
@@ -1123,6 +1137,18 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       sprintf(reply, "OK - txpower %d dBm applied", pwr);
     }
     return;
+  }
+
+  // ---- repeater / global-settings guard: management room only ----
+  // Commands that touch global node-prefs (repeat, flood limits, region)
+  // must only be issued from room[0] (management room) or serial CLI.
+  if (sender_timestamp != 0 && _active_slot != 0) {
+    if (memcmp(command, "set repeat", 10) == 0 ||
+        memcmp(command, "set flood.max", 13) == 0 ||
+        memcmp(command, "region ", 7) == 0) {
+      strcpy(reply, "Err - repeater settings only available on management room");
+      return;
+    }
   }
 
   // Fall through to shared CommonCLI
