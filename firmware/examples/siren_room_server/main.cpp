@@ -2,6 +2,7 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#include "SettingsMenu.h"
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -13,6 +14,7 @@ SimpleMeshTables tables;
 MultiRoomMesh the_mesh(board, radio_driver,
                        *new ArduinoMillis(), fast_rng,
                        rtc_clock, tables);
+SettingsMenu settings_menu(the_mesh);
 
 void halt() { while (1); }
 
@@ -66,27 +68,40 @@ void setup() {
   board.onBootComplete();
 
   Serial.println("[SIREN] Phase 1 — multi-room server ready");
-  Serial.println("Commands: room list | room add | room del <idx>");
+  Serial.println("Commands: menu | room list | room add | room del <idx>");
   Serial.println("          room set <idx> name <n> | pass <p> | guest <p>");
+  Serial.println("Type 'menu' + Enter to open the interactive settings menu.");
 }
 
 void loop() {
-  int len = strlen(command);
-  while (Serial.available() && len < (int)sizeof(command) - 1) {
-    char c = Serial.read();
-    if (c != '\n') { command[len++] = c; command[len] = 0; }
-    Serial.print(c);
-  }
-  if (len == (int)sizeof(command) - 1) {
-    command[sizeof(command) - 1] = '\r';
-  }
+  if (settings_menu.isActive()) {
+    /* Menu is open: feed every incoming byte to the menu state machine */
+    while (Serial.available()) {
+      settings_menu.feed((char)Serial.read());
+    }
+  } else {
+    /* Normal serial CLI: accumulate line, dispatch on CR */
+    int len = strlen(command);
+    while (Serial.available() && len < (int)sizeof(command) - 1) {
+      char c = Serial.read();
+      if (c != '\n') { command[len++] = c; command[len] = 0; }
+      Serial.print(c);
+    }
+    if (len == (int)sizeof(command) - 1) {
+      command[sizeof(command) - 1] = '\r';
+    }
 
-  if (len > 0 && command[len - 1] == '\r') {
-    command[len - 1] = 0;
-    char reply[160];
-    the_mesh.handleCommand(0, command, reply);
-    if (reply[0]) { Serial.print("  -> "); Serial.println(reply); }
-    command[0] = 0;
+    if (len > 0 && command[len - 1] == '\r') {
+      command[len - 1] = 0;
+      if (strcmp(command, "menu") == 0) {
+        settings_menu.enter();
+      } else {
+        char reply[160];
+        the_mesh.handleCommand(0, command, reply);
+        if (reply[0]) { Serial.print("  -> "); Serial.println(reply); }
+      }
+      command[0] = 0;
+    }
   }
 
   the_mesh.loop();

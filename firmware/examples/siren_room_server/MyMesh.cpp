@@ -1047,6 +1047,20 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- set txpower <n> — applies live and persists ----
+  if (memcmp(command, "set txpower ", 12) == 0) {
+    int8_t pwr = (int8_t)atoi(command + 12);
+    if (pwr < 2 || pwr > 22) {
+      strcpy(reply, "Err: txpower must be 2-22 dBm");
+    } else {
+      _prefs.tx_power_dbm = pwr;
+      _cli.savePrefs(_fs);
+      setTxPower(pwr);
+      sprintf(reply, "OK - txpower %d dBm applied", pwr);
+    }
+    return;
+  }
+
   // Fall through to shared CommonCLI
   _cli.handleCommand(sender_timestamp, command, reply);
 }
