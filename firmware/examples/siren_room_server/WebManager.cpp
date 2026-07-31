@@ -100,6 +100,218 @@ void WebManager::connectSTA() {
 }
 
 // ---------------------------------------------------------------------------
+//  Hex encode helpers
+// ---------------------------------------------------------------------------
+static void bytesToHex(const uint8_t* src, size_t len, char* out) {
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < len; i++) {
+    out[i * 2]     = hex[src[i] >> 4];
+    out[i * 2 + 1] = hex[src[i] & 0x0f];
+  }
+  out[len * 2] = '\0';
+}
+
+static uint8_t hexNibble(char c) {
+  if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
+  if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
+  if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
+  return 0;
+}
+
+static size_t hexToBytes(const char* hex, uint8_t* out, size_t max_out) {
+  size_t len = strlen(hex);
+  if (len % 2 != 0) return 0;
+  size_t n = len / 2;
+  if (n > max_out) n = max_out;
+  for (size_t i = 0; i < n; i++) {
+    out[i] = (hexNibble(hex[i * 2]) << 4) | hexNibble(hex[i * 2 + 1]);
+  }
+  return n;
+}
+
+// Escape a C-string for JSON (replace \ and " only; control chars not expected)
+static String jsonEscape(const char* s) {
+  String r;
+  for (; *s; s++) {
+    if (*s == '"')       r += "\\\"";
+    else if (*s == '\\') r += "\\\\";
+    else                 r += *s;
+  }
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+//  Backup JSON builder
+// ---------------------------------------------------------------------------
+String WebManager::buildBackupJson() {
+  const NodePrefs* p = _mesh.getNodePrefs();
+
+  String j = "{";
+  j += "\"version\":\"1\",";
+  j += "\"node_name\":\"" + jsonEscape(p->node_name) + "\",";
+  j += "\"admin_pass\":\"" + jsonEscape(p->password)  + "\",";
+
+  // Radio
+  char tmp[32];
+  snprintf(tmp, sizeof(tmp), "%.3f", (double)p->freq);
+  j += "\"freq\":\"";   j += tmp; j += "\",";
+  snprintf(tmp, sizeof(tmp), "%.1f", (double)p->bw);
+  j += "\"bw\":\"";     j += tmp; j += "\",";
+  snprintf(tmp, sizeof(tmp), "%d",   (int)p->sf);
+  j += "\"sf\":\"";     j += tmp; j += "\",";
+  snprintf(tmp, sizeof(tmp), "%d",   (int)p->cr);
+  j += "\"cr\":\"";     j += tmp; j += "\",";
+  snprintf(tmp, sizeof(tmp), "%d",   (int)p->tx_power_dbm);
+  j += "\"tx_power\":\""; j += tmp; j += "\",";
+
+  // WiFi
+  j += "\"wifi_mode\":\"";  j += (_mode == MODE_STA ? "sta" : "ap"); j += "\",";
+  j += "\"ap_ssid\":\"" + jsonEscape(_ap_ssid) + "\",";
+  j += "\"ap_pass\":\"" + jsonEscape(_ap_pass)  + "\",";
+  j += "\"sta_ssid\":\"" + jsonEscape(_sta_ssid) + "\",";
+  j += "\"sta_pass\":\"" + jsonEscape(_sta_pass)  + "\",";
+
+  // Rooms — identity bytes = prv(64) || pub(32) = 96 bytes = 192 hex chars
+  // PRV_KEY_SIZE=64, PUB_KEY_SIZE=32
+  uint8_t id_buf[96];
+  char    id_hex[193];
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    snprintf(tmp, sizeof(tmp), "%d", i);
+    j += "\"room"; j += tmp; j += "_active\":\"";
+    j += (_mesh.isRoomActive(i) ? "1" : "0"); j += "\",";
+    j += "\"room"; j += tmp; j += "_name\":\"";
+    j += jsonEscape(_mesh.getRoomName(i)); j += "\",";
+    j += "\"room"; j += tmp; j += "_pass\":\"";
+    j += jsonEscape(_mesh.getRoomPassword(i)); j += "\",";
+    j += "\"room"; j += tmp; j += "_guest\":\"";
+    j += jsonEscape(_mesh.getRoomGuestPassword(i)); j += "\",";
+
+    // Identity bytes (only for active rooms; inactive = all-zero placeholder)
+    memset(id_buf, 0, sizeof(id_buf));
+    if (_mesh.isRoomActive(i)) {
+      _mesh.getRoomIdentityBytes(i, id_buf, sizeof(id_buf));
+    }
+    bytesToHex(id_buf, sizeof(id_buf), id_hex);
+    j += "\"room"; j += tmp; j += "_id\":\"";
+    j += id_hex; j += "\"";
+    if (i < MAX_ROOMS - 1) j += ",";
+  }
+
+  j += "}";
+  return j;
+}
+
+// ---------------------------------------------------------------------------
+//  Restore: parse flat JSON and apply settings
+// ---------------------------------------------------------------------------
+bool WebManager::applyRestore(const String& json) {
+  if (json.length() < 10) return false;
+
+  // Simple field extractor (same approach as loadConfig)
+  auto extractField = [&](const char* key, char* dest, size_t dest_len) -> bool {
+    String k = String("\"") + key + "\":\"";
+    int start = json.indexOf(k);
+    if (start < 0) return false;
+    start += k.length();
+    int end = json.indexOf("\"", start);
+    if (end < 0) return false;
+    String val = json.substring(start, end);
+    // Unescape \" and \\
+    val.replace("\\\"", "\"");
+    val.replace("\\\\", "\\");
+    strncpy(dest, val.c_str(), dest_len - 1);
+    dest[dest_len - 1] = 0;
+    return true;
+  };
+
+  // Validate version
+  char ver[4] = {};
+  if (!extractField("version", ver, sizeof(ver)) || strcmp(ver, "1") != 0) return false;
+
+  char reply[160];
+  char val[128];
+
+  // Node name
+  if (extractField("node_name", val, sizeof(val)) && val[0]) {
+    char cmd[160];
+    snprintf(cmd, sizeof(cmd), "set name %s", val);
+    _mesh.handleCommand(0, cmd, reply);
+  }
+
+  // Admin password
+  if (extractField("admin_pass", val, sizeof(val)) && val[0]) {
+    char cmd[160];
+    snprintf(cmd, sizeof(cmd), "set pass %s", val);
+    _mesh.handleCommand(0, cmd, reply);
+  }
+
+  // Radio settings
+  if (extractField("freq", val, sizeof(val)))     { char c[64]; snprintf(c, sizeof(c), "freq %s", val);     _mesh.handleCommand(0, c, reply); }
+  if (extractField("sf",   val, sizeof(val)))     { char c[64]; snprintf(c, sizeof(c), "sf %s", val);       _mesh.handleCommand(0, c, reply); }
+  if (extractField("bw",   val, sizeof(val)))     { char c[64]; snprintf(c, sizeof(c), "bw %s", val);       _mesh.handleCommand(0, c, reply); }
+  if (extractField("cr",   val, sizeof(val)))     { char c[64]; snprintf(c, sizeof(c), "cr %s", val);       _mesh.handleCommand(0, c, reply); }
+  if (extractField("tx_power", val, sizeof(val))) { char c[64]; snprintf(c, sizeof(c), "txpow %s", val);    _mesh.handleCommand(0, c, reply); }
+
+  // WiFi settings
+  char wifi_mode[8]   = {};
+  char ap_ssid[64]    = {};
+  char ap_pass[64]    = {};
+  char sta_ssid[64]   = {};
+  char sta_pass[64]   = {};
+  extractField("wifi_mode", wifi_mode, sizeof(wifi_mode));
+  extractField("ap_ssid",   ap_ssid,   sizeof(ap_ssid));
+  extractField("ap_pass",   ap_pass,   sizeof(ap_pass));
+  extractField("sta_ssid",  sta_ssid,  sizeof(sta_ssid));
+  extractField("sta_pass",  sta_pass,  sizeof(sta_pass));
+
+  _mode = (strcmp(wifi_mode, "sta") == 0) ? MODE_STA : MODE_AP;
+  if (ap_ssid[0]) strncpy(_ap_ssid, ap_ssid, sizeof(_ap_ssid) - 1);
+  strncpy(_ap_pass,  ap_pass,  sizeof(_ap_pass)  - 1);
+  if (sta_ssid[0]) strncpy(_sta_ssid, sta_ssid, sizeof(_sta_ssid) - 1);
+  strncpy(_sta_pass, sta_pass, sizeof(_sta_pass) - 1);
+  saveConfig();
+
+  // Rooms — 96 bytes identity (prv64 + pub32) hex-encoded
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    char active_key[20], name_key[20], pass_key[20], guest_key[20], id_key[20];
+    snprintf(active_key, sizeof(active_key), "room%d_active", i);
+    snprintf(name_key,   sizeof(name_key),   "room%d_name",   i);
+    snprintf(pass_key,   sizeof(pass_key),   "room%d_pass",   i);
+    snprintf(guest_key,  sizeof(guest_key),  "room%d_guest",  i);
+    snprintf(id_key,     sizeof(id_key),     "room%d_id",     i);
+
+    char active_str[4]  = {};
+    char room_name[24]  = {};
+    char room_pass[16]  = {};
+    char room_guest[16] = {};
+    char room_id[193]   = {};
+
+    extractField(active_key, active_str, sizeof(active_str));
+    bool should_be_active = (strcmp(active_str, "1") == 0);
+
+    if (!should_be_active) {
+      if (i > 0) _mesh.deactivateRoom(i);  // room 0 always stays active
+      continue;
+    }
+
+    extractField(name_key,  room_name,  sizeof(room_name));
+    extractField(pass_key,  room_pass,  sizeof(room_pass));
+    extractField(guest_key, room_guest, sizeof(room_guest));
+    _mesh.activateRoom(i, room_name[0] ? room_name : nullptr, room_pass, room_guest);
+
+    if (extractField(id_key, room_id, sizeof(room_id)) && strlen(room_id) == 192) {
+      uint8_t id_buf[96];
+      size_t  n = hexToBytes(room_id, id_buf, sizeof(id_buf));
+      if (n == 96) {
+        _mesh.setRoomIdentityFromBytes(i, id_buf, n);
+      }
+    }
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 //  HTML page builders
 // ---------------------------------------------------------------------------
 static const char HTML_HEAD[] PROGMEM =
@@ -192,6 +404,15 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
           "<button type='submit'>Save STA &amp; Connect</button></form>"
           "<p>Current IP: <b>"; page += ip;
   page += "</b></p></div>";
+
+  // Backup / Restore
+  page += "<div class='card'><h2>Backup &amp; Restore</h2>";
+  page += "<p><a href='/api/backup'><button>Download Backup</button></a> "
+          "— exports all settings + private keys as JSON</p>";
+  page += "<form method='post' action='/api/restore' enctype='multipart/form-data'>"
+          "Restore: <input type='file' name='backup' accept='.json'> "
+          "<button type='submit' onclick=\"return confirm('Restore will overwrite all settings and reboot. Continue?')\">Restore &amp; Reboot</button>"
+          "</form></div>";
 
   // OTA link
   page += "<div class='card'><a href='/update'>OTA Firmware Update</a></div>";
@@ -326,6 +547,55 @@ void WebManager::setupRoutes() {
         WiFi.disconnect(false);
         _connecting = false;
         connectSTA();
+      }
+    });
+
+  // API: backup download
+  _server.on("/api/backup", HTTP_GET,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      String json = buildBackupJson();
+      AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", json);
+      resp->addHeader("Content-Disposition", "attachment; filename=\"siren-backup.json\"");
+      resp->addHeader("Cache-Control", "no-store");
+      req->send(resp);
+    });
+
+  // API: restore upload (multipart file upload)
+  _server.on("/api/restore", HTTP_POST,
+    // onRequest — called after all upload chunks are received
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (_restore_buf.length() == 0) {
+        req->send(400, "text/plain", "No backup data received");
+        return;
+      }
+      bool ok = applyRestore(_restore_buf);
+      _restore_buf = "";
+      if (ok) {
+        String pg = FPSTR(HTML_HEAD);
+        pg += "<div class='card'><h2>Restore OK</h2>"
+              "<p class='ok'>Settings applied. Rebooting in 2 seconds...</p>"
+              "<p><a href='/'>Back</a></p></div>";
+        pg += FPSTR(HTML_FOOT);
+        req->send(200, "text/html", pg);
+        delay(2000);
+        ESP.restart();
+      } else {
+        String pg = FPSTR(HTML_HEAD);
+        pg += "<div class='card'><h2>Restore Failed</h2>"
+              "<p class='err'>Invalid or incompatible backup file (version mismatch?).</p>"
+              "<p><a href='/'>Back</a></p></div>";
+        pg += FPSTR(HTML_FOOT);
+        req->send(400, "text/html", pg);
+      }
+    },
+    // onUpload — accumulate file chunks into _restore_buf
+    [this](AsyncWebServerRequest* req, const String& filename,
+           size_t index, uint8_t* data, size_t len, bool final) {
+      if (index == 0) _restore_buf = "";
+      if (_restore_buf.length() + len < 32768) {  // 32 KB safety cap
+        _restore_buf += String((char*)data, len);
       }
     });
 

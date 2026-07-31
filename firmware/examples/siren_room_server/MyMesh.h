@@ -261,4 +261,53 @@ public:
   int  getRoomPostCount(int i) const {
     return (i >= 0 && i < MAX_ROOMS) ? (int)rooms[i].num_posted : 0;
   }
+
+  /* ---- Backup / restore accessors (JES-766) ---- */
+  const char* getRoomPassword(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].password : "";
+  }
+  const char* getRoomGuestPassword(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].guest_password : "";
+  }
+  /**
+   * Serialise room[i] LocalIdentity to buf (prv_key[64] || pub_key[32] = 96 bytes).
+   * Returns bytes written, or 0 on error.
+   */
+  size_t getRoomIdentityBytes(int i, uint8_t* buf, size_t max) {
+    if (i < 0 || i >= MAX_ROOMS) return 0;
+    return rooms[i].id.writeTo(buf, max);
+  }
+  /**
+   * Restore room[i] LocalIdentity from raw bytes and persist to SPIFFS.
+   * Activates the slot if it was inactive.
+   */
+  void setRoomIdentityFromBytes(int i, const uint8_t* buf, size_t len) {
+    if (i < 0 || i >= MAX_ROOMS) return;
+    rooms[i].id.readFrom(buf, len);
+    saveRoomIdentity(i);
+  }
+  /**
+   * Activate room slot i (if not already active) and save config.
+   * Used during restore to enable rooms that were in the backup.
+   */
+  void activateRoom(int i, const char* name, const char* pass, const char* guest) {
+    if (i < 0 || i >= MAX_ROOMS) return;
+    if (!rooms[i].active) {
+      rooms[i].active = true;
+      _num_active_rooms++;
+    }
+    if (name && name[0]) StrHelper::strncpy(rooms[i].name, name, sizeof(rooms[i].name));
+    if (pass)  StrHelper::strncpy(rooms[i].password,       pass,  sizeof(rooms[i].password));
+    if (guest) StrHelper::strncpy(rooms[i].guest_password, guest, sizeof(rooms[i].guest_password));
+    saveRoomConfig();
+  }
+  /** Deactivate room slot i (i>0 only) and save config. */
+  void deactivateRoom(int i) {
+    if (i <= 0 || i >= MAX_ROOMS) return;
+    if (rooms[i].active) {
+      rooms[i].active = false;
+      _num_active_rooms--;
+      saveRoomConfig();
+    }
+  }
 };

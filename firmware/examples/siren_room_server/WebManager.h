@@ -52,11 +52,17 @@ private:
   unsigned long    _connect_started;
   bool             _connecting;
 
+  // Accumulation buffer for POST /api/restore upload body
+  String           _restore_buf;
+
   void loadConfig();
   void saveConfig();
   void setupRoutes();
   void startAP();
   void connectSTA();
+
+  String buildBackupJson();
+  bool   applyRestore(const String& json);
 
   static String buildStatusPage(MultiRoomMesh& mesh, const char* ip, WifiMode mode,
                                  const char* ap_ssid, const char* sta_ssid);
