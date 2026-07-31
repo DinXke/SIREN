@@ -70,12 +70,28 @@
   #define MAX_ROOMS  16
 #endif
 
+/* Maximum peer room-server nodes tracked for Phase 5 replication. */
+#ifndef MAX_PEERS
+  #define MAX_PEERS  8
+#endif
+
 #define FIRMWARE_ROLE        "siren_room"
 #define MAX_POST_TEXT_LEN    (160 - 9)
 
 /* ------------------------------------------------------------------ */
 /*  Data types                                                          */
 /* ------------------------------------------------------------------ */
+
+/**
+ * A known peer room-server node (for Phase 5 anti-entropy replication).
+ * Stored in /peer_cfg on SPIFFS.
+ */
+struct PeerInfo {
+  bool     active;
+  char     name[24];
+  uint8_t  pub_key[PUB_KEY_SIZE];  // 32 bytes
+  uint32_t last_contact;           // RTC timestamp of last packet; 0 = never
+};
 
 struct PostInfo {
   mesh::Identity  author;
@@ -126,6 +142,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Global post pool (shared budget across all rooms) ---- */
   PostInfo      _post_pool[MAX_TOTAL_POSTS];
 
+  /* ---- Peer room-server list (Phase 5 replication ground work) ---- */
+  PeerInfo      peers[MAX_PEERS];
+  int           _num_peers;
+
   /* ---- Shared mesh state ---- */
   uint32_t      last_millis;
   uint64_t      uptime_millis;
@@ -166,8 +186,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          saveRoomConfig();
   void          loadRoomConfig();
 
+  /* ---- Peer persistence (Phase 5 ground work) ---- */
+  void          savePeerConfig();
+  void          loadPeerConfig();
+
   /* ---- CLI helpers ---- */
   void          handleRoomCommand(char* args, char* reply);
+  void          handlePeerCommand(char* args, char* reply);
   int           handleRequest(RoomSlot& slot, ClientInfo* sender,
                               uint32_t sender_timestamp,
                               uint8_t* payload, size_t payload_len);

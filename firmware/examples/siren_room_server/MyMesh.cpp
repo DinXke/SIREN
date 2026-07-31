@@ -73,6 +73,8 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   memset(rooms, 0, sizeof(rooms));
   memset(_post_pool, 0, sizeof(_post_pool));
   for (int i = 0; i < MAX_TOTAL_POSTS; i++) _post_pool[i].room_idx = 0xFF;
+  memset(peers, 0, sizeof(peers));
+  _num_peers = 0;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
     rooms[i].active          = false;
@@ -131,6 +133,8 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
     saveRoomConfig();
   }
 
+  loadPeerConfig();
+
   region_map.load(_fs);
 
   // Establish default scope
@@ -188,7 +192,14 @@ void MultiRoomMesh::loadOrCreateRoomIdentity(int idx) {
   char key[16];
   snprintf(key, sizeof(key), "_room%d", idx);
 
-  if (!store.load(key, rooms[idx].id)) {
+  // Backward-compat: if _room0 not found, fall back to legacy "_main" key
+  bool loaded = store.load(key, rooms[idx].id);
+  if (!loaded && idx == 0) {
+    loaded = store.load("_main", rooms[idx].id);
+    if (loaded) store.save(key, rooms[idx].id);  // migrate to _room0
+  }
+
+  if (!loaded) {
     bool loaded_baked = false;
 #if defined(SIREN_DEFAULT_PRV_KEY_HEX)
     if (idx == 0) {
@@ -1151,6 +1162,12 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     }
   }
 
+  // ---- peer management commands (Phase 5 ground work) ----
+  if (memcmp(command, "peer", 4) == 0 && (command[4] == ' ' || command[4] == 0)) {
+    handlePeerCommand(command + 4, reply);
+    return;
+  }
+
   // Fall through to shared CommonCLI
   _cli.handleCommand(sender_timestamp, command, reply);
 }
@@ -1297,7 +1314,247 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>");
+  // "room clients <idx>" — list clients in a room with permissions + last seen
+  if (memcmp(args, "clients", 7) == 0) {
+    const char* p = args + 7;
+    while (*p == ' ') p++;
+    int idx = (*p >= '0' && *p <= '9') ? atoi(p) : 0;
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    int n = rooms[idx].acl.getNumClients();
+    if (_fs) {
+      Serial.printf("room[%d] '%s' — %d client(s):\n", idx, rooms[idx].name, n);
+      for (int i = 0; i < n; i++) {
+        ClientInfo* c = rooms[idx].acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        const char* role = c->isAdmin() ? "admin" :
+          ((c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_WRITE ? "rw" :
+           (c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_ONLY  ? "ro" : "guest");
+        Serial.printf("  [%d] %s  ", i, role);
+        mesh::Utils::printHex(Serial, c->id.pub_key, 6);
+        Serial.printf("...  last=%lu\n", (unsigned long)c->last_activity);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "room[%d] %d clients", idx, n);
+    }
+    return;
+  }
+
+  // "room setperm <room_idx> <hex_pubkey> <perms>" — set ACL permissions in a specific room
+  if (memcmp(args, "setperm ", 8) == 0) {
+    char* p = args + 8;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // p now points to "<hex_pubkey> <perms>"
+    char* sp = strchr(p, ' ');
+    if (!sp) { strcpy(reply, "Err - usage: room setperm <idx> <hex> <perms>"); return; }
+    *sp++ = 0;
+    uint8_t pubkey[PUB_KEY_SIZE];
+    int hex_len = min((int)strlen(p), PUB_KEY_SIZE * 2);
+    if (mesh::Utils::fromHex(pubkey, hex_len / 2, p)) {
+      uint8_t perms = atoi(sp);
+      if (rooms[idx].acl.applyPermissions(rooms[idx].id, pubkey, hex_len / 2, perms)) {
+        rooms[idx].dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+        sprintf(reply, "OK - room[%d] perm set", idx);
+      } else {
+        strcpy(reply, "Err - pubkey not found or invalid");
+      }
+    } else {
+      strcpy(reply, "Err - bad pubkey hex");
+    }
+    return;
+  }
+
+  // "room status <idx>" — per-client last-contact + unsynced post count
+  if (memcmp(args, "status", 6) == 0) {
+    const char* p = args + 6;
+    while (*p == ' ') p++;
+    int idx = (*p >= '0' && *p <= '9') ? atoi(p) : 0;
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    RoomSlot& slot = rooms[idx];
+    int n = slot.acl.getNumClients();
+    if (_fs) {
+      Serial.printf("room[%d] '%s'  posts=%d  clients=%d:\n",
+                    idx, slot.name, (int)slot.num_posted, n);
+      for (int i = 0; i < n; i++) {
+        ClientInfo* c = slot.acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        const char* role = c->isAdmin() ? "admin" :
+          ((c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_WRITE ? "rw" :
+           (c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_ONLY  ? "ro" : "guest");
+        uint8_t lag = getUnsyncedCount(slot, c);
+        Serial.printf("  [%d] %s  ", i, role);
+        mesh::Utils::printHex(Serial, c->id.pub_key, 6);
+        Serial.printf("...  last_act=%lu  unsynced=%d\n",
+                      (unsigned long)c->last_activity, (int)lag);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "room[%d] posts=%d clients=%d", idx, (int)slot.num_posted, n);
+    }
+    return;
+  }
+
+  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Peer config persistence                                             */
+/* ------------------------------------------------------------------ */
+#define PEER_CFG_PATH "/peer_cfg"
+
+void MultiRoomMesh::savePeerConfig() {
+  if (!_fs) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(PEER_CFG_PATH, "w");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(PEER_CFG_PATH);
+  File f = _fs->open(PEER_CFG_PATH, FILE_O_WRITE);
+#else
+  File f = _fs->open(PEER_CFG_PATH, "w", true);
+#endif
+  if (!f) return;
+  uint8_t n = MAX_PEERS;
+  f.write(&n, 1);
+  for (int i = 0; i < MAX_PEERS; i++) {
+    uint8_t active = peers[i].active ? 1 : 0;
+    f.write(&active, 1);
+    f.write((uint8_t*)peers[i].name, sizeof(peers[i].name));
+    f.write(peers[i].pub_key, PUB_KEY_SIZE);
+    f.write((uint8_t*)&peers[i].last_contact, 4);
+  }
+  f.close();
+}
+
+void MultiRoomMesh::loadPeerConfig() {
+  if (!_fs || !_fs->exists(PEER_CFG_PATH)) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(PEER_CFG_PATH, "r");
+#else
+  File f = _fs->open(PEER_CFG_PATH);
+#endif
+  if (!f) return;
+  uint8_t n = 0;
+  if (f.read(&n, 1) != 1) { f.close(); return; }
+  if (n > MAX_PEERS) n = MAX_PEERS;
+  _num_peers = 0;
+  for (int i = 0; i < n; i++) {
+    uint8_t active = 0;
+    if (f.read(&active, 1) != 1) break;
+    if (f.read((uint8_t*)peers[i].name, sizeof(peers[i].name)) != (int)sizeof(peers[i].name)) break;
+    if (f.read(peers[i].pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+    if (f.read((uint8_t*)&peers[i].last_contact, 4) != 4) break;
+    peers[i].active = (active != 0);
+    if (peers[i].active) _num_peers++;
+  }
+  f.close();
+}
+
+/* ------------------------------------------------------------------ */
+/*  peer * CLI sub-commands                                             */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
+  while (*args == ' ') args++;
+
+  // "peer list" — list configured peer room servers
+  if (strcmp(args, "list") == 0 || strcmp(args, "ls") == 0 || args[0] == 0) {
+    if (_fs) {
+      Serial.printf("Peers (%d/%d configured):\n", _num_peers, MAX_PEERS);
+      for (int i = 0; i < MAX_PEERS; i++) {
+        if (!peers[i].active) continue;
+        Serial.printf("  [%d] '%s'  key=", i, peers[i].name);
+        mesh::Utils::printHex(Serial, peers[i].pub_key, 6);
+        Serial.printf("...  last_contact=%lu\n", (unsigned long)peers[i].last_contact);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "%d peers", _num_peers);
+    }
+    return;
+  }
+
+  // "peer add <hex64> <name>" — add a peer by 64-char hex public key
+  if (memcmp(args, "add ", 4) == 0) {
+    char* p = args + 4;
+    while (*p == ' ') p++;
+    // expect 64 hex chars = 32 bytes
+    int hex_chars = 0;
+    while (p[hex_chars] && p[hex_chars] != ' ') hex_chars++;
+    if (hex_chars < 8) { strcpy(reply, "Err - need at least 4-byte hex pubkey"); return; }
+    int byte_len = hex_chars / 2;
+    if (byte_len > PUB_KEY_SIZE) byte_len = PUB_KEY_SIZE;
+    uint8_t key[PUB_KEY_SIZE] = {};
+    if (!mesh::Utils::fromHex(key, byte_len, p)) {
+      strcpy(reply, "Err - bad hex pubkey");
+      return;
+    }
+    char* name_p = p + hex_chars;
+    while (*name_p == ' ') name_p++;
+    // Find free slot
+    for (int i = 0; i < MAX_PEERS; i++) {
+      if (!peers[i].active) {
+        peers[i].active = true;
+        memcpy(peers[i].pub_key, key, PUB_KEY_SIZE);
+        StrHelper::strncpy(peers[i].name, name_p[0] ? name_p : "peer", sizeof(peers[i].name));
+        peers[i].last_contact = 0;
+        _num_peers++;
+        savePeerConfig();
+        sprintf(reply, "OK - peer[%d] '%s' added", i, peers[i].name);
+        return;
+      }
+    }
+    strcpy(reply, "Err - peer list full");
+    return;
+  }
+
+  // "peer del <idx>" — remove a peer
+  if (memcmp(args, "del ", 4) == 0) {
+    int idx = atoi(args + 4);
+    if (idx < 0 || idx >= MAX_PEERS || !peers[idx].active) {
+      strcpy(reply, "Err - peer not active or invalid idx");
+      return;
+    }
+    peers[idx].active = false;
+    _num_peers--;
+    savePeerConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+
+  // "peer status" — show peer liveness (Phase 5 replication not yet active)
+  if (strcmp(args, "status") == 0) {
+    if (_fs) {
+      Serial.printf("Peer status (%d configured; Phase 5 replication not yet active):\n", _num_peers);
+      for (int i = 0; i < MAX_PEERS; i++) {
+        if (!peers[i].active) continue;
+        Serial.printf("  [%d] '%s'  last_contact=%lu\n",
+                      i, peers[i].name, (unsigned long)peers[i].last_contact);
+      }
+      reply[0] = 0;
+    } else {
+      sprintf(reply, "peers=%d (Phase 5 replication not active)", _num_peers);
+    }
+    return;
+  }
+
+  // "peer sync" — stub until Phase 5
+  if (strcmp(args, "sync") == 0) {
+    strcpy(reply, "OK - sync stub (Phase 5 anti-entropy not yet active)");
+    return;
+  }
+
+  strcpy(reply, "Err - usage: peer list|add <hex> <name>|del <idx>|status|sync");
 }
 
 /* ------------------------------------------------------------------ */

@@ -77,12 +77,15 @@ void setup() {
   command[0] = 0;
   board.onBootComplete();
 
-  Serial.println("[SIREN] Phase 1 — multi-room server ready");
-  Serial.println("Commands: menu | room list | room add | room del <idx>");
-  Serial.println("          room set <idx> name <n> | pass <p> | guest <p>");
+  Serial.println("[SIREN] Phase 3 — multi-room server with CLI + NVS persistence");
+  Serial.println("Commands: menu");
+  Serial.println("  room list | add | del <idx> | set <idx> name|pass|guest <v>");
+  Serial.println("  room clients <idx> | setperm <idx> <hex> <perms> | status <idx>");
+  Serial.println("  room stealth <idx> on|off | qr <idx>");
+  Serial.println("  peer list | add <hex64> <name> | del <idx> | status | sync");
 #ifdef ENABLE_WIFI_MGMT
-  Serial.println("          wifi mode ap|sta | wifi ap ssid <n> | wifi ap pass <p>");
-  Serial.println("          wifi ssid <n> | wifi pass <p> | wifi connect | wifi status");
+  Serial.println("  wifi mode ap|sta | wifi ap ssid <n> | wifi ap pass <p>");
+  Serial.println("  wifi ssid <n> | wifi pass <p> | wifi connect | wifi status");
 #endif
   Serial.println("Type 'menu' + Enter to open the interactive settings menu.");
 }
