@@ -191,6 +191,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          savePeerConfig();
   void          loadPeerConfig();
 
+  /* ---- Post pool persistence (JES-787) ---- */
+  void          savePostPool();
+  void          loadPostPool();
+
   /* ---- CLI helpers ---- */
   void          handleRoomCommand(char* args, char* reply);
   void          handlePeerCommand(char* args, char* reply);

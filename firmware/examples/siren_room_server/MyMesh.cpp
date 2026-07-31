@@ -135,6 +135,7 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   }
 
   loadPeerConfig();
+  loadPostPool();   // restore persisted messages (JES-787)
 
   region_map.load(_fs);
 
@@ -731,6 +732,7 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
 
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   slot.num_posted++;
+  savePostPool();   // persist to SPIFFS (JES-787)
 }
 
 void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post) {
@@ -1502,6 +1504,98 @@ void MultiRoomMesh::loadPeerConfig() {
     if (peers[i].active) _num_peers++;
   }
   f.close();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Post pool persistence (JES-787)                                     */
+/*  Binary layout per slot (189 bytes):                                 */
+/*    [32: author pub_key][4: post_timestamp][152: text][1: room_idx]  */
+/*  File header (6 bytes):                                              */
+/*    [4: magic 'POST'][1: version=1][1: num_slots=MAX_TOTAL_POSTS]    */
+/* ------------------------------------------------------------------ */
+#define POST_LOG_PATH "/post_log"
+#define POST_LOG_MAGIC_0 0x50   // 'P'
+#define POST_LOG_MAGIC_1 0x4F   // 'O'
+#define POST_LOG_MAGIC_2 0x53   // 'S'
+#define POST_LOG_MAGIC_3 0x54   // 'T'
+#define POST_LOG_VERSION 1
+
+void MultiRoomMesh::savePostPool() {
+  if (!_fs) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(POST_LOG_PATH, "w");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(POST_LOG_PATH);
+  File f = _fs->open(POST_LOG_PATH, FILE_O_WRITE);
+#else
+  File f = _fs->open(POST_LOG_PATH, "w", true);
+#endif
+  if (!f) return;
+
+  // Header
+  uint8_t hdr[6] = {POST_LOG_MAGIC_0, POST_LOG_MAGIC_1,
+                    POST_LOG_MAGIC_2, POST_LOG_MAGIC_3,
+                    POST_LOG_VERSION, (uint8_t)MAX_TOTAL_POSTS};
+  f.write(hdr, 6);
+
+  // All pool slots (field-by-field to avoid struct padding issues)
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    const PostInfo& p = _post_pool[i];
+    f.write(p.author.pub_key, PUB_KEY_SIZE);
+    f.write((const uint8_t*)&p.post_timestamp, 4);
+    f.write((const uint8_t*)p.text, MAX_POST_TEXT_LEN + 1);
+    f.write(&p.room_idx, 1);
+  }
+  f.close();
+}
+
+void MultiRoomMesh::loadPostPool() {
+  if (!_fs) return;
+#if defined(RP2040_PLATFORM)
+  if (!_fs->exists(POST_LOG_PATH)) return;
+  File f = _fs->open(POST_LOG_PATH, "r");
+#else
+  if (!_fs->exists(POST_LOG_PATH)) return;
+  File f = _fs->open(POST_LOG_PATH);
+#endif
+  if (!f) return;
+
+  // Validate header
+  uint8_t hdr[6];
+  if (f.read(hdr, 6) != 6) { f.close(); return; }
+  if (hdr[0] != POST_LOG_MAGIC_0 || hdr[1] != POST_LOG_MAGIC_1 ||
+      hdr[2] != POST_LOG_MAGIC_2 || hdr[3] != POST_LOG_MAGIC_3 ||
+      hdr[4] != POST_LOG_VERSION || hdr[5] != (uint8_t)MAX_TOTAL_POSTS) {
+    f.close();
+    return;   // format mismatch; start fresh
+  }
+
+  // Read all slots
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    PostInfo& p = _post_pool[i];
+    if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+    if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
+    if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != MAX_POST_TEXT_LEN + 1) break;
+    if (f.read(&p.room_idx, 1) != 1) break;
+
+    // Prune posts for rooms that are no longer active
+    if (p.room_idx != 0xFF &&
+        (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
+      memset(&p, 0, sizeof(PostInfo));
+      p.room_idx = 0xFF;
+    }
+  }
+  f.close();
+
+  // Recount num_posted for each active room from restored pool
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!rooms[i].active) continue;
+    uint16_t cnt = 0;
+    for (int k = 0; k < MAX_TOTAL_POSTS; k++) {
+      if (_post_pool[k].room_idx == (uint8_t)i) cnt++;
+    }
+    rooms[i].num_posted = cnt;
+  }
 }
 
 /* ------------------------------------------------------------------ */
