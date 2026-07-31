@@ -368,16 +368,27 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
 
   // Rooms table
   page += "<div class='card'><h2>Rooms</h2>";
-  page += "<table><tr><th>#</th><th>Name</th><th>Clients</th><th>Posts</th><th>Actions</th></tr>";
+  page += "<table><tr><th>#</th><th>Name</th><th>Stealth</th><th>Clients</th><th>Posts</th><th>Actions</th></tr>";
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!mesh.isRoomActive(i)) continue;
+    bool stealth_i = mesh.isRoomStealth(i);
     page += "<tr><td>"; page += i;
     page += "</td><td>"; page += mesh.getRoomName(i);
+    page += "</td><td>";
+    page += stealth_i ? "<span class='warn'>STEALTH</span>" : "<span class='ok'>VISIBLE</span>";
     page += "</td><td>"; page += mesh.getRoomClientCount(i);
     page += "</td><td>"; page += mesh.getRoomPostCount(i);
     page += "</td><td>";
+    // Per-room stealth toggle
+    page += "<form method='post' action='/api/room/stealth' style='display:inline'>"
+            "<input type='hidden' name='idx' value='"; page += i;
+    page += "'><input type='hidden' name='stealth' value='";
+    page += stealth_i ? "off" : "on";
+    page += "'><button type='submit'>";
+    page += stealth_i ? "Make Visible" : "Hide";
+    page += "</button></form>";
     if (i > 0) {
-      page += "<form method='post' action='/api/room/del' style='display:inline'>"
+      page += " <form method='post' action='/api/room/del' style='display:inline'>"
               "<input type='hidden' name='idx' value='"; page += i;
       page += "'><button onclick=\"return confirm('Delete room "; page += i;
       page += "?')\">Del</button></form>";
@@ -396,6 +407,31 @@ String WebManager::buildStatusPage(MultiRoomMesh& mesh, const char* ip,
           "Pass: <input name='pass' size='16'> "
           "Guest: <input name='guest' size='16'> "
           "<button type='submit'>Save</button></form></div>";
+
+  // Visibility (stealth) — global toggle
+  {
+    bool all_stealth = true;
+    bool any_active  = false;
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (!mesh.isRoomActive(i)) continue;
+      any_active = true;
+      if (!mesh.isRoomStealth(i)) { all_stealth = false; break; }
+    }
+    page += "<div class='card'><h2>Visibility</h2>";
+    if (any_active && all_stealth) {
+      page += "<p>All rooms: <b class='warn'>STEALTH</b> — no adverts sent. "
+              "Rooms are joinable if you know the key (QR / out-of-band).</p>";
+    } else {
+      page += "<p>One or more rooms: <b class='ok'>VISIBLE</b> — adverts active.</p>";
+    }
+    page += "<form method='post' action='/api/stealth'>"
+            "<button name='stealth' value='off'>Make All Visible</button> "
+            "<button name='stealth' value='on' onclick=\"return confirm('Hide all rooms? They stop broadcasting adverts.')\">Hide All (Stealth)</button>"
+            "</form>"
+            "<p style='font-size:0.85em;color:#aaa'>Per-room: use the toggle buttons in the Rooms table above, "
+            "or CLI: <code>room stealth &lt;idx&gt; on|off</code></p>"
+            "</div>";
+  }
 
   // WiFi config
   page += "<div class='card'><h2>WiFi</h2>";
@@ -500,6 +536,29 @@ void WebManager::setupRoutes() {
                  req->getParam("guest", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
+      req->redirect("/");
+    });
+
+  // API: global stealth toggle (all rooms)
+  _server.on("/api/stealth", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("stealth", true)) { req->send(400, "text/plain", "missing stealth"); return; }
+      bool s = (req->getParam("stealth", true)->value() == "on");
+      _mesh.setRoomStealth(-1, s);  // -1 = all rooms
+      req->redirect("/");
+    });
+
+  // API: per-room stealth toggle
+  _server.on("/api/room/stealth", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("idx", true) || !req->hasParam("stealth", true)) {
+        req->send(400, "text/plain", "missing idx or stealth"); return;
+      }
+      int idx = req->getParam("idx", true)->value().toInt();
+      bool s  = (req->getParam("stealth", true)->value() == "on");
+      _mesh.setRoomStealth(idx, s);
       req->redirect("/");
     });
 

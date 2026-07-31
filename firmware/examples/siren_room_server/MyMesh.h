@@ -103,6 +103,8 @@ struct RoomSlot {
   uint16_t   num_posted;
   uint16_t   num_post_pushes;
 
+  bool          stealth;           // if true: no adverts/location sent (default)
+
   unsigned long next_push;
   unsigned long next_local_advert;
   unsigned long next_flood_advert;
@@ -261,6 +263,11 @@ public:
   int  getRoomPostCount(int i) const {
     return (i >= 0 && i < MAX_ROOMS) ? (int)rooms[i].num_posted : 0;
   }
+  bool isRoomStealth(int i) const {
+    return (i >= 0 && i < MAX_ROOMS) ? rooms[i].stealth : true;
+  }
+  /** Set stealth for one room and persist; idx -1 = all rooms. */
+  void setRoomStealth(int idx, bool s);
 
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {

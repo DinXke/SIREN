@@ -76,6 +76,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
 
   for (int i = 0; i < MAX_ROOMS; i++) {
     rooms[i].active          = false;
+    rooms[i].stealth         = true;  // default: no adverts (stealth by default)
     rooms[i].next_client_idx = 0;
     rooms[i].num_posted      = 0;
     rooms[i].num_post_pushes = 0;
@@ -144,12 +145,15 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 
-  // Stagger initial advert timers per room to avoid collision
+  // Stagger initial advert timers per room to avoid collision.
+  // Stealth rooms keep timers at 0 (disabled) until visibility is enabled.
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
-    uint32_t offset_ms = (uint32_t)i * 15000;  // 15 s stagger
-    rooms[i].next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + offset_ms);
-    rooms[i].next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + offset_ms);
+    if (!rooms[i].stealth) {
+      uint32_t offset_ms = (uint32_t)i * 15000;  // 15 s stagger
+      rooms[i].next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + offset_ms);
+      rooms[i].next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + offset_ms);
+    }
   }
 
   board.setAdcMultiplier(_prefs.adc_multiplier);
@@ -234,13 +238,15 @@ void MultiRoomMesh::saveRoomConfig() {
   uint8_t n = MAX_ROOMS;
   f.write(&n, 1);
   for (int i = 0; i < MAX_ROOMS; i++) {
-    uint8_t active = rooms[i].active ? 1 : 0;
+    uint8_t active      = rooms[i].active  ? 1 : 0;
+    uint8_t stealth_b   = rooms[i].stealth ? 1 : 0;
     f.write(&active, 1);
     f.write((uint8_t*)rooms[i].name,          sizeof(rooms[i].name));
     f.write((uint8_t*)rooms[i].password,      sizeof(rooms[i].password));
     f.write((uint8_t*)rooms[i].guest_password,sizeof(rooms[i].guest_password));
     f.write((uint8_t*)&rooms[i].lat, 4);
     f.write((uint8_t*)&rooms[i].lon, 4);
+    f.write(&stealth_b, 1);   // appended last for backward compat
   }
   f.close();
 }
@@ -268,11 +274,39 @@ void MultiRoomMesh::loadRoomConfig() {
     if (f.read((uint8_t*)rooms[i].guest_password,  sizeof(rooms[i].guest_password))!= (int)sizeof(rooms[i].guest_password)) break;
     if (f.read((uint8_t*)&rooms[i].lat, 4) != 4) break;
     if (f.read((uint8_t*)&rooms[i].lon, 4) != 4) break;
+    // Stealth byte — appended in v2 of this format; default=1 (stealth) on EOF
+    uint8_t stealth_b = 1;
+    f.read(&stealth_b, 1);  // ignore return; default holds on short read
 
-    rooms[i].active = (active != 0);
+    rooms[i].active  = (active != 0);
+    rooms[i].stealth = (stealth_b != 0);
     if (rooms[i].active) _num_active_rooms++;
   }
   f.close();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stealth: visibility control per-room or all-rooms                  */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::setRoomStealth(int idx, bool s) {
+  int first = (idx < 0) ? 0 : idx;
+  int last  = (idx < 0) ? MAX_ROOMS - 1 : idx;
+  for (int i = first; i <= last; i++) {
+    if (idx >= 0 && i != idx) continue;
+    if (i < 0 || i >= MAX_ROOMS) continue;
+    rooms[i].stealth = s;
+    if (s) {
+      // Going stealth: disable advert timers
+      rooms[i].next_local_advert = 0;
+      rooms[i].next_flood_advert = 0;
+    } else if (rooms[i].active) {
+      // Becoming visible: schedule first advert soon (staggered per slot)
+      uint32_t offset_ms = (uint32_t)i * 3000;
+      rooms[i].next_local_advert = futureMillis(5000 + offset_ms);
+      rooms[i].next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + offset_ms);
+    }
+  }
+  saveRoomConfig();
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,6 +791,7 @@ void MultiRoomMesh::sendRoomAdvertisement(RoomSlot& slot, int delay_millis, bool
 void MultiRoomMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
+    if (rooms[i].stealth) continue;  // stealth rooms never advertise
     sendRoomAdvertisement(rooms[i], delay_millis + (uint32_t)i * 1000, flood);
   }
 }
@@ -767,7 +802,9 @@ void MultiRoomMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
 void MultiRoomMesh::updateAdvertTimer() {
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
-    if (_prefs.advert_interval > 0) {
+    if (rooms[i].stealth) {
+      rooms[i].next_local_advert = 0;  // stealth: disable
+    } else if (_prefs.advert_interval > 0) {
       rooms[i].next_local_advert = futureMillis((uint32_t)_prefs.advert_interval * 2 * 60 * 1000);
     } else {
       rooms[i].next_local_advert = 0;
@@ -778,7 +815,9 @@ void MultiRoomMesh::updateAdvertTimer() {
 void MultiRoomMesh::updateFloodAdvertTimer() {
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!rooms[i].active) continue;
-    if (_prefs.flood_advert_interval > 0) {
+    if (rooms[i].stealth) {
+      rooms[i].next_flood_advert = 0;  // stealth: disable
+    } else if (_prefs.flood_advert_interval > 0) {
       rooms[i].next_flood_advert = futureMillis((uint32_t)_prefs.flood_advert_interval * 60 * 60 * 1000);
     } else {
       rooms[i].next_flood_advert = 0;
@@ -931,16 +970,18 @@ void MultiRoomMesh::loop() {
 
     loopSlot(slot);
 
-    // Flood advert timer
-    if (slot.next_flood_advert && millisHasNowPassed(slot.next_flood_advert)) {
-      self_id = slot.id;
-      sendRoomAdvertisement(slot, 0, true);
-      slot.next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
-      slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
-    } else if (slot.next_local_advert && millisHasNowPassed(slot.next_local_advert)) {
-      self_id = slot.id;
-      sendRoomAdvertisement(slot, 0, false);
-      slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+    // Advert timers — stealth rooms never advertise; timers stay 0 (never fire)
+    if (!slot.stealth) {
+      if (slot.next_flood_advert && millisHasNowPassed(slot.next_flood_advert)) {
+        self_id = slot.id;
+        sendRoomAdvertisement(slot, 0, true);
+        slot.next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+        slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+      } else if (slot.next_local_advert && millisHasNowPassed(slot.next_local_advert)) {
+        self_id = slot.id;
+        sendRoomAdvertisement(slot, 0, false);
+        slot.next_local_advert = futureMillis(LOCAL_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+      }
     }
   }
 
@@ -1047,6 +1088,29 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- stealth on|off|status — global (all rooms) visibility control ----
+  if (memcmp(command, "stealth", 7) == 0) {
+    const char* arg = command + 7;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "on") == 0) {
+      setRoomStealth(-1, true);   // all rooms
+      strcpy(reply, "OK - stealth ON (all rooms hidden, no adverts)");
+    } else if (strcmp(arg, "off") == 0) {
+      setRoomStealth(-1, false);  // all rooms
+      strcpy(reply, "OK - stealth OFF (all rooms visible, adverts enabled)");
+    } else {
+      // "stealth status" or just "stealth"
+      bool any_visible = false;
+      for (int i = 0; i < MAX_ROOMS; i++) {
+        if (rooms[i].active && !rooms[i].stealth) { any_visible = true; break; }
+      }
+      sprintf(reply, "stealth=%s (%d active rooms)",
+              any_visible ? "partial/off" : "on",
+              _num_active_rooms);
+    }
+    return;
+  }
+
   // ---- set txpower <n> — applies live and persists ----
   if (memcmp(command, "set txpower ", 12) == 0) {
     int8_t pwr = (int8_t)atoi(command + 12);
@@ -1076,8 +1140,9 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     if (_fs) {  // serial output
       Serial.printf("Rooms (%d/%d active):\n", _num_active_rooms, MAX_ROOMS);
       for (int i = 0; i < MAX_ROOMS; i++) {
-        Serial.printf("  [%d] %s  name='%s'  id=", i,
-                      rooms[i].active ? "ON " : "OFF", rooms[i].name);
+        Serial.printf("  [%d] %s  name='%s'  stealth=%s  id=", i,
+                      rooms[i].active ? "ON " : "OFF", rooms[i].name,
+                      rooms[i].stealth ? "on" : "off");
         if (rooms[i].active) {
           mesh::Utils::printHex(Serial, rooms[i].id.pub_key, 4);
           Serial.printf("...  clients=%d  posts=%d",
@@ -1143,6 +1208,25 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
+  // "room stealth <idx> on|off" — per-room visibility
+  if (memcmp(args, "stealth ", 8) == 0) {
+    char* p = args + 8;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS) { strcpy(reply, "Err - invalid room idx"); return; }
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    if (strcmp(p, "on") == 0) {
+      setRoomStealth(idx, true);
+      sprintf(reply, "OK - room[%d] stealth ON", idx);
+    } else if (strcmp(p, "off") == 0) {
+      setRoomStealth(idx, false);
+      sprintf(reply, "OK - room[%d] stealth OFF (visible)", idx);
+    } else {
+      sprintf(reply, "room[%d] stealth=%s", idx, rooms[idx].stealth ? "on" : "off");
+    }
+    return;
+  }
+
   // "room del <idx>"
   if (memcmp(args, "del ", 4) == 0) {
     int idx = atoi(args + 4);
@@ -1158,7 +1242,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <value>");
+  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off");
 }
 
 /* ------------------------------------------------------------------ */
