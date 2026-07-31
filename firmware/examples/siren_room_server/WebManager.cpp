@@ -15,7 +15,7 @@
 //  Constructor
 // ---------------------------------------------------------------------------
 WebManager::WebManager(MultiRoomMesh& mesh)
-  : _server(80), _mesh(mesh), _started(false),
+  : _server(80), _mesh(mesh), _started(false), _dns_started(false),
     _mode(MODE_AP),
     _connect_started(0), _connecting(false)
 {
@@ -80,13 +80,29 @@ void WebManager::startAP() {
                 _ap_ssid, _ap_pass[0] ? "WPA2-PSK" : "open");
   WiFi.mode(WIFI_AP);
   WiFi.softAP(_ap_ssid, _ap_pass[0] ? _ap_pass : nullptr);
+  delay(100);  // allow AP interface to come up before binding server
   Serial.printf("[WiFi] AP ready — IP: %s\n",
                 WiFi.softAPIP().toString().c_str());
+
+  // Captive-portal DNS: redirect every hostname to this AP's IP
+  if (!_dns_started) {
+    _dns.start(53, "*", WiFi.softAPIP());
+    _dns_started = true;
+    Serial.println("[WiFi] Captive portal DNS started");
+  }
+
   if (!_started) {
     setupRoutes();
     _started = true;
     Serial.printf("[WiFi] Web UI: http://%s/\n",
                   WiFi.softAPIP().toString().c_str());
+  }
+}
+
+void WebManager::stopCaptivePortal() {
+  if (_dns_started) {
+    _dns.stop();
+    _dns_started = false;
   }
 }
 
@@ -502,6 +518,7 @@ void WebManager::setupRoutes() {
         if (_mode == MODE_AP) {
           startAP();
         } else {
+          stopCaptivePortal();
           connectSTA();
         }
       } else {
@@ -599,6 +616,40 @@ void WebManager::setupRoutes() {
       }
     });
 
+  // ---------------------------------------------------------------------------
+  // Captive portal detection — respond to OS probes so device opens the UI
+  // automatically. Android expects 204 on /generate_204; Apple/Windows want
+  // a small success page. Redirect everything else to the management root.
+  // These routes intentionally require NO auth (the redirect leads to auth).
+  // ---------------------------------------------------------------------------
+  auto cpRedirect = [](AsyncWebServerRequest* req) {
+    req->redirect("http://192.168.4.1/");
+  };
+  // Android connectivity check
+  _server.on("/generate_204",        HTTP_GET, cpRedirect);
+  _server.on("/gen_204",             HTTP_GET, cpRedirect);
+  // Apple CNA
+  _server.on("/hotspot-detect.html", HTTP_GET, cpRedirect);
+  _server.on("/library/test/success.html", HTTP_GET, cpRedirect);
+  // Windows NCSI
+  _server.on("/ncsi.txt",            HTTP_GET, [](AsyncWebServerRequest* req) {
+    req->send(200, "text/plain", "Microsoft NCSI");
+  });
+  _server.on("/connecttest.txt",     HTTP_GET, [](AsyncWebServerRequest* req) {
+    req->send(200, "text/plain", "Microsoft Connect Test");
+  });
+  _server.on("/redirect",            HTTP_GET, cpRedirect);
+  _server.on("/canonical.html",      HTTP_GET, cpRedirect);
+
+  // Catch-all: redirect unknown paths to management UI (captive portal UX)
+  _server.onNotFound([this](AsyncWebServerRequest* req) {
+    if (_mode == MODE_AP) {
+      req->redirect("http://192.168.4.1/");
+    } else {
+      req->send(404, "text/plain", "Not Found");
+    }
+  });
+
   // OTA via ElegantOTA
   char ota_id[80];
   snprintf(ota_id, sizeof(ota_id), "%s (%s)", _mesh.getNodeName(), "SIREN Room Server");
@@ -636,6 +687,10 @@ void WebManager::begin() {
 
 void WebManager::loop() {
   AsyncElegantOTA.loop();
+
+  if (_dns_started) {
+    _dns.processNextRequest();
+  }
 
   if (_mode == MODE_STA && _connecting) {
     wl_status_t st = WiFi.status();
@@ -676,6 +731,7 @@ bool WebManager::handleWifiCommand(const char* args, char* reply) {
     } else if (strcmp(m, "sta") == 0) {
       _mode = MODE_STA;
       saveConfig();
+      stopCaptivePortal();
       WiFi.softAPdisconnect(false);
       connectSTA();
       strcpy(reply, "OK - switched to STA mode, connecting...");

@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <DNSServer.h>
 #include <ESPAsyncWebServer.h>
 #include <SPIFFS.h>
 #include "MyMesh.h"
@@ -36,8 +37,10 @@ public:
 
 private:
   AsyncWebServer   _server;
+  DNSServer        _dns;
   MultiRoomMesh&   _mesh;
   bool             _started;
+  bool             _dns_started;
 
   // Mode
   WifiMode         _mode;
@@ -59,6 +62,7 @@ private:
   void saveConfig();
   void setupRoutes();
   void startAP();
+  void stopCaptivePortal();
   void connectSTA();
 
   String buildBackupJson();
