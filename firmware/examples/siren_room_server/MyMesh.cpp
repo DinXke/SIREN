@@ -48,6 +48,9 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _logging = false;
   region_load_active = false;
   set_radio_at = revert_radio_at = 0;
+  _post_dirty_at = 0;
+  _mqtt_post_cb  = nullptr;
+  _mqtt_post_ctx = nullptr;
 
   memset(&_prefs, 0, sizeof(_prefs));
   _prefs.airtime_factor       = 1.0f;
@@ -135,6 +138,7 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   }
 
   loadPeerConfig();
+  loadPostPool();   // restore persisted messages (JES-787)
 
   region_map.load(_fs);
 
@@ -731,6 +735,14 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
 
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   slot.num_posted++;
+  _post_dirty_at = futureMillis(5000);  // debounced persist (JES-794)
+
+  // Notify MQTT transport (JES-792 Phase a) — publish encrypted envelope
+  if (_mqtt_post_cb) {
+    _mqtt_post_cb((int)ridx, free_slot->post_timestamp,
+                  free_slot->author.pub_key, free_slot->text,
+                  _mqtt_post_ctx);
+  }
 }
 
 void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post) {
@@ -1045,6 +1057,12 @@ void MultiRoomMesh::loop() {
     radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   }
 
+  // Debounced post-pool persistence (JES-794): write SPIFFS ~5s after last new post
+  if (_post_dirty_at && millisHasNowPassed(_post_dirty_at)) {
+    _post_dirty_at = 0;
+    savePostPool();
+  }
+
   // Uptime tracking
   uint32_t now = millis();
   uptime_millis += now - last_millis;
@@ -1097,14 +1115,17 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     command += 3;
   }
 
+  // serial=true when called from the local serial CLI (sender_timestamp==0)
+  bool is_serial = (sender_timestamp == 0);
+
   // ---- room management commands ----
   if (memcmp(command, "room ", 5) == 0) {
-    handleRoomCommand(command + 5, reply);
+    handleRoomCommand(command + 5, reply, is_serial);
     return;
   }
 
   // ---- ACL commands scoped to active_slot (or room[0] for serial) ----
-  int scope = (sender_timestamp == 0) ? 0 : _active_slot;
+  int scope = is_serial ? 0 : _active_slot;
   if (memcmp(command, "setperm ", 8) == 0) {
     char* hex = &command[8];
     char* sp  = strchr(hex, ' ');
@@ -1189,7 +1210,7 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
 
   // ---- peer management commands (Phase 5 ground work) ----
   if (memcmp(command, "peer", 4) == 0 && (command[4] == ' ' || command[4] == 0)) {
-    handlePeerCommand(command + 4, reply);
+    handlePeerCommand(command + 4, reply, is_serial);
     return;
   }
 
@@ -1218,12 +1239,12 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
 /* ------------------------------------------------------------------ */
 /*  room * CLI sub-commands                                             */
 /* ------------------------------------------------------------------ */
-void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
+void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
   while (*args == ' ') args++;
 
   // "room list" — list all rooms
   if (strcmp(args, "list") == 0 || strcmp(args, "ls") == 0) {
-    if (_fs) {  // serial output
+    if (serial) {
       Serial.printf("Rooms (%d/%d active):\n", _num_active_rooms, MAX_ROOMS);
       for (int i = 0; i < MAX_ROOMS; i++) {
         Serial.printf("  [%d] %s  name='%s'  stealth=%s  id=", i,
@@ -1238,7 +1259,13 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "%d rooms active", _num_active_rooms);
+      // compact mesh-DM reply: "2/16: [0]Room0 c=1 [1]Room1 c=0"
+      int pos = sprintf(reply, "%d/%d:", _num_active_rooms, MAX_ROOMS);
+      for (int i = 0; i < MAX_ROOMS && pos < 140; i++) {
+        if (!rooms[i].active) continue;
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s c=%d",
+                        i, rooms[i].name, rooms[i].acl.getNumClients());
+      }
     }
     return;
   }
@@ -1313,8 +1340,9 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     return;
   }
 
-  // "room del <idx>"
+  // "room del <idx>" — serial-only (destructive; prevents accidental DM deletion)
   if (memcmp(args, "del ", 4) == 0) {
+    if (!serial) { strcpy(reply, "Err - room del only allowed via serial CLI"); return; }
     int idx = atoi(args + 4);
     if (idx <= 0 || idx >= MAX_ROOMS) {
       strcpy(reply, "Err - cannot delete room 0 or invalid idx");
@@ -1347,7 +1375,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     snprintf(uri, sizeof(uri),
              "meshcore://contact/add?name=%s&public_key=%s&type=3",
              rooms[idx].name, hex64);
-    if (_fs) {
+    if (serial) {
       Serial.printf("Room[%d] join URI:\n%s\n", idx, uri);
       reply[0] = 0;
     } else {
@@ -1367,7 +1395,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       return;
     }
     int n = rooms[idx].acl.getNumClients();
-    if (_fs) {
+    if (serial) {
       Serial.printf("room[%d] '%s' — %d client(s):\n", idx, rooms[idx].name, n);
       for (int i = 0; i < n; i++) {
         ClientInfo* c = rooms[idx].acl.getClientByIdx(i);
@@ -1381,7 +1409,16 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "room[%d] %d clients", idx, n);
+      // compact mesh-DM reply: "room[0] 2 clients: [0]admin [1]rw"
+      int pos = sprintf(reply, "room[%d] %d clients:", idx, n);
+      for (int i = 0; i < n && pos < 140; i++) {
+        ClientInfo* c = rooms[idx].acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        const char* role = c->isAdmin() ? "admin" :
+          ((c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_WRITE ? "rw" :
+           (c->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_READ_ONLY  ? "ro" : "guest");
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s", i, role);
+      }
     }
     return;
   }
@@ -1427,7 +1464,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
     }
     RoomSlot& slot = rooms[idx];
     int n = slot.acl.getNumClients();
-    if (_fs) {
+    if (serial) {
       Serial.printf("room[%d] '%s'  posts=%d  clients=%d:\n",
                     idx, slot.name, (int)slot.num_posted, n);
       for (int i = 0; i < n; i++) {
@@ -1444,7 +1481,15 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "room[%d] posts=%d clients=%d", idx, (int)slot.num_posted, n);
+      // compact mesh-DM reply with per-client unsynced lag
+      int pos = sprintf(reply, "room[%d]'%s' posts=%d clients=%d:",
+                        idx, slot.name, (int)slot.num_posted, n);
+      for (int i = 0; i < n && pos < 130; i++) {
+        ClientInfo* c = slot.acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;
+        uint8_t lag = getUnsyncedCount(slot, c);
+        pos += snprintf(reply + pos, 160 - pos, " [%d]lag=%d", i, (int)lag);
+      }
     }
     return;
   }
@@ -1505,14 +1550,219 @@ void MultiRoomMesh::loadPeerConfig() {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Post pool persistence (JES-787)                                     */
+/*  Binary layout per slot (189 bytes):                                 */
+/*    [32: author pub_key][4: post_timestamp][152: text][1: room_idx]  */
+/*  File header (6 bytes):                                              */
+/*    [4: magic 'POST'][1: version=1][1: num_slots=MAX_TOTAL_POSTS]    */
+/* ------------------------------------------------------------------ */
+#define POST_LOG_PATH "/post_log"
+#define POST_LOG_MAGIC_0 0x50   // 'P'
+#define POST_LOG_MAGIC_1 0x4F   // 'O'
+#define POST_LOG_MAGIC_2 0x53   // 'S'
+#define POST_LOG_MAGIC_3 0x54   // 'T'
+#define POST_LOG_VERSION 1
+
+void MultiRoomMesh::savePostPool() {
+  if (!_fs) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(POST_LOG_PATH, "w");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(POST_LOG_PATH);
+  File f = _fs->open(POST_LOG_PATH, FILE_O_WRITE);
+#else
+  File f = _fs->open(POST_LOG_PATH, "w", true);
+#endif
+  if (!f) return;
+
+  // Header
+  uint8_t hdr[6] = {POST_LOG_MAGIC_0, POST_LOG_MAGIC_1,
+                    POST_LOG_MAGIC_2, POST_LOG_MAGIC_3,
+                    POST_LOG_VERSION, (uint8_t)MAX_TOTAL_POSTS};
+  f.write(hdr, 6);
+
+  // All pool slots (field-by-field to avoid struct padding issues)
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    const PostInfo& p = _post_pool[i];
+    f.write(p.author.pub_key, PUB_KEY_SIZE);
+    f.write((const uint8_t*)&p.post_timestamp, 4);
+    f.write((const uint8_t*)p.text, MAX_POST_TEXT_LEN + 1);
+    f.write(&p.room_idx, 1);
+  }
+  f.close();
+}
+
+void MultiRoomMesh::loadPostPool() {
+  if (!_fs) return;
+#if defined(RP2040_PLATFORM)
+  if (!_fs->exists(POST_LOG_PATH)) return;
+  File f = _fs->open(POST_LOG_PATH, "r");
+#else
+  if (!_fs->exists(POST_LOG_PATH)) return;
+  File f = _fs->open(POST_LOG_PATH);
+#endif
+  if (!f) return;
+
+  // Validate header
+  uint8_t hdr[6];
+  if (f.read(hdr, 6) != 6) { f.close(); return; }
+  if (hdr[0] != POST_LOG_MAGIC_0 || hdr[1] != POST_LOG_MAGIC_1 ||
+      hdr[2] != POST_LOG_MAGIC_2 || hdr[3] != POST_LOG_MAGIC_3 ||
+      hdr[4] != POST_LOG_VERSION || hdr[5] != (uint8_t)MAX_TOTAL_POSTS) {
+    f.close();
+    return;   // format mismatch; start fresh
+  }
+
+  // Read all slots
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    PostInfo& p = _post_pool[i];
+    if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+    if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
+    if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != MAX_POST_TEXT_LEN + 1) break;
+    if (f.read(&p.room_idx, 1) != 1) break;
+
+    // Prune posts for rooms that are no longer active
+    if (p.room_idx != 0xFF &&
+        (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
+      memset(&p, 0, sizeof(PostInfo));
+      p.room_idx = 0xFF;
+    }
+  }
+  f.close();
+
+  // Recount num_posted for each active room from restored pool
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!rooms[i].active) continue;
+    uint16_t cnt = 0;
+    for (int k = 0; k < MAX_TOTAL_POSTS; k++) {
+      if (_post_pool[k].room_idx == (uint8_t)i) cnt++;
+    }
+    rooms[i].num_posted = cnt;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Post pool backup / restore (JES-790)                               */
+/* ------------------------------------------------------------------ */
+
+/** Extract a JSON quoted-string value, handling \" and \\ escapes.    */
+static bool extractJsonString(const String& json, const char* key,
+                              char* dest, size_t dlen) {
+  String k = String("\"") + key + "\":\"";
+  int pos = json.indexOf(k);
+  if (pos < 0) return false;
+  pos += k.length();
+
+  size_t out = 0;
+  while (pos < (int)json.length() && out < dlen - 1) {
+    char c = json[pos];
+    if (c == '\\' && pos + 1 < (int)json.length()) {
+      char n = json[pos + 1];
+      if      (n == '"')  { dest[out++] = '"';  pos += 2; }
+      else if (n == '\\') { dest[out++] = '\\'; pos += 2; }
+      else                { dest[out++] = n;    pos += 2; }
+    } else if (c == '"') {
+      break;
+    } else {
+      dest[out++] = c;
+      pos++;
+    }
+  }
+  dest[out] = '\0';
+  return true;
+}
+
+String MultiRoomMesh::getPostsFlatJson() const {
+  char hex[PUB_KEY_SIZE * 2 + 1];
+  String j;
+  int count = 0;
+
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    const PostInfo& p = _post_pool[i];
+    if (p.room_idx == 0xFF) continue;
+
+    char pfx[16];
+    snprintf(pfx, sizeof(pfx), "post%d_", count);
+
+    // room index, timestamp (stored as quoted strings for uniform parsing)
+    j += "\""; j += pfx; j += "ri\":\""; j += (int)p.room_idx;    j += "\",";
+    j += "\""; j += pfx; j += "ts\":\""; j += p.post_timestamp;   j += "\",";
+
+    // author public key (hex)
+    mesh::Utils::toHex(hex, p.author.pub_key, PUB_KEY_SIZE);
+    j += "\""; j += pfx; j += "ak\":\""; j += hex; j += "\",";
+
+    // text (escape " and \)
+    j += "\""; j += pfx; j += "tx\":\"";
+    for (const char* c = p.text; *c; c++) {
+      if      (*c == '"')  { j += "\\\""; }
+      else if (*c == '\\') { j += "\\\\"; }
+      else                 { j += *c; }
+    }
+    j += "\",";
+
+    count++;
+  }
+
+  j += "\"post_count\":\""; j += count; j += "\"";
+  return j;
+}
+
+bool MultiRoomMesh::restorePostsFlatJson(const String& json) {
+  char buf[12];
+  if (!extractJsonString(json, "post_count", buf, sizeof(buf))) return false;
+  int count = atoi(buf);
+  if (count <= 0) return true;
+
+  // Clear pool and per-room post counts
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    memset(&_post_pool[i], 0, sizeof(PostInfo));
+    _post_pool[i].room_idx = 0xFF;
+  }
+  for (int i = 0; i < MAX_ROOMS; i++) rooms[i].num_posted = 0;
+
+  char ri_str[4], ts_str[12], ak_hex[PUB_KEY_SIZE * 2 + 2];
+  char tx_str[MAX_POST_TEXT_LEN + 2];
+  char ri_k[24], ts_k[24], ak_k[24], tx_k[24];
+  int pool_idx = 0;
+
+  for (int n = 0; n < count && pool_idx < MAX_TOTAL_POSTS; n++) {
+    snprintf(ri_k, sizeof(ri_k), "post%d_ri", n);
+    snprintf(ts_k, sizeof(ts_k), "post%d_ts", n);
+    snprintf(ak_k, sizeof(ak_k), "post%d_ak", n);
+    snprintf(tx_k, sizeof(tx_k), "post%d_tx", n);
+
+    if (!extractJsonString(json, ri_k, ri_str, sizeof(ri_str))) continue;
+    if (!extractJsonString(json, ts_k, ts_str, sizeof(ts_str))) continue;
+    if (!extractJsonString(json, ak_k, ak_hex, sizeof(ak_hex))) continue;
+    extractJsonString(json, tx_k, tx_str, sizeof(tx_str));  // empty text OK
+
+    int ri = atoi(ri_str);
+    if (ri < 0 || ri >= MAX_ROOMS || !rooms[ri].active) continue;
+
+    PostInfo& entry = _post_pool[pool_idx];
+    if (!mesh::Utils::fromHex(entry.author.pub_key, PUB_KEY_SIZE, ak_hex)) continue;
+    entry.post_timestamp = (uint32_t)strtoul(ts_str, nullptr, 10);
+    strncpy(entry.text, tx_str, MAX_POST_TEXT_LEN);
+    entry.text[MAX_POST_TEXT_LEN] = '\0';
+    entry.room_idx = (uint8_t)ri;
+    rooms[ri].num_posted++;
+    pool_idx++;
+  }
+
+  savePostPool();
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
 /*  peer * CLI sub-commands                                             */
 /* ------------------------------------------------------------------ */
-void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
+void MultiRoomMesh::handlePeerCommand(char* args, char* reply, bool serial) {
   while (*args == ' ') args++;
 
   // "peer list" — list configured peer room servers
   if (strcmp(args, "list") == 0 || strcmp(args, "ls") == 0 || args[0] == 0) {
-    if (_fs) {
+    if (serial) {
       Serial.printf("Peers (%d/%d configured):\n", _num_peers, MAX_PEERS);
       for (int i = 0; i < MAX_PEERS; i++) {
         if (!peers[i].active) continue;
@@ -1522,13 +1772,19 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "%d peers", _num_peers);
+      // compact mesh-DM reply: "2/8: [0]Alice [1]Bob"
+      int pos = sprintf(reply, "%d/%d:", _num_peers, MAX_PEERS);
+      for (int i = 0; i < MAX_PEERS && pos < 140; i++) {
+        if (!peers[i].active) continue;
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s", i, peers[i].name);
+      }
     }
     return;
   }
 
-  // "peer add <hex64> <name>" — add a peer by 64-char hex public key
+  // "peer add <hex64> <name>" — serial-only (structural config change)
   if (memcmp(args, "add ", 4) == 0) {
+    if (!serial) { strcpy(reply, "Err - peer add only allowed via serial CLI"); return; }
     char* p = args + 4;
     while (*p == ' ') p++;
     // expect 64 hex chars = 32 bytes
@@ -1561,8 +1817,9 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
     return;
   }
 
-  // "peer del <idx>" — remove a peer
+  // "peer del <idx>" — serial-only (structural config change)
   if (memcmp(args, "del ", 4) == 0) {
+    if (!serial) { strcpy(reply, "Err - peer del only allowed via serial CLI"); return; }
     int idx = atoi(args + 4);
     if (idx < 0 || idx >= MAX_PEERS || !peers[idx].active) {
       strcpy(reply, "Err - peer not active or invalid idx");
@@ -1577,7 +1834,7 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
 
   // "peer status" — show peer liveness (Phase 5 replication not yet active)
   if (strcmp(args, "status") == 0) {
-    if (_fs) {
+    if (serial) {
       Serial.printf("Peer status (%d configured; Phase 5 replication not yet active):\n", _num_peers);
       for (int i = 0; i < MAX_PEERS; i++) {
         if (!peers[i].active) continue;
@@ -1586,7 +1843,13 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply) {
       }
       reply[0] = 0;
     } else {
-      sprintf(reply, "peers=%d (Phase 5 replication not active)", _num_peers);
+      // compact mesh-DM reply with last-contact timestamps
+      int pos = sprintf(reply, "%d peers (Phase 5 inactive):", _num_peers);
+      for (int i = 0; i < MAX_PEERS && pos < 130; i++) {
+        if (!peers[i].active) continue;
+        pos += snprintf(reply + pos, 160 - pos, " [%d]%s@%lu",
+                        i, peers[i].name, (unsigned long)peers[i].last_contact);
+      }
     }
     return;
   }

@@ -66,6 +66,16 @@ void UITask::loadSsConfig() {
   int keep = extractBool("keep");
   if (ss   >= 0) _ss_enabled = (ss   == 1);
   if (keep >= 0) _ss_keep_on = (keep == 1);
+
+  // Load page interval (integer field)
+  String ki = String("\"interval\":");
+  int istart = raw.indexOf(ki);
+  if (istart >= 0) {
+    istart += ki.length();
+    while (istart < (int)raw.length() && raw[istart] == ' ') istart++;
+    int val = raw.substring(istart).toInt();
+    if (val >= 1 && val <= 60) _ss_page_sec = (uint8_t)val;
+  }
 #endif
 }
 
@@ -73,7 +83,8 @@ void UITask::saveSsConfig() {
 #ifdef ESP32
   File f = SPIFFS.open(SS_CFG_PATH, "w");
   if (!f) return;
-  f.printf("{\"ss\":%d,\"keep\":%d}", _ss_enabled ? 1 : 0, _ss_keep_on ? 1 : 0);
+  f.printf("{\"ss\":%d,\"keep\":%d,\"interval\":%d}",
+           _ss_enabled ? 1 : 0, _ss_keep_on ? 1 : 0, (int)_ss_page_sec);
   f.close();
 #endif
 }
@@ -96,6 +107,13 @@ void UITask::setSsEnabled(bool v) {
 
 void UITask::setSsKeepOn(bool v) {
   _ss_keep_on = v;
+  saveSsConfig();
+}
+
+void UITask::setSsPageSec(uint8_t sec) {
+  if (sec < 1)  sec = 1;
+  if (sec > 60) sec = 60;
+  _ss_page_sec = sec;
   saveSsConfig();
 }
 
@@ -301,6 +319,17 @@ void UITask::handleCommand(const char* cmd, char* reply) {
       snprintf(reply, 160, "screensaver=%s keep-on=%s",
                _ss_enabled ? "on" : "off", _ss_keep_on ? "on" : "off");
     }
+  } else if (strncmp(arg, "interval", 8) == 0) {
+    const char* val = arg + 8;
+    while (*val == ' ') val++;
+    int sec = atoi(val);
+    if (sec >= 1 && sec <= 60) {
+      setSsPageSec((uint8_t)sec);
+      snprintf(reply, 160, "OK - screensaver interval set to %ds", sec);
+    } else {
+      snprintf(reply, 160, "screensaver=%s keep-on=%s interval=%ds (range: 1-60)",
+               _ss_enabled ? "on" : "off", _ss_keep_on ? "on" : "off", (int)_ss_page_sec);
+    }
   } else if (strcmp(arg, "on") == 0) {
     setSsEnabled(true);
     strcpy(reply, "OK - screensaver ON (cycling stats, keeps screen alive)");
@@ -309,8 +338,8 @@ void UITask::handleCommand(const char* cmd, char* reply) {
     strcpy(reply, "OK - screensaver OFF");
   } else {
     // Status
-    snprintf(reply, 160, "screensaver=%s keep-on=%s",
-             _ss_enabled ? "on" : "off", _ss_keep_on ? "on" : "off");
+    snprintf(reply, 160, "screensaver=%s keep-on=%s interval=%ds",
+             _ss_enabled ? "on" : "off", _ss_keep_on ? "on" : "off", (int)_ss_page_sec);
   }
 }
 
@@ -359,13 +388,13 @@ void UITask::loop() {
           // Enter screensaver
           _in_screensaver    = true;
           _ss_page           = 0;
-          _ss_next_page      = now + SS_PAGE_MILLIS;
+          _ss_next_page      = now + (uint32_t)_ss_page_sec * 1000UL;
           _ss_offset_x       = SS_DRIFT_X[0];
           _ss_offset_y       = SS_DRIFT_Y[0];
         } else if (now >= _ss_next_page) {
           // Advance screensaver page
           _ss_page           = (_ss_page + 1) % SS_PAGES;
-          _ss_next_page      = now + SS_PAGE_MILLIS;
+          _ss_next_page      = now + (uint32_t)_ss_page_sec * 1000UL;
           _ss_offset_x       = SS_DRIFT_X[_ss_page];
           _ss_offset_y       = SS_DRIFT_Y[_ss_page];
         }

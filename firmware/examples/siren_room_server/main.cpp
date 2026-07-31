@@ -5,6 +5,7 @@
 #include "SettingsMenu.h"
 #ifdef ENABLE_WIFI_MGMT
   #include "WebManager.h"
+  #include "MqttManager.h"
 #endif
 
 #ifdef DISPLAY_CLASS
@@ -19,7 +20,8 @@ MultiRoomMesh the_mesh(board, radio_driver,
                        rtc_clock, tables);
 SettingsMenu settings_menu(the_mesh);
 #ifdef ENABLE_WIFI_MGMT
-  WebManager web_manager(the_mesh);
+  WebManager  web_manager(the_mesh);
+  MqttManager mqtt_manager(the_mesh);
 #endif
 
 void halt() { while (1); }
@@ -64,6 +66,14 @@ void setup() {
 
 #ifdef ENABLE_WIFI_MGMT
   web_manager.begin();
+
+  // MqttManager: register post-publish hook into the mesh, then start
+  the_mesh.setPostPublishCallback(
+    [](int room_idx, uint32_t ts, const uint8_t* auth, const char* txt, void* ctx) {
+      ((MqttManager*)ctx)->onPostAdded(room_idx, ts, auth, txt);
+    }, &mqtt_manager);
+  mqtt_manager.begin();
+  web_manager.setMqttManager(&mqtt_manager);
 #endif
 
 #ifdef DISPLAY_CLASS
@@ -89,6 +99,7 @@ void setup() {
 #ifdef ENABLE_WIFI_MGMT
   Serial.println("  wifi mode ap|sta | wifi ap ssid <n> | wifi ap pass <p>");
   Serial.println("  wifi ssid <n> | wifi pass <p> | wifi connect | wifi status");
+  Serial.println("  mqtt status | enable | disable | set host|port|tls|user|pass|net_id ...");
 #endif
   Serial.println("Type 'menu' + Enter to open the interactive settings menu.");
 }
@@ -130,6 +141,12 @@ void loop() {
           web_manager.handleWifiCommand(command + 5, reply);
           handled = true;
         }
+        if (!handled && memcmp(command, "mqtt", 4) == 0 &&
+            (command[4] == 0 || command[4] == ' ')) {
+          const char* mqtt_args = (command[4] == ' ') ? command + 5 : "status";
+          mqtt_manager.handleMqttCommand(mqtt_args, reply);
+          handled = true;
+        }
 #endif
         if (!handled) {
           the_mesh.handleCommand(0, command, reply);
@@ -144,6 +161,7 @@ void loop() {
   sensors.loop();
 #ifdef ENABLE_WIFI_MGMT
   web_manager.loop();
+  mqtt_manager.loop();
 #endif
 #ifdef DISPLAY_CLASS
   {

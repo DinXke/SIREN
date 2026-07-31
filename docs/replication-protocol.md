@@ -41,6 +41,32 @@ When two nodes compare version vectors, they can determine exactly which posts e
 
 ---
 
+## Visual Overview
+
+Before the detailed protocol, here is a one-picture summary of how two SIREN nodes sync:
+
+```mermaid
+sequenceDiagram
+    participant A as Node A<br/>(Building A)
+    participant B as Node B<br/>(Building B)
+
+    Note over A,B: Node A wakes up for its 60s pull cycle
+
+    A->>B: SYNCREQ<br/>version vector: {Triage:42, ICU:17}
+    Note over B: Compare A's vector to B's state<br/>B has Triage:45, ICU:17<br/>→ A is missing Triage posts 43, 44, 45
+
+    B->>A: SYNCDAT post: Triage seq=43 "Patient in bay 3"
+    B->>A: SYNCDAT post: Triage seq=44 "Bay 3 needs surgeon"
+    B->>A: SYNCDAT post: Triage seq=45 "Surgeon en route"
+    B->>A: SYNCEND<br/>version vector: {Triage:45, ICU:17}
+
+    Note over A: A stores all 3 new posts in RAM<br/>A now knows B's state
+
+    Note over A,B: (B also pulls from A in its own cycle — staggered by 20s)
+```
+
+---
+
 ## Protocol: SYNCREQ / SYNCDAT / SYNCEND
 
 Replication uses three custom packet types transmitted over the LoRa mesh as encrypted direct messages between room server nodes:
@@ -69,6 +95,19 @@ This allows Node A to update its knowledge of what Node B has, and to reciprocat
 
 ---
 
+## Why Encrypted DMs?
+
+SIREN sync frames travel as **encrypted Direct Messages** (DMs) between room server nodes — not as radio broadcasts. This matters for several reasons:
+
+- **Privacy**: sync traffic is not readable by other devices in range — only the addressed peer node can decrypt it
+- **Addressing**: each DM is addressed to the peer's Ed25519 public key, ensuring it reaches the right node
+- **Security**: X25519 key exchange provides end-to-end encryption; replay attacks are blocked by MeshCore's packet dedup
+- **Reliability**: DM retransmission (up to 3 retries) handles occasional radio packet loss
+
+The peer's public key must be stored in the local peer list (`peer add <hex_pubkey> <name>`) for this to work.
+
+---
+
 ## Anti-Entropy Pull Model
 
 SIREN uses a **pull model**: each node periodically asks its peers for what it is missing. This avoids the need for real-time acknowledgements during the sync itself.
@@ -91,6 +130,20 @@ If a post arrives via replication that already exists in the local store (identi
 
 ---
 
+### Pull timing diagram (3-node cluster)
+
+```
+Time →  0s          20s         40s         60s         80s         100s
+        │           │           │           │           │           │
+Node A  [→B SYNC]   ·           ·           [→B SYNC]   ·           ·
+Node B  ·           [→C SYNC]   ·           ·           [→C SYNC]   ·
+Node C  ·           ·           [→A SYNC]   ·           ·           [→A SYNC]
+```
+
+Each node pulls from exactly one peer per 60-second cycle. The 20-second stagger avoids simultaneous LoRa transmissions.
+
+---
+
 ## Storm Prevention via Version Vectors
 
 In a three-node triangle (A ↔ B ↔ C), a naive replication protocol could loop:
@@ -100,6 +153,34 @@ In a three-node triangle (A ↔ B ↔ C), a naive replication protocol could loo
 4. C → A: sends P back to A
 
 Version vectors prevent this. When A sends P to B, A's version vector includes the sequence number for P. B updates its vector to record that A already has P. When C later pulls from B, C sends its vector; B compares and does not include P in what it sends C if C's vector shows it already has P.
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B
+    participant C as Node C
+
+    Note over A: A receives new post P (Triage seq=43)
+
+    A->>B: SYNCREQ {Triage:43, ICU:17}
+    B->>A: SYNCEND {Triage:40, ICU:17}
+    A->>B: SYNCDAT Triage seq=43 "post P"
+    B->>A: SYNCEND {Triage:43, ICU:17}
+
+    Note over B: B now has post P, knows A has it too
+
+    B->>C: SYNCREQ {Triage:43, ICU:17}
+    C->>B: SYNCEND {Triage:40, ICU:17}
+    B->>C: SYNCDAT Triage seq=43 "post P"
+    C->>B: SYNCEND {Triage:43, ICU:17}
+
+    Note over C: C now has post P, knows B has it too
+
+    C->>A: SYNCREQ {Triage:43, ICU:17}
+    Note over A: A sees C already has seq=43\nNothing to send
+    A->>C: SYNCEND {Triage:43, ICU:17}
+    Note over A,C: No duplicate send — storm prevented
+```
 
 ---
 
@@ -154,8 +235,27 @@ Phase 5 must be completed and hardware-proven before Phase 6 begins.
 
 ---
 
+## MQTT as a Second Replication Transport (JES-792)
+
+MQTT provides a parallel, infrastructure-backed transport alongside the LoRa mesh anti-entropy:
+
+| Property | LoRa Mesh | MQTT |
+|---|---|---|
+| Range | RF-limited, mesh-extended | IP network (WiFi STA required) |
+| Encryption | ECDH per-sender-receiver | AES-256-CTR per-room key |
+| Duty cycle | 1% shared | No RF cost |
+| Availability | Mesh-resilient, no infrastructure | Requires broker + WiFi |
+
+**Phase (a)** (publish-only, JES-792) is independent of JES-723/724.
+**Phases (b) and (c)** build on the same version-vector model as LoRa anti-entropy — a single reconciliation function handles both transports.
+
+See `docs/mqtt.md` for the full MQTT specification and encryption details.
+
+---
+
 ## Related Issues
 
 - **JES-723**: Phase 5 — anti-entropy replication, two nodes
 - **JES-724**: Phase 6 — three-node triangle test
 - **JES-732**: Dest-hash collision fix (prerequisite for correct multi-room replication)
+- **JES-792**: MQTT transport + dual-path sync

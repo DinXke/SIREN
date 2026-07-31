@@ -2,6 +2,7 @@
 #ifdef ENABLE_WIFI_MGMT
 
 #include "WebManager.h"
+#include "MqttManager.h"
 #include <AsyncElegantOTA.h>
 #include <qrcode.h>
 
@@ -16,7 +17,8 @@
 //  Constructor
 // ---------------------------------------------------------------------------
 WebManager::WebManager(MultiRoomMesh& mesh)
-  : _server(80), _mesh(mesh), _ui_task(nullptr), _started(false), _dns_started(false),
+  : _server(80), _mesh(mesh), _ui_task(nullptr), _mqtt_mgr(nullptr),
+    _started(false), _dns_started(false),
     _mode(MODE_AP),
     _connect_started(0), _connecting(false)
 {
@@ -164,7 +166,7 @@ String WebManager::buildBackupJson() {
   const NodePrefs* p = _mesh.getNodePrefs();
 
   String j = "{";
-  j += "\"version\":\"1\",";
+  j += "\"version\":\"2\",";
   j += "\"node_name\":\"" + jsonEscape(p->node_name) + "\",";
   j += "\"admin_pass\":\"" + jsonEscape(p->password)  + "\",";
 
@@ -214,6 +216,9 @@ String WebManager::buildBackupJson() {
     if (i < MAX_ROOMS - 1) j += ",";
   }
 
+  // Post pool (JES-790): flat key-value pairs for all active posts
+  j += ",";
+  j += _mesh.getPostsFlatJson();
   j += "}";
   return j;
 }
@@ -243,7 +248,8 @@ bool WebManager::applyRestore(const String& json) {
 
   // Validate version
   char ver[4] = {};
-  if (!extractField("version", ver, sizeof(ver)) || strcmp(ver, "1") != 0) return false;
+  if (!extractField("version", ver, sizeof(ver)) ||
+      (strcmp(ver, "1") != 0 && strcmp(ver, "2") != 0)) return false;
 
   char reply[160];
   char val[128];
@@ -323,6 +329,11 @@ bool WebManager::applyRestore(const String& json) {
         _mesh.setRoomIdentityFromBytes(i, id_buf, n);
       }
     }
+  }
+
+  // Restore post pool for version 2 backups (JES-790)
+  if (strcmp(ver, "2") == 0) {
+    _mesh.restorePostsFlatJson(json);
   }
 
   return true;
@@ -557,8 +568,9 @@ String WebManager::buildStatusPage(const char* ip) {
 
   // Varia — screensaver / OLED settings
   if (_ui_task) {
-    bool ss_on   = _ui_task->isSsEnabled();
-    bool keep_on = _ui_task->isSsKeepOn();
+    bool    ss_on    = _ui_task->isSsEnabled();
+    bool    keep_on  = _ui_task->isSsKeepOn();
+    uint8_t page_sec = _ui_task->getSsPageSec();
     page += "<div class='card'><h2>Varia</h2>";
     page += "<p><b>Screensaver (OLED)</b> &mdash; cycles stats on screen to prevent burn-in "
             "and keeps the display alive on units with glued buttons.</p>";
@@ -578,12 +590,27 @@ String WebManager::buildStatusPage(const char* ip) {
             "<option value='on'";
     page += keep_on ? " selected" : "";
     page += ">Altijd aan</option>"
-            "</select> "
+            "</select>"
+            " &nbsp; Wisseltijd: <select name='interval'>";
+    // Selectable page-dwell times in seconds
+    const uint8_t opts[] = {1, 2, 3, 5, 10, 15, 20, 30, 60};
+    for (int i = 0; i < (int)(sizeof(opts)/sizeof(opts[0])); i++) {
+      page += String("<option value='") + opts[i] + "'";
+      if (opts[i] == page_sec) page += " selected";
+      page += String(">") + opts[i] + "s</option>";
+    }
+    page += "</select> "
             "<button type='submit'>Opslaan</button></form>"
             "<p style='font-size:0.85em;color:#aaa'>CLI: "
             "<code>screensaver on|off</code> &nbsp; "
-            "<code>screensaver keep-on on|off</code></p>"
+            "<code>screensaver keep-on on|off</code> &nbsp; "
+            "<code>screensaver interval &lt;1-60&gt;</code></p>"
             "</div>";
+  }
+
+  // MQTT section (JES-792)
+  if (_mqtt_mgr) {
+    page += _mqtt_mgr->buildWebSection();
   }
 
   // OTA link
@@ -827,6 +854,10 @@ void WebManager::setupRoutes() {
       if (req->hasParam("keep", true)) {
         _ui_task->setSsKeepOn(req->getParam("keep", true)->value() == "on");
       }
+      if (req->hasParam("interval", true)) {
+        int sec = req->getParam("interval", true)->value().toInt();
+        if (sec >= 1 && sec <= 60) _ui_task->setSsPageSec((uint8_t)sec);
+      }
       req->redirect("/");
     });
 
@@ -947,7 +978,7 @@ void WebManager::setupRoutes() {
     [this](AsyncWebServerRequest* req, const String& filename,
            size_t index, uint8_t* data, size_t len, bool final) {
       if (index == 0) _restore_buf = "";
-      if (_restore_buf.length() + len < 32768) {  // 32 KB safety cap
+      if (_restore_buf.length() + len < 65536) {  // 64 KB cap (v2 backups include posts)
         _restore_buf += String((char*)data, len);
       }
     });
@@ -972,6 +1003,85 @@ void WebManager::setupRoutes() {
         snprintf(cmd, sizeof(cmd), "set txpower %s",
                  req->getParam("txpower", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
+      }
+      req->redirect("/");
+    });
+
+  // API: MQTT enable/disable toggle (JES-792)
+  _server.on("/api/mqtt/toggle", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      if (!req->hasParam("enable", true)) { req->send(400, "text/plain", "missing enable"); return; }
+      char reply[160] = {};
+      bool en = (req->getParam("enable", true)->value() == "on");
+      _mqtt_mgr->handleMqttCommand(en ? "enable" : "disable", reply);
+      req->redirect("/");
+    });
+
+  // API: MQTT config form save (JES-792)
+  // Password: if submitted empty, keep existing; if non-empty, update.
+  _server.on("/api/mqtt/set", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      char reply[160] = {};
+      char cmd[200];
+
+      auto param = [&](const char* n) -> const char* {
+        return req->hasParam(n, true) ? req->getParam(n, true)->value().c_str() : nullptr;
+      };
+
+      const char* host = param("host");
+      if (host && host[0]) {
+        snprintf(cmd, sizeof(cmd), "set host %s", host);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* port = param("port");
+      if (port && port[0]) {
+        snprintf(cmd, sizeof(cmd), "set port %s", port);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* tls_v = param("tls");
+      if (tls_v) {
+        snprintf(cmd, sizeof(cmd), "set tls %s", (strcmp(tls_v, "on") == 0) ? "on" : "off");
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* ca_fp = param("ca_fp");
+      if (ca_fp) {
+        snprintf(cmd, sizeof(cmd), "set ca_fp %s", ca_fp);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* mu = param("user");
+      if (mu) {
+        snprintf(cmd, sizeof(cmd), "set user %s", mu);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      // Password: only update if non-empty (write-only — never echoed)
+      const char* mp = param("pass");
+      if (mp && mp[0]) {
+        snprintf(cmd, sizeof(cmd), "set pass %s", mp);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* cid = param("client_id");
+      if (cid) {
+        snprintf(cmd, sizeof(cmd), "set client_id %s", cid);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* nid = param("net_id");
+      if (nid && nid[0]) {
+        snprintf(cmd, sizeof(cmd), "set net_id %s", nid);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* qos_v = param("qos");
+      if (qos_v) {
+        snprintf(cmd, sizeof(cmd), "set qos %s", qos_v);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
+      }
+      const char* intv = param("interval");
+      if (intv && intv[0]) {
+        snprintf(cmd, sizeof(cmd), "set interval %s", intv);
+        _mqtt_mgr->handleMqttCommand(cmd, reply);
       }
       req->redirect("/");
     });

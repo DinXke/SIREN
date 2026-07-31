@@ -172,6 +172,16 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   float         pending_freq, pending_bw;
   uint8_t       pending_sf, pending_cr;
 
+  /* ---- Post-pool dirty timer (JES-794) ---- */
+  unsigned long _post_dirty_at;   // 0 = not dirty; set to futureMillis(5000) on new post
+
+  /* ---- MQTT publish callback (JES-792) ---- */
+  typedef void (*PostPublishCallback)(int room_idx, uint32_t timestamp,
+                                      const uint8_t* author_pub,
+                                      const char* text, void* ctx);
+  PostPublishCallback _mqtt_post_cb;
+  void*               _mqtt_post_ctx;
+
   /* ---- Per-slot helpers ---- */
   void          addPost(RoomSlot& slot, ClientInfo* client, const char* text);
   void          pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post);
@@ -191,9 +201,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          savePeerConfig();
   void          loadPeerConfig();
 
+  /* ---- Post pool persistence (JES-787) ---- */
+  void          savePostPool();
+  void          loadPostPool();
+
   /* ---- CLI helpers ---- */
-  void          handleRoomCommand(char* args, char* reply);
-  void          handlePeerCommand(char* args, char* reply);
+  void          handleRoomCommand(char* args, char* reply, bool serial);
+  void          handlePeerCommand(char* args, char* reply, bool serial);
   int           handleRequest(RoomSlot& slot, ClientInfo* sender,
                               uint32_t sender_timestamp,
                               uint8_t* payload, size_t payload_len);
@@ -320,6 +334,19 @@ public:
         n += (c > 0) ? (uint8_t)c : 0;
       }
     return n;
+  }
+
+  /* ---- Post pool backup / restore (JES-790) ---- */
+  /** Serialise active posts as flat JSON key-value pairs for inclusion in backup. */
+  String getPostsFlatJson() const;
+  /** Parse flat post key-value pairs from a full backup JSON and restore the pool. */
+  bool   restorePostsFlatJson(const String& backup_json);
+
+  /* ---- MQTT publish callback (JES-792 Phase a) ---- */
+  /** Register the post-publish callback (called once from MqttManager::begin()). */
+  void setPostPublishCallback(PostPublishCallback cb, void* ctx) {
+    _mqtt_post_cb  = cb;
+    _mqtt_post_ctx = ctx;
   }
 
   /* ---- Backup / restore accessors (JES-766) ---- */
