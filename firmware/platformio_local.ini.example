@@ -1,0 +1,38 @@
+; platformio_local.ini — local overrides, NOT committed to git
+;
+; Copy this file to firmware/platformio_local.ini and fill in your values.
+; Add build_flags that extend the SIREN_v3_room_server environment.
+;
+; SECURITY: keep platformio_local.ini off version control.
+
+; ── Admin password (SEC-001) ─────────────────────────────────────────────────
+; By default the firmware generates a unique random admin password on first
+; boot, prints it once to serial, and persists it to SPIFFS.  You do NOT need
+; to set ADMIN_PASSWORD unless you want a known, reproducible password
+; (e.g., for automated provisioning).
+;
+; Rules:
+;   - The value "password" is REJECTED — the firmware will randomise anyway.
+;   - A custom value is accepted as-is on first boot and saved to SPIFFS.
+;   - On subsequent boots the SPIFFS value takes precedence (the flag is ignored).
+;   - Change the runtime password via web UI > Settings > Change Password
+;     or serial CLI:  set password <newpassword>
+;
+;   -D ADMIN_PASSWORD='"change-me-before-deployment"'
+
+; ── Identity key (optional) ──────────────────────────────────────────────────
+; To generate a fresh Ed25519 key pair run:
+;   python scripts/gen-identity-key.py
+;
+; The dist/ binaries do NOT embed a key (SIREN_DEFAULT_PRV_KEY_HEX is unset),
+; so room 0 gets a random identity on first boot after a full erase.
+; Baking a key is optional: it lets you pre-provision known public keys into
+; companion apps before flashing the device.
+;
+;   -D SIREN_DEFAULT_PRV_KEY_HEX='"<paste-128-hex-char-private-key-here>"'
+
+[env:SIREN_v3_room_server]
+build_flags =
+  ${env:SIREN_v3_room_server.build_flags}
+;  -D ADMIN_PASSWORD='"change-me-before-deployment"'
+;  -D SIREN_DEFAULT_PRV_KEY_HEX='"<paste-128-hex-char-private-key-here>"'

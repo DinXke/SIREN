@@ -3,3 +3,7 @@
 
 # PlatformIO build artifacts (if run from repo root)
 .pio/
+
+# Local PlatformIO overrides (may contain private key material — never commit)
+firmware/platformio_local.ini
+firmware/platformio.local.ini

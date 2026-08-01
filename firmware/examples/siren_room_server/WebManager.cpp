@@ -6,10 +6,6 @@
 #include <AsyncElegantOTA.h>
 #include <qrcode.h>
 
-#ifndef ADMIN_PASSWORD
-  #define ADMIN_PASSWORD "password"
-#endif
-
 // Default AP SSID prefix — node name is appended at runtime
 #define AP_SSID_PREFIX "SIREN-"
 
@@ -159,6 +155,30 @@ static String jsonEscape(const char* s) {
   return r;
 }
 
+// Escape a C-string for safe HTML display (XSS prevention)
+static String htmlEscape(const char* s) {
+  String r;
+  for (; *s; s++) {
+    if      (*s == '&')  r += "&amp;";
+    else if (*s == '<')  r += "&lt;";
+    else if (*s == '>')  r += "&gt;";
+    else if (*s == '"')  r += "&quot;";
+    else                 r += *s;
+  }
+  return r;
+}
+
+// CSRF mitigation: verify the Origin header matches our host.
+// Modern browsers always include Origin on cross-origin form POSTs.
+// If Origin is absent (curl, direct navigation) we allow through.
+// Returns false (= reject) only when Origin is present and does NOT match.
+static bool checkOrigin(AsyncWebServerRequest* req) {
+  String origin = req->header("Origin");
+  if (origin.length() == 0) return true;
+  String host = req->host();
+  return (origin == "http://" + host || origin == "https://" + host);
+}
+
 // ---------------------------------------------------------------------------
 //  Backup JSON builder
 // ---------------------------------------------------------------------------
@@ -216,9 +236,39 @@ String WebManager::buildBackupJson() {
     if (i < MAX_ROOMS - 1) j += ",";
   }
 
+  // Peers (JES-816): each active peer as peer<n>_pub (64 hex) + peer<n>_name
+  for (int i = 0; i < MAX_PEERS; i++) {
+    const PeerInfo* peer = _mesh.getPeer(i);
+    if (!peer || !peer->active) continue;
+    char peer_pub_hex[65] = {};
+    for (int b = 0; b < PUB_KEY_SIZE; b++)
+      snprintf(peer_pub_hex + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
+    snprintf(tmp, sizeof(tmp), "%d", i);
+    j += ",\"peer"; j += tmp; j += "_pub\":\"";  j += peer_pub_hex;    j += "\"";
+    j += ",\"peer"; j += tmp; j += "_name\":\""; j += jsonEscape(peer->name); j += "\"";
+  }
+
   // Post pool (JES-790): flat key-value pairs for all active posts
   j += ",";
   j += _mesh.getPostsFlatJson();
+
+  // Name table (JES-798): hex-encode raw SPIFFS /names file
+  {
+    File nf = SPIFFS.open("/names", "r");
+    if (nf) {
+      size_t sz = nf.size();
+      j += ",\"names_hex\":\"";
+      while (sz-- > 0) {
+        uint8_t b = nf.read();
+        static const char hx[] = "0123456789abcdef";
+        j += hx[b >> 4];
+        j += hx[b & 0x0f];
+      }
+      nf.close();
+      j += "\"";
+    }
+  }
+
   j += "}";
   return j;
 }
@@ -264,7 +314,7 @@ bool WebManager::applyRestore(const String& json) {
   // Admin password
   if (extractField("admin_pass", val, sizeof(val)) && val[0]) {
     char cmd[160];
-    snprintf(cmd, sizeof(cmd), "set pass %s", val);
+    snprintf(cmd, sizeof(cmd), "password %s", val);
     _mesh.handleCommand(0, cmd, reply);
   }
 
@@ -331,9 +381,54 @@ bool WebManager::applyRestore(const String& json) {
     }
   }
 
+  // Restore peers (JES-816) — present in v2 backups that include them
+  {
+    char peer_pub_key[20], peer_name_key[20];
+    char peer_pub_hex[65] = {}, peer_name[24] = {};
+    for (int i = 0; i < MAX_PEERS; i++) {
+      snprintf(peer_pub_key,  sizeof(peer_pub_key),  "peer%d_pub",  i);
+      snprintf(peer_name_key, sizeof(peer_name_key), "peer%d_name", i);
+      if (!extractField(peer_pub_key, peer_pub_hex, sizeof(peer_pub_hex))) continue;
+      if (strlen(peer_pub_hex) != 64) continue;
+      // Validate hex charset
+      bool valid = true;
+      for (int c = 0; c < 64; c++) {
+        char ch = peer_pub_hex[c];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
+          valid = false; break;
+        }
+      }
+      if (!valid) continue;
+      uint8_t key[PUB_KEY_SIZE] = {};
+      if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, peer_pub_hex)) continue;
+      extractField(peer_name_key, peer_name, sizeof(peer_name));
+      _mesh.addPeerFromWeb(key, peer_name[0] ? peer_name : nullptr);
+    }
+  }
+
   // Restore post pool for version 2 backups (JES-790)
   if (strcmp(ver, "2") == 0) {
     _mesh.restorePostsFlatJson(json);
+  }
+
+  // Restore name table hex blob (JES-798) — present in v2 backups that include it
+  {
+    String k = String("\"names_hex\":\"");
+    int pos = json.indexOf(k);
+    if (pos >= 0) {
+      pos += k.length();
+      int end_pos = json.indexOf("\"", pos);
+      if (end_pos > pos) {
+        File nf = SPIFFS.open("/names", "w");
+        if (nf) {
+          for (int i = pos; i + 1 < end_pos; i += 2) {
+            uint8_t b = (hexNibble(json[i]) << 4) | hexNibble(json[i + 1]);
+            nf.write(b);
+          }
+          nf.close();
+        }
+      }
+    }
   }
 
   return true;
@@ -362,10 +457,13 @@ static String base64Encode(const uint8_t* data, size_t len) {
 // ---------------------------------------------------------------------------
 //  HTML page builders
 // ---------------------------------------------------------------------------
-static const char HTML_HEAD[] PROGMEM =
+static const char HTML_HEAD_PRE[] PROGMEM =
   "<!DOCTYPE html><html><head>"
   "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-  "<title>SIREN Room Server</title>"
+  "<title>";
+
+static const char HTML_HEAD_POST[] PROGMEM =
+  "</title>"
   "<style>"
   "body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:12px;}"
   "h2{color:#00d4ff;margin:0 0 8px}"
@@ -380,7 +478,298 @@ static const char HTML_HEAD[] PROGMEM =
   "a{color:#00d4ff}"
   "</style></head><body>";
 
+// Build the HTML <head> with the node name in the <title>.
+static String buildHead(const char* node_name) {
+  String h = FPSTR(HTML_HEAD_PRE);
+  h += htmlEscape(node_name);
+  h += F(" Room Server");
+  h += FPSTR(HTML_HEAD_POST);
+  return h;
+}
+
 static const char HTML_FOOT[] PROGMEM = "</body></html>";
+
+String WebManager::buildChatPage() {
+  String page = buildHead(_mesh.getNodeName());
+
+  // Tab CSS (scoped to this page)
+  page += "<style>.tab{background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;"
+          "padding:5px 14px;cursor:pointer;border-radius:4px;margin:2px}"
+          ".tab.act{background:#00d4ff;color:#000}</style>";
+
+  // Nav back to management UI
+  page += "<div class='card'><h2>Rooms &mdash; ";
+  page += htmlEscape(_mesh.getNodeName());
+  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
+
+  // Tab bar — one tab per active room; htmlEscape ensures XSS safety for labels
+  int _firstRoom = -1;
+  page += "<div style='display:flex;flex-wrap:wrap;gap:4px'>";
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!_mesh.isRoomActive(i)) continue;
+    page += "<button class='tab";
+    page += (_firstRoom < 0 ? " act" : "");
+    page += "' onclick='selTab(this,";
+    page += i;
+    page += ")'>";
+    page += htmlEscape(_mesh.getRoomName(i));
+    page += "</button>";
+    if (_firstRoom < 0) _firstRoom = i;
+  }
+  page += "</div></div>";
+
+  // Chat pane: messages + nicklist
+  page += "<div style='display:flex;gap:10px;align-items:flex-start'>";
+
+  // Messages column
+  page += "<div class='card' style='flex:1;min-width:0'>";
+  page += "<div id='msgs' style='height:320px;overflow-y:auto;background:#0d0d1a;"
+          "border:1px solid #333;padding:6px;font-size:0.9em'></div>";
+  page += "<form id='post-form' onsubmit='postMsg(event)' style='margin-top:6px'>"
+          "<input id='post-txt' style='width:75%' maxlength='140' "
+          "placeholder='Bericht als operator (max 140 tekens)...'> "
+          "<button type='submit'>Post</button></form>";
+  page += "</div>";
+
+  // Nicklist column — names are clickable to open DM
+  page += "<div class='card' style='min-width:120px;width:140px'>"
+          "<b style='color:#00d4ff'>Users</b>"
+          "<div id='nicks' style='font-size:0.85em;margin-top:6px'></div>"
+          "</div>";
+
+  page += "</div>";  // flex pane
+
+  // DM pane (hidden until a user is clicked)
+  page += "<div id='dm-pane' class='card' style='display:none'>"
+          "<div style='display:flex;justify-content:space-between;align-items:center'>"
+          "<b id='dm-title' style='color:#ffcc00'>DM</b>"
+          "<button onclick='closeDm()' style='font-size:0.75em'>&#x2715; Sluiten</button>"
+          "</div>"
+          "<div id='dm-msgs' style='height:200px;overflow-y:auto;background:#0d0d1a;"
+          "border:1px solid #333;padding:6px;font-size:0.9em;margin-top:6px'></div>"
+          "<form id='dm-form' onsubmit='sendDm(event)' style='margin-top:6px'>"
+          "<input id='dm-txt' style='width:75%' maxlength='140' placeholder='Privébericht...'> "
+          "<button type='submit'>Stuur</button></form>"
+          "</div>";
+
+  // Inline JS — uses textContent (not innerHTML) for safe display
+  page += "<script>\n";
+  page += "var room="; page += (_firstRoom >= 0 ? _firstRoom : 0); page += ",since=0,pollT=null,nickT=null;\n";
+  page += "var dmPub='',dmPollT=null;\n";
+  page += "function selTab(btn,idx){\n"
+          "  room=idx;since=0;\n"
+          "  document.getElementById('msgs').innerHTML='';\n"
+          "  var ts=document.querySelectorAll('.tab');\n"
+          "  for(var i=0;i<ts.length;i++)ts[i].classList.remove('act');\n"
+          "  btn.classList.add('act');\n"
+          "  clearTimeout(pollT);clearTimeout(nickT);\n"
+          "  fetchMsgs();fetchNicks();\n"
+          "}\n"
+          "function delPost(ridx,oid,pts,el){\n"
+          "  if(!confirm('Verwijder dit bericht?'))return;\n"
+          "  var body='room_idx='+encodeURIComponent(ridx)+'&origin_id='+encodeURIComponent(oid)+'&post_ts='+encodeURIComponent(pts);\n"
+          "  fetch('/api/room/delpost',{method:'POST',credentials:'include',\n"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})\n"
+          "  .then(function(r){\n"
+          "    if(r.ok){el.parentNode&&el.parentNode.removeChild(el);}\n"
+          "    else r.json().then(function(j){alert('Fout: '+(j.error||'onbekend'));});\n"
+          "  }).catch(function(){alert('Verbindingsfout');});\n"
+          "}\n"
+          "function fetchMsgs(){\n"
+          "  fetch('/api/chat/messages?room='+room+'&since='+since,{credentials:'include'})\n"
+          "  .then(function(r){return r.json();})\n"
+          "  .then(function(data){\n"
+          "    var box=document.getElementById('msgs');\n"
+          "    var atBottom=(box.scrollHeight-box.scrollTop-box.clientHeight<30);\n"
+          "    data.forEach(function(m){\n"
+          "      var row=document.createElement('div');\n"
+          "      row.style.marginBottom='3px';\n"
+          "      var ts=new Date(m.ts*1000).toLocaleTimeString();\n"
+          "      var s1=document.createElement('span');\n"
+          "      s1.style.color='#888';s1.style.fontSize='0.8em';\n"
+          "      s1.textContent='['+ts+'] ';\n"
+          "      var s2=document.createElement('span');\n"
+          "      s2.style.color='#00d4ff';\n"
+          "      s2.textContent='<'+m.author+'> ';\n"
+          "      var s3=document.createTextNode(m.text);\n"
+          "      var btn=document.createElement('button');\n"
+          "      btn.textContent='[x]';\n"
+          "      btn.style.cssText='margin-left:6px;font-size:0.7em;padding:1px 4px;cursor:pointer;background:transparent;color:#ff4444;border:1px solid #ff4444;border-radius:2px';\n"
+          "      btn.title='Verwijder bericht';\n"
+          "      (function(rr,oid,pts,el){btn.onclick=function(){delPost(rr,oid,pts,el);};})(room,m.origin_id,m.ts,row);\n"
+          "      row.appendChild(s1);row.appendChild(s2);row.appendChild(s3);row.appendChild(btn);\n"
+          "      box.appendChild(row);\n"
+          "      if(m.ts>since)since=m.ts;\n"
+          "    });\n"
+          "    if(atBottom)box.scrollTop=box.scrollHeight;\n"
+          "  }).catch(function(){});\n"
+          "  pollT=setTimeout(fetchMsgs,4000);\n"
+          "}\n"
+          "function fetchNicks(){\n"
+          "  fetch('/api/chat/nicks?room='+room,{credentials:'include'})\n"
+          "  .then(function(r){return r.json();})\n"
+          "  .then(function(data){\n"
+          "    var box=document.getElementById('nicks');\n"
+          "    box.innerHTML='';\n"
+          "    data.forEach(function(n){\n"
+          "      var d=document.createElement('div');\n"
+          "      d.style.color=(n.role>=3?'#ffcc00':(n.role>=2?'#00ff88':'#aaa'));\n"
+          "      d.style.cursor='pointer';\n"
+          "      d.title='Klik om te DM\\'en';\n"
+          "      d.textContent=n.name+(n.role>=3?' [op]':(n.role>=2?' [rw]':(n.role>=1?' [ro]':'')));\n"
+          "      d.onclick=(function(pub,name){return function(){openDm(pub,name);};})(n.pub,n.name);\n"
+          "      box.appendChild(d);\n"
+          "    });\n"
+          "  }).catch(function(){});\n"
+          "  nickT=setTimeout(fetchNicks,5000);\n"
+          "}\n"
+          "function postMsg(e){\n"
+          "  e.preventDefault();\n"
+          "  var txt=document.getElementById('post-txt').value.trim();\n"
+          "  if(!txt)return;\n"
+          "  fetch('/api/chat/post',{method:'POST',credentials:'include',\n"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
+          "    body:'room='+encodeURIComponent(room)+'&text='+encodeURIComponent(txt)})\n"
+          "  .then(function(r){if(r.ok)document.getElementById('post-txt').value='';});\n"
+          "}\n"
+          "function openDm(pub,name){\n"
+          "  dmPub=pub;\n"
+          "  document.getElementById('dm-title').textContent='DM: '+name;\n"
+          "  document.getElementById('dm-pane').style.display='';\n"
+          "  document.getElementById('dm-msgs').innerHTML='';\n"
+          "  clearTimeout(dmPollT);\n"
+          "  fetchDmThread();\n"
+          "}\n"
+          "function closeDm(){\n"
+          "  clearTimeout(dmPollT);\n"
+          "  dmPub='';\n"
+          "  document.getElementById('dm-pane').style.display='none';\n"
+          "}\n"
+          "function fetchDmThread(){\n"
+          "  if(!dmPub)return;\n"
+          "  fetch('/api/dm/thread?pub='+dmPub,{credentials:'include'})\n"
+          "  .then(function(r){return r.json();})\n"
+          "  .then(function(data){\n"
+          "    var box=document.getElementById('dm-msgs');\n"
+          "    var atBottom=(box.scrollHeight-box.scrollTop-box.clientHeight<30);\n"
+          "    box.innerHTML='';\n"
+          "    data.forEach(function(m){\n"
+          "      var row=document.createElement('div');\n"
+          "      row.style.marginBottom='3px';\n"
+          "      row.style.textAlign=(m.out?'right':'left');\n"
+          "      var ts=new Date(m.ts*1000).toLocaleTimeString();\n"
+          "      var s1=document.createElement('span');\n"
+          "      s1.style.color='#888';s1.style.fontSize='0.75em';\n"
+          "      s1.textContent='['+ts+'] ';\n"
+          "      var s2=document.createElement('span');\n"
+          "      s2.style.color=(m.out?'#ffcc00':'#00d4ff');\n"
+          "      s2.textContent=(m.out?'[jij] ':'')+m.text;\n"
+          "      row.appendChild(s1);row.appendChild(s2);\n"
+          "      box.appendChild(row);\n"
+          "    });\n"
+          "    if(atBottom)box.scrollTop=box.scrollHeight;\n"
+          "  }).catch(function(){});\n"
+          "  dmPollT=setTimeout(fetchDmThread,3000);\n"
+          "}\n"
+          "function sendDm(e){\n"
+          "  e.preventDefault();\n"
+          "  if(!dmPub)return;\n"
+          "  var txt=document.getElementById('dm-txt').value.trim();\n"
+          "  if(!txt)return;\n"
+          "  fetch('/api/dm/send',{method:'POST',credentials:'include',\n"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
+          "    body:'pub='+encodeURIComponent(dmPub)+'&text='+encodeURIComponent(txt)})\n"
+          "  .then(function(r){\n"
+          "    if(r.ok){document.getElementById('dm-txt').value='';fetchDmThread();}\n"
+          "    else r.text().then(function(t){alert('DM fout: '+t);});\n"
+          "  });\n"
+          "}\n"
+          "fetchMsgs();fetchNicks();\n"
+          "</script>\n";
+
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
+
+// ---------------------------------------------------------------------------
+//  ACL management page (JES-720) — admin-only, no serial required
+// ---------------------------------------------------------------------------
+String WebManager::buildAclPage() {
+  String page = buildHead(_mesh.getNodeName());
+
+  page += "<div class='card'><h2>ACL &mdash; ";
+  page += htmlEscape(_mesh.getNodeName());
+  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>"
+          "<p style='color:#aaa;font-size:0.85em'>Beheer wie in elke room mag schrijven. "
+          "Sla op om rechten direct te wijzigen (geen herstart nodig).</p></div>";
+
+  // Role labels
+  static const char* ROLE_NAMES[] = { "GUEST (geen toegang)", "Read-only", "Read-write", "ADMIN" };
+
+  for (int r = 0; r < MAX_ROOMS; r++) {
+    if (!_mesh.isRoomActive(r)) continue;
+    int nc = _mesh.getRoomNumClients(r);
+
+    page += "<div class='card'><h3>";
+    page += htmlEscape(_mesh.getRoomName(r));
+    page += " &mdash; ";
+    page += nc;
+    page += " client(s)</h3>";
+
+    if (nc == 0) {
+      page += "<p style='color:#aaa'>Geen ingelogde clients.</p>";
+    } else {
+      page += "<table style='width:100%;border-collapse:collapse'>"
+              "<tr><th style='text-align:left;padding:4px 8px'>Naam</th>"
+              "<th style='text-align:left;padding:4px 8px'>PubKey (8 hex)</th>"
+              "<th style='text-align:left;padding:4px 8px'>Rol</th>"
+              "<th style='padding:4px 8px'>Actie</th></tr>";
+
+      for (int c = 0; c < nc; c++) {
+        const ClientInfo* ci = _mesh.getRoomClient(r, c);
+        if (!ci) continue;
+
+        // Build 8-char hex prefix of pub_key
+        char pub8[9] = {};
+        for (int b = 0; b < 4; b++)
+          snprintf(pub8 + b * 2, 3, "%02x", (unsigned int)ci->id.pub_key[b]);
+
+        uint8_t perm = ci->permissions & 3;
+        const char* name = _mesh.resolveName(ci->id.pub_key);
+
+        page += "<tr style='border-top:1px solid #333'>";
+        page += "<td style='padding:4px 8px'>";
+        page += htmlEscape(name);
+        page += "</td><td style='padding:4px 8px;font-family:monospace'>";
+        page += pub8;
+        page += "</td><td style='padding:4px 8px'>";
+        page += ROLE_NAMES[perm];
+        page += "</td><td style='padding:4px 8px'>"
+                "<form method='POST' action='/api/acl/set' style='display:inline'>"
+                "<input type='hidden' name='room' value='";
+        page += r;
+        page += "'><input type='hidden' name='pub' value='";
+        page += pub8;
+        page += "'><select name='perm'>";
+        for (int p = 0; p <= 3; p++) {
+          page += "<option value='";
+          page += p;
+          page += "'";
+          if (p == perm) page += " selected";
+          page += ">";
+          page += ROLE_NAMES[p];
+          page += "</option>";
+        }
+        page += "</select> <button type='submit'>Opslaan</button></form></td></tr>";
+      }
+      page += "</table>";
+    }
+    page += "</div>";
+  }
+
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
 
 String WebManager::buildStatusPage(const char* ip) {
   MultiRoomMesh& mesh = _mesh;
@@ -388,10 +777,12 @@ String WebManager::buildStatusPage(const char* ip) {
   const char* ap_ssid = _ap_ssid;
   const char* sta_ssid = _sta_ssid;
 
-  String page = FPSTR(HTML_HEAD);
+  String page = buildHead(mesh.getNodeName());
 
   // Node info
-  page += "<div class='card'><h2>SIREN Room Server</h2>";
+  page += "<div class='card'><h2>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " Room Server</h2>";
   page += "<table>";
   page += "<tr><th>Node</th><td>"; page += mesh.getNodeName(); page += "</td></tr>";
   page += "<tr><th>WiFi Mode</th><td>"; page += (mode == MODE_AP ? "AP (hotspot)" : "STA (client)"); page += "</td></tr>";
@@ -399,7 +790,19 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "<tr><th>Firmware</th><td>" FIRMWARE_VERSION " (" FIRMWARE_BUILD_DATE ")</td></tr>";
   page += "<tr><th>Active Rooms</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
-  page += "</table></div>";
+  page += "</table>";
+  // Server name edit form (JES-828)
+  page += "<form method='post' action='/api/node/name' style='margin:6px 0'>"
+          "Server naam: <input name=\"name\" value=\"";
+  page += htmlEscape(mesh.getNodeName());
+  page += "\" maxlength='31' size='20'> "
+          "<button type='submit'>Opslaan</button></form>"
+          "<p style='font-size:0.85em;color:#aaa'>CLI: <code>set name &lt;naam&gt;</code></p>";
+  page += "<p><a href='/chat'><button>&#128172; Rooms</button></a>"
+          " &mdash; berichten per kanaal bekijken en posten als operator</p>"
+          "<p><a href='/acl'><button>&#128100; ACL beheer</button></a>"
+          " &mdash; rechten per gebruiker instellen (lees/schrijf/admin)</p>"
+          "</div>";
 
   // Rooms table
   page += "<div class='card'><h2>Rooms</h2>";
@@ -408,7 +811,7 @@ String WebManager::buildStatusPage(const char* ip) {
     if (!mesh.isRoomActive(i)) continue;
     bool stealth_i = mesh.isRoomStealth(i);
     page += "<tr><td>"; page += i;
-    page += "</td><td>"; page += mesh.getRoomName(i);
+    page += "</td><td>"; page += htmlEscape(mesh.getRoomName(i));
     page += "</td><td>";
     page += stealth_i ? "<span class='warn'>STEALTH</span>" : "<span class='ok'>VISIBLE</span>";
     page += "</td><td>"; page += mesh.getRoomClientCount(i);
@@ -425,6 +828,26 @@ String WebManager::buildStatusPage(const char* ip) {
     // QR join code button
     page += " <a href='/api/room/qr?idx="; page += i;
     page += "' style='text-decoration:none'><button>QR</button></a>";
+    // Rekey button — double-confirm via JS prompt (type room name or REKEY for room 0).
+    // Room name stored in data-exp attribute (htmlEscape covers & < > "); JS reads via
+    // dataset to avoid JS-string-literal injection (single-quote breakout).
+    {
+      const char* exp_name = (i == 0) ? "REKEY" : mesh.getRoomName(i);
+      page += " <form method='post' action='/api/room/rekey' style='display:inline'>"
+              "<input type='hidden' name='idx' value='"; page += i;
+      page += "'><input type='hidden' name='confirm' value=''>"
+              "<button type='button' data-exp=\""; page += htmlEscape(exp_name);
+      page += "\" onclick=\""
+              "var e=this.dataset.exp;"
+              "var w="; page += (i == 0) ? "'Room 0 = node-identiteit. Alle peer-links verbreken!'" : "'Bestaande QR-codes en join-URIs worden ongeldig.'";
+      page += ";"
+              "var c=window.prompt('Rekey room "; page += i;
+      page += " (\\'' + e + '\\')?\\n' + w + '\\nTyp \\'' + e + '\\' ter bevestiging:');"
+              "if(c!==null){"
+              "this.closest('form').elements.namedItem('confirm').value=c;"
+              "this.closest('form').submit();}"
+              "\">Rekey</button></form>";
+    }
     if (i > 0) {
       page += " <form method='post' action='/api/room/del' style='display:inline'>"
               "<input type='hidden' name='idx' value='"; page += i;
@@ -436,6 +859,129 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "</table>";
   page += "<form method='post' action='/api/room/add'>"
           "<button type='submit'>+ Add Room</button></form></div>";
+
+  // Peer-koppeling (JES-816)
+  {
+    // Own node pubkey (rooms[0]) — share this with the other node's operator
+    const uint8_t* own_pub = mesh.getRoomPubKey(0);
+    char own_hex[65] = {};
+    if (own_pub) {
+      for (int b = 0; b < PUB_KEY_SIZE; b++)
+        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    }
+    page += "<div class='card'><h2>Peer-koppeling (Multi-room Replicatie)</h2>";
+    page += "<p><b>Eigen node pubkey</b> &mdash; geef dit aan de operator van de andere node:<br>"
+            "<code style='word-break:break-all;font-size:0.85em'>";
+    page += own_hex;
+    page += "</code></p>";
+
+    // Peers table
+    int np = mesh.getNumPeers();
+    page += "<p>"; page += np; page += " / "; page += MAX_PEERS; page += " peers geconfigureerd</p>";
+    if (np > 0) {
+      page += "<table><tr><th>#</th><th>Naam</th><th>Pubkey prefix</th><th>Laatste contact</th><th>Acties</th></tr>";
+      for (int i = 0; i < MAX_PEERS; i++) {
+        const PeerInfo* peer = mesh.getPeer(i);
+        if (!peer || !peer->active) continue;
+        char pfx[9] = {};
+        for (int b = 0; b < 4; b++)
+          snprintf(pfx + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
+        page += "<tr><td>"; page += i;
+        page += "</td><td>"; page += htmlEscape(peer->name);
+        page += "</td><td><code>"; page += pfx; page += "...</code>";
+        page += "</td><td>";
+        page += (peer->last_contact > 0 ? String((unsigned long)peer->last_contact) : "nooit");
+        page += "</td><td>";
+        page += "<form method='post' action='/api/peer/sync' style='display:inline'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button type='submit'>Sync</button></form> ";
+        page += "<form method='post' action='/api/peer/del' style='display:inline'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button onclick=\"return confirm('Peer "; page += i;
+        page += " verwijderen?')\">Del</button></form>";
+        page += "</td></tr>";
+      }
+      page += "</table>";
+    }
+
+    // Add peer form
+    page += "<br><b>Peer toevoegen</b> (voer de volledige 64-char hex pubkey in van de andere node)<br>"
+            "<form method='post' action='/api/peer/add'>"
+            "Pubkey: <input name='pub' size='36' maxlength='64' placeholder='64 hex chars' required> "
+            "Naam: <input name='name' size='16' maxlength='23'> "
+            "<button type='submit'>Toevoegen</button></form>";
+
+    // Sync all button
+    page += "<form method='post' action='/api/peer/sync' style='margin-top:6px'>"
+            "<button type='submit'>Sync All Nu</button></form>"
+            "<p style='font-size:0.85em;color:#aaa'>CLI (serial): "
+            "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code> &nbsp; "
+            "<code>peer del &lt;idx&gt;</code> &nbsp; "
+            "<code>peer sync</code></p>"
+            "</div>";
+
+    // Sync diagnostics panel (JES-833) — fetches /api/sync/status every 10 s
+    page += "<div class='card'><h2>Sync Diagnostiek</h2>"
+            "<div id='sync-panel'><p>Laden...</p></div>"
+            "<p style='font-size:0.8em;color:#aaa'>Auto-refresh 10s &bull; RAM-counters (reset bij reboot) &bull; "
+            "<code>sync status</code> voor serial CLI</p></div>"
+            "<script>"
+            "function renderSync(d){"
+              "var el=document.getElementById('sync-panel');"
+              "if(!el)return;"
+              "while(el.firstChild)el.removeChild(el.firstChild);"
+              // Counters paragraph
+              "var cp=document.createElement('p');"
+              "cp.textContent='SYNCREQ: '+d.counters.sync_req_sent"
+                "+'  |  SYNCDAT: '+d.counters.sync_dat_recv"
+                "+'  |  Posts ontvangen: '+d.counters.sync_posts_recv"
+                "+'  |  Posts verzonden: '+d.counters.sync_posts_sent;"
+              "el.appendChild(cp);"
+              // Room hashes paragraph
+              "if(d.rooms&&d.rooms.length){"
+                "var rp=document.createElement('p');"
+                "var rb=document.createElement('b');rb.textContent='Room hashes: ';rp.appendChild(rb);"
+                "d.rooms.forEach(function(r){"
+                  "var s=document.createElement('span');"
+                  "s.textContent='['+r.idx+'] '+r.name+' ('+r.hash+'...)  ';"
+                  "rp.appendChild(s);"
+                "});"
+                "el.appendChild(rp);"
+              "}"
+              // Peers table
+              "if(!d.peers||!d.peers.length){"
+                "var np=document.createElement('p');np.textContent='Geen peers.';el.appendChild(np);return;"
+              "}"
+              "var tbl=document.createElement('table');"
+              "var hr=document.createElement('tr');"
+              "['#','Naam','Status','SYNCREQ ts','SYNCDAT ts','SYNCEND ts','Recv','Sent'].forEach(function(h){"
+                "var th=document.createElement('th');th.textContent=h;hr.appendChild(th);"
+              "});"
+              "tbl.appendChild(hr);"
+              "d.peers.forEach(function(p){"
+                "var tr=document.createElement('tr');"
+                "[p.idx,p.name,p.status,"
+                  "p.last_syncreq_ts||'-',p.last_syncdat_ts||'-',p.last_syncend_ts||'-',"
+                  "p.sync_posts_recv,p.sync_posts_sent"
+                "].forEach(function(v){"
+                  "var td=document.createElement('td');td.textContent=v;tr.appendChild(td);"
+                "});"
+                "tbl.appendChild(tr);"
+              "});"
+              "el.appendChild(tbl);"
+            "}"
+            "function loadSync(){"
+              "fetch('/api/sync/status')"
+                ".then(function(r){return r.json();})"
+                ".then(renderSync)"
+                ".catch(function(){"
+                  "var el=document.getElementById('sync-panel');"
+                  "if(el){var e=document.createElement('p');e.textContent='Fout bij ophalen.';el.appendChild(e);}"
+                "});"
+            "}"
+            "loadSync();setInterval(loadSync,10000);"
+            "</script>";
+  }
 
   // Edit room form
   page += "<div class='card'><h2>Edit Room</h2>"
@@ -624,7 +1170,7 @@ String WebManager::buildStatusPage(const char* ip) {
 //  QR code page — per-room join QR rendered via inline canvas JS
 // ---------------------------------------------------------------------------
 static String buildQrPage(MultiRoomMesh& mesh, int idx) {
-  String page = FPSTR(HTML_HEAD);
+  String page = buildHead(mesh.getNodeName());
 
   if (idx < 0 || idx >= MAX_ROOMS || !mesh.isRoomActive(idx)) {
     page += "<div class='card'><p class='err'>Room ";
@@ -749,7 +1295,7 @@ static String buildQrPage(MultiRoomMesh& mesh, int idx) {
 // ---------------------------------------------------------------------------
 void WebManager::setupRoutes() {
   const char* user = "admin";
-  const char* pass = ADMIN_PASSWORD;
+  const char* pass = _mesh.getAdminPassword();  // SEC-001: runtime password (randomised on first boot)
 
   // Main status page
   _server.on("/", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
@@ -760,6 +1306,22 @@ void WebManager::setupRoutes() {
       : WiFi.localIP().toString();
     req->send(200, "text/html", buildStatusPage(ip.c_str()));
   });
+
+  // API: set server (node) name (JES-828)
+  _server.on("/api/node/name", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("name", true)) { req->send(400, "text/plain", "missing name"); return; }
+      String n = req->getParam("name", true)->value();
+      n.trim();
+      if (!n.length() || n.length() > 31) {
+        req->send(400, "text/plain", "name leeg of te lang (max 31 tekens)"); return;
+      }
+      char cmd[64], reply[160];
+      snprintf(cmd, sizeof(cmd), "set name %.*s", 31, n.c_str());
+      _mesh.handleCommand(0, cmd, reply);
+      req->redirect("/");
+    });
 
   // API: add room
   _server.on("/api/room/add", HTTP_POST,
@@ -774,12 +1336,37 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/del", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
       char cmd[32];
       snprintf(cmd, sizeof(cmd), "room del %s",
                req->getParam("idx", true)->value().c_str());
       char reply[160] = {};
       _mesh.handleCommand(0, cmd, reply);
+      req->redirect("/");
+    });
+
+  // API: rekey room — generate new private key; double-confirm required
+  _server.on("/api/room/rekey", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      if (!req->hasParam("idx", true) || !req->hasParam("confirm", true)) {
+        req->send(400, "text/plain", "missing idx or confirm"); return;
+      }
+      int idx = req->getParam("idx", true)->value().toInt();
+      if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+        req->send(400, "text/plain", "invalid or inactive room"); return;
+      }
+      // Double-confirm: must type exact room name (room 0: "REKEY")
+      String confirm_val = req->getParam("confirm", true)->value();
+      String expected = (idx == 0) ? String("REKEY") : String(_mesh.getRoomName(idx));
+      if (!confirm_val.equals(expected)) {
+        req->send(400, "text/plain",
+          "Bevestiging onjuist. Typ de exacte roomnaam ter bevestiging (of REKEY voor room 0).");
+        return;
+      }
+      _mesh.rekeyRoom(idx);
       req->redirect("/");
     });
 
@@ -950,6 +1537,7 @@ void WebManager::setupRoutes() {
     // onRequest — called after all upload chunks are received
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (_restore_buf.length() == 0) {
         req->send(400, "text/plain", "No backup data received");
         return;
@@ -957,7 +1545,7 @@ void WebManager::setupRoutes() {
       bool ok = applyRestore(_restore_buf);
       _restore_buf = "";
       if (ok) {
-        String pg = FPSTR(HTML_HEAD);
+        String pg = buildHead(_mesh.getNodeName());
         pg += "<div class='card'><h2>Restore OK</h2>"
               "<p class='ok'>Settings applied. Rebooting in 2 seconds...</p>"
               "<p><a href='/'>Back</a></p></div>";
@@ -966,7 +1554,7 @@ void WebManager::setupRoutes() {
         delay(2000);
         ESP.restart();
       } else {
-        String pg = FPSTR(HTML_HEAD);
+        String pg = buildHead(_mesh.getNodeName());
         pg += "<div class='card'><h2>Restore Failed</h2>"
               "<p class='err'>Invalid or incompatible backup file (version mismatch?).</p>"
               "<p><a href='/'>Back</a></p></div>";
@@ -1085,6 +1673,378 @@ void WebManager::setupRoutes() {
       }
       req->redirect("/");
     });
+
+  // ---------------------------------------------------------------------------
+  // IRC chat UI (JES-798) — all routes behind admin basic-auth
+  // ---------------------------------------------------------------------------
+
+  // GET /chat — IRC-style channel/messages/nicklist page
+  _server.on("/chat", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    req->send(200, "text/html", buildChatPage());
+  });
+
+  // GET /api/chat/messages?room=<idx>&since=<ts>
+  _server.on("/api/chat/messages", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
+    uint32_t since_ts = req->hasParam("since") ? (uint32_t)req->getParam("since")->value().toInt() : 0;
+
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;
+    }
+
+    const PostInfo* pool = _mesh.getPostPool();
+    // Collect posts for room, sorted ascending by timestamp
+    const PostInfo* sorted[MAX_TOTAL_POSTS];
+    int cnt = 0;
+    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+      if (pool[i].room_idx == (uint8_t)room_idx) sorted[cnt++] = &pool[i];
+    }
+    // Insertion sort by timestamp
+    for (int i = 1; i < cnt; i++) {
+      const PostInfo* k = sorted[i]; int j = i - 1;
+      while (j >= 0 && sorted[j]->post_timestamp > k->post_timestamp) {
+        sorted[j + 1] = sorted[j]; j--;
+      }
+      sorted[j + 1] = k;
+    }
+
+    String json = "[";
+    bool first = true;
+    for (int i = 0; i < cnt; i++) {
+      // Only send posts newer than since_ts (strictly greater, or all if since==0)
+      if (since_ts > 0 && sorted[i]->post_timestamp <= since_ts) continue;
+      if (!first) json += ",";
+      first = false;
+      // origin_id as 8 hex chars for delete button (JES-824)
+      char oid_hex[9] = {};
+      for (int b = 0; b < 4; b++)
+        snprintf(oid_hex + b * 2, 3, "%02x", (unsigned int)sorted[i]->origin_id[b]);
+      json += "{\"ts\":";
+      json += (unsigned long)sorted[i]->post_timestamp;
+      json += ",\"origin_id\":\"";
+      json += oid_hex;
+      json += "\",\"author\":\"";
+      json += jsonEscape(_mesh.resolveName(sorted[i]->author.pub_key));
+      json += "\",\"text\":\"";
+      json += jsonEscape(sorted[i]->text);
+      json += "\"}";
+    }
+    json += "]";
+
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", json);
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // GET /api/chat/nicks?room=<idx>
+  _server.on("/api/chat/nicks", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;
+    }
+
+    String json = _mesh.buildNickJson(room_idx);
+
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", json);
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // POST /api/chat/post — server-authored post (admin auth only)
+  _server.on("/api/chat/post", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room", true) || !req->hasParam("text", true)) {
+      req->send(400, "text/plain", "missing room or text"); return;
+    }
+    int room_idx = req->getParam("room", true)->value().toInt();
+    const String& text = req->getParam("text", true)->value();
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "text/plain", "invalid room"); return;
+    }
+    if (text.length() == 0) { req->send(400, "text/plain", "empty text"); return; }
+    // Length clamp happens inside addServerPost -> addPost
+    _mesh.addServerPost(room_idx, text.c_str());
+    req->send(200, "text/plain", "OK");
+  });
+
+  // ---------------------------------------------------------------------------
+  // DM (direct message) API (JES-808) — all routes behind admin basic-auth
+  // ---------------------------------------------------------------------------
+
+  // GET /api/dm/convs — JSON list of active DM conversations
+  _server.on("/api/dm/convs", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncWebServerResponse* resp =
+      req->beginResponse(200, "application/json", _mesh.buildDmConvsJson());
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // GET /api/dm/thread?pub=XXXXXXXX — DM thread for one contact
+  _server.on("/api/dm/thread", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("pub")) { req->send(400, "application/json", "[]"); return; }
+    const String& pub = req->getParam("pub")->value();
+    if (pub.length() != 8) { req->send(400, "application/json", "[]"); return; }
+    AsyncWebServerResponse* resp =
+      req->beginResponse(200, "application/json", _mesh.buildDmThreadJson(pub.c_str()));
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // POST /api/dm/send (body: pub=XXXXXXXX&text=...) — send DM to a contact
+  _server.on("/api/dm/send", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("pub", true) || !req->hasParam("text", true)) {
+      req->send(400, "text/plain", "missing pub or text"); return;
+    }
+    const String& pub  = req->getParam("pub",  true)->value();
+    const String& text = req->getParam("text", true)->value();
+    if (pub.length() != 8)  { req->send(400, "text/plain", "invalid pub"); return; }
+    if (text.length() == 0) { req->send(400, "text/plain", "empty text");  return; }
+    bool ok = _mesh.dmSend(pub.c_str(), text.c_str());
+    req->send(ok ? 200 : 404, "text/plain", ok ? "OK" : "contact not found");
+  });
+
+  // ---- ACL management (JES-720) — all routes behind admin basic-auth ----
+
+  _server.on("/acl", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    req->send(200, "text/html", buildAclPage());
+  });
+
+  // GET /api/acl?room=<idx>  — JSON array of clients for that room
+  _server.on("/api/acl", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room")) { req->send(400, "application/json", "{\"error\":\"missing room\"}"); return; }
+    int ridx = req->getParam("room")->value().toInt();
+    if (ridx < 0 || ridx >= MAX_ROOMS || !_mesh.isRoomActive(ridx)) {
+      req->send(404, "application/json", "{\"error\":\"room not found\"}"); return;
+    }
+    int nc = _mesh.getRoomNumClients(ridx);
+    String j = "[";
+    for (int c = 0; c < nc; c++) {
+      const ClientInfo* ci = _mesh.getRoomClient(ridx, c);
+      if (!ci) continue;
+      char pub8[9] = {};
+      for (int b = 0; b < 4; b++)
+        snprintf(pub8 + b * 2, 3, "%02x", (unsigned int)ci->id.pub_key[b]);
+      if (j.length() > 1) j += ",";
+      j += "{\"pub\":\"";
+      j += pub8;
+      j += "\",\"name\":\"";
+      j += jsonEscape(_mesh.resolveName(ci->id.pub_key));
+      j += "\",\"perm\":";
+      j += (ci->permissions & 3);
+      j += "}";
+    }
+    j += "]";
+    req->send(200, "application/json", j);
+  });
+
+  // POST /api/acl/set  — change permissions for a client
+  _server.on("/api/acl/set", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room", true) || !req->hasParam("pub", true) || !req->hasParam("perm", true)) {
+      req->send(400, "text/plain", "missing params"); return;
+    }
+    int room = req->getParam("room", true)->value().toInt();
+    String pub  = req->getParam("pub",  true)->value();
+    int perm    = req->getParam("perm", true)->value().toInt();
+    if (perm < 0 || perm > 3) { req->send(400, "text/plain", "invalid perm"); return; }
+    bool ok = _mesh.setRoomClientPerm(room, pub.c_str(), (uint8_t)perm);
+    if (ok) req->redirect("/acl");
+    else    req->send(404, "text/plain", "client not found");
+  });
+
+  // ---- Peer management (JES-816) — all routes behind admin basic-auth ----
+
+  // GET /api/peers — JSON list of configured peers + own pubkey
+  _server.on("/api/peers", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    const uint8_t* own_pub = _mesh.getRoomPubKey(0);
+    char own_hex[65] = {};
+    if (own_pub) {
+      for (int b = 0; b < PUB_KEY_SIZE; b++)
+        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    }
+    String json = "{\"own_pub\":\"";
+    json += own_hex;
+    json += "\",\"peers\":[";
+    bool first = true;
+    for (int i = 0; i < MAX_PEERS; i++) {
+      const PeerInfo* p = _mesh.getPeer(i);
+      if (!p || !p->active) continue;
+      char pfx[9] = {};
+      for (int b = 0; b < 4; b++)
+        snprintf(pfx + b * 2, 3, "%02x", (unsigned int)p->pub_key[b]);
+      if (!first) json += ",";
+      first = false;
+      json += "{\"idx\":";  json += i;
+      json += ",\"name\":\""; json += jsonEscape(p->name); json += "\"";
+      json += ",\"pub_prefix\":\""; json += pfx; json += "\"";
+      json += ",\"last_contact\":"; json += (unsigned long)p->last_contact;
+      json += "}";
+    }
+    json += "]}";
+    req->send(200, "application/json", json);
+  });
+
+  // POST /api/peer/add (body: pub=<64hex>&name=<name>)
+  _server.on("/api/peer/add", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("pub", true)) { req->send(400, "text/plain", "missing pub"); return; }
+    const String& pub_str = req->getParam("pub", true)->value();
+    // Validate: must be exactly 64 hex characters
+    if (pub_str.length() != 64) { req->send(400, "text/plain", "pub must be 64 hex chars"); return; }
+    for (int i = 0; i < 64; i++) {
+      char c = pub_str[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+        req->send(400, "text/plain", "pub must be hex"); return;
+      }
+    }
+    uint8_t key[PUB_KEY_SIZE] = {};
+    if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, pub_str.c_str())) {
+      req->send(400, "text/plain", "bad hex"); return;
+    }
+    // Name (optional, clamped to 23 chars)
+    char name[24] = {};
+    if (req->hasParam("name", true)) {
+      const String& ns = req->getParam("name", true)->value();
+      size_t nlen = ns.length();
+      if (nlen >= sizeof(name)) nlen = sizeof(name) - 1;
+      memcpy(name, ns.c_str(), nlen);
+      name[nlen] = 0;
+    }
+    int idx = _mesh.addPeerFromWeb(key, name[0] ? name : nullptr);
+    if (idx < 0) {
+      req->send(409, "text/plain", "peer list full or duplicate"); return;
+    }
+    req->redirect("/");
+  });
+
+  // POST /api/peer/del (body: idx=<n>)
+  _server.on("/api/peer/del", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
+    int idx = req->getParam("idx", true)->value().toInt();
+    bool ok = _mesh.delPeerFromWeb(idx);
+    if (!ok) { req->send(400, "text/plain", "invalid idx"); return; }
+    req->redirect("/");
+  });
+
+  // POST /api/room/delpost (body: room_idx=N&origin_id=XXXXXXXX&post_ts=T) — admin only (JES-824)
+  _server.on("/api/room/delpost", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room_idx", true) || !req->hasParam("origin_id", true) ||
+        !req->hasParam("post_ts", true)) {
+      req->send(400, "application/json", "{\"error\":\"missing params\"}"); return;
+    }
+    int room_idx = req->getParam("room_idx", true)->value().toInt();
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    const String& oid_str = req->getParam("origin_id", true)->value();
+    if (oid_str.length() != 8) {
+      req->send(400, "application/json", "{\"error\":\"origin_id must be 8 hex chars\"}"); return;
+    }
+    for (int i = 0; i < 8; i++) {
+      char c = oid_str[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+        req->send(400, "application/json", "{\"error\":\"origin_id must be hex\"}"); return;
+      }
+    }
+    uint8_t oid[4];
+    for (int b = 0; b < 4; b++) {
+      char hb[3] = { oid_str[b * 2], oid_str[b * 2 + 1], 0 };
+      oid[b] = (uint8_t)strtoul(hb, nullptr, 16);
+    }
+    uint32_t post_ts = (uint32_t)req->getParam("post_ts", true)->value().toInt();
+    if (post_ts == 0) {
+      req->send(400, "application/json", "{\"error\":\"invalid post_ts\"}"); return;
+    }
+    bool found = _mesh.handleDeletePost((uint8_t)room_idx, oid, post_ts);
+    if (found) {
+      req->send(200, "application/json", "{\"ok\":true}");
+    } else {
+      req->send(404, "application/json", "{\"error\":\"not found\"}");
+    }
+  });
+
+  // POST /api/peer/sync (body: idx=<n> optional — omit for all peers)
+  _server.on("/api/peer/sync", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    int idx = -1;  // -1 = all peers
+    if (req->hasParam("idx", true) && req->getParam("idx", true)->value().length() > 0) {
+      idx = req->getParam("idx", true)->value().toInt();
+    }
+    _mesh.triggerPeerSync(idx);
+    req->redirect("/");
+  });
+
+  // GET /api/sync/status — sync diagnostics (JES-833, admin-auth required)
+  // Returns JSON: global counters + per-room hash info + per-peer timestamps.
+  // No private keys, passwords or message content in output.
+  _server.on("/api/sync/status", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    String j = "{";
+    // Global counters
+    j += "\"counters\":{";
+    j += "\"sync_req_sent\":";   j += _mesh.getSyncReqSent();   j += ",";
+    j += "\"sync_dat_recv\":";   j += _mesh.getSyncDatRecv();   j += ",";
+    j += "\"sync_posts_recv\":"; j += _mesh.getSyncPostsRecv(); j += ",";
+    j += "\"sync_posts_sent\":"; j += _mesh.getSyncPostsSent(); j += "},";
+    // Room hashes
+    j += "\"rooms\":[";
+    bool rf = true;
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (!_mesh.isRoomActive(i)) continue;
+      if (!rf) j += ",";
+      rf = false;
+      const uint8_t* pub = _mesh.getRoomPubKey(i);
+      char hash[9] = {};
+      if (pub) {
+        for (int b = 0; b < 4; b++) snprintf(hash + b * 2, 3, "%02x", (unsigned int)pub[b]);
+      }
+      j += "{\"idx\":";      j += i;
+      j += ",\"name\":\"";   j += jsonEscape(_mesh.getRoomName(i)); j += "\"";
+      j += ",\"hash\":\"";   j += hash; j += "\"}";
+    }
+    j += "],";
+    // Per-peer sync state
+    j += "\"peers\":[";
+    bool pf = true;
+    for (int i = 0; i < MAX_PEERS; i++) {
+      const PeerInfo* p = _mesh.getPeer(i);
+      if (!p || !p->active) continue;
+      if (!pf) j += ",";
+      pf = false;
+      char pfx[9] = {};
+      for (int b = 0; b < 4; b++) snprintf(pfx + b * 2, 3, "%02x", (unsigned int)p->pub_key[b]);
+      // Derive status string (no user-controlled content)
+      const char* status;
+      if (p->last_syncend_ts > 0 || p->last_syncdat_ts > 0) status = "OK";
+      else if (p->last_syncreq_ts > 0)                       status = "geen_response";
+      else                                                    status = "wacht";
+      j += "{\"idx\":";             j += i;
+      j += ",\"name\":\"";          j += jsonEscape(p->name); j += "\"";
+      j += ",\"pub_prefix\":\"";    j += pfx; j += "\"";
+      j += ",\"last_syncreq_ts\":"; j += (unsigned long)p->last_syncreq_ts;
+      j += ",\"last_syncdat_ts\":"; j += (unsigned long)p->last_syncdat_ts;
+      j += ",\"last_syncend_ts\":"; j += (unsigned long)p->last_syncend_ts;
+      j += ",\"sync_posts_recv\":"; j += (unsigned long)p->sync_posts_recv;
+      j += ",\"sync_posts_sent\":"; j += (unsigned long)p->sync_posts_sent;
+      j += ",\"status\":\"";        j += status; j += "\"";
+      j += "}";
+    }
+    j += "]}";
+    req->send(200, "application/json", j);
+  });
 
   // ---------------------------------------------------------------------------
   // Captive portal detection — respond to OS probes so device opens the UI

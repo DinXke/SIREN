@@ -71,6 +71,8 @@ private:
   void connectSTA();
 
   String buildStatusPage(const char* ip);
+  String buildChatPage();
+  String buildAclPage();
 
   String buildBackupJson();
   bool   applyRestore(const String& json);

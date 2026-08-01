@@ -144,6 +144,20 @@ Any issue closed with these labels or phases requires a doc update:
 
 ---
 
+## Firmware Build Rule (board directive, JES-827, 2026-08-01)
+
+**Every firmware change must build BOTH Heltec V3 and Heltec V4** and commit both sets of `dist/` binaries in the same commit.
+
+Run from the repository root:
+
+```bash
+bash scripts/build-dist.sh
+```
+
+Never commit only one target's binaries to `multiroom`. See `CLAUDE.md` at the repository root for the full rule (applies to all agents and developers).
+
+---
+
 ## Changelog
 
 Track significant documentation updates here to help reviewers understand what changed.
@@ -152,6 +166,7 @@ Track significant documentation updates here to help reviewers understand what c
 |---|---|---|
 | 2026-07-31 | DocuMaster (JES-785) | Initial documentation suite created: all 11 content areas, docs/README.md index, CONTRIBUTING-DOCS.md |
 | 2026-07-31 | CEO (JES-784) | Board directive codified: every docs change must be pushed to GitHub immediately after committing (applies to all agents) |
+| 2026-08-01 | WirelessSpecialist (JES-827) | Dual-build rule codified: every firmware change must build both V3 and V4; CLAUDE.md created at repo root |
 
 ---
 

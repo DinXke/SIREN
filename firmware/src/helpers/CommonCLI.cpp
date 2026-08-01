@@ -793,6 +793,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     int len = _callbacks->getSelfId().writeTo(prv_key, PRV_KEY_SIZE);
     mesh::Utils::toHex(tmp, prv_key, len);
     sprintf(reply, "> %s", tmp);
+  } else if (sender_timestamp == 0 && memcmp(config, "password", 8) == 0) {  // serial-only
+    sprintf(reply, "> %s", _prefs->password);
   } else if (memcmp(config, "name", 4) == 0) {
     sprintf(reply, "> %s", _prefs->node_name);
   } else if (memcmp(config, "repeat", 6) == 0) {

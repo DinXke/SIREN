@@ -39,8 +39,8 @@ class AsyncElegantOtaClass{
         String getID();
 
         String _id = getID();
-        String _username = "";
-        String _password = "";
+        const char* _username = "";
+        const char* _password = "";
         bool _authRequired = false;
 
 };

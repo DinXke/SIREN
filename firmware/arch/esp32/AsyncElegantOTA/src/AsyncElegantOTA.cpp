@@ -11,8 +11,8 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
 
     if(strlen(username) > 0){
         _authRequired = true;
-        _username = username;
-        _password = password;
+        _username = username;  // store pointer — caller must keep the string alive (e.g. _prefs.password)
+        _password = password;  // store pointer — reads live value at each auth check
     }else{
         _authRequired = false;
         _username = "";
@@ -21,7 +21,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
 
     _server->on("/update/identity", HTTP_GET, [&](AsyncWebServerRequest *request){
         if(_authRequired){
-            if(!request->authenticate(_username.c_str(), _password.c_str())){
+            if(!request->authenticate(_username, _password)){
                 return request->requestAuthentication();
             }
         }
@@ -34,7 +34,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
 
     _server->on("/update", HTTP_GET, [&](AsyncWebServerRequest *request){
         if(_authRequired){
-            if(!request->authenticate(_username.c_str(), _password.c_str())){
+            if(!request->authenticate(_username, _password)){
                 return request->requestAuthentication();
             }
         }
@@ -45,7 +45,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
 
     _server->on("/update", HTTP_POST, [&](AsyncWebServerRequest *request) {
         if(_authRequired){
-            if(!request->authenticate(_username.c_str(), _password.c_str())){
+            if(!request->authenticate(_username, _password)){
                 return request->requestAuthentication();
             }
         }
@@ -59,7 +59,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
     }, [&](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         //Upload handler chunks in data
         if(_authRequired){
-            if(!request->authenticate(_username.c_str(), _password.c_str())){
+            if(!request->authenticate(_username, _password)){
                 return request->requestAuthentication();
             }
         }
