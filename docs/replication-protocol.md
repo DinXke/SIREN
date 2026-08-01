@@ -16,7 +16,7 @@ This is called **anti-entropy replication** in distributed systems: the "entropy
 
 ## Status of Replication in SIREN
 
-> **Implemented and active.** The SYNCREQ/SYNCDAT/SYNCEND anti-entropy protocol is live, and since **JES-816** it is **multi-room**: every active room is replicated (not just `rooms[0]`). Each sync frame carries a 4-byte `room_hash` (the first 4 bytes of the room's public key) so the receiving node routes posts to the correct room.
+> **Implemented and active.** The SYNCREQ/SYNCDAT/SYNCEND anti-entropy protocol is live, and since **JES-816** it is **multi-room**: every active room **except room 0** is replicated. Room 0 is the node identity layer and never carries chat posts — sync skips it entirely (see [architecture.md](architecture.md#room-0-identity-layer-not-a-chat-room)). Each sync frame carries a 4-byte `room_hash` (the first 4 bytes of the room's public key) so the receiving node routes posts to the correct room. Frames with a `room_hash` matching room 0 are silently discarded by the receiver.
 >
 > Peer management is available from both the **web UI** (Peer-koppeling card, behind admin auth) and the **serial CLI** (`peer add|del|list|sync`). See [Coupling nodes](#coupling-nodes-in-practice) below.
 
