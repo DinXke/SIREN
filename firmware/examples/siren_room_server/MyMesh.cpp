@@ -199,7 +199,8 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   // Schedule staggered initial sync for each configured peer (Phase 5)
   for (int i = 0; i < MAX_PEERS; i++) {
     if (peers[i].active) {
-      peers[i].next_sync_at = futureMillis(PEER_SYNC_BOOT_DELAY_MS + (uint32_t)i * 5000);
+      peers[i].next_sync_at     = futureMillis(PEER_SYNC_BOOT_DELAY_MS + (uint32_t)i * 5000);
+      peers[i].next_roomsync_at = futureMillis(PEER_SYNC_BOOT_DELAY_MS + (uint32_t)i * 5000 + 30000UL);
     }
   }
   loadPostPool();      // restore persisted messages (JES-787)
@@ -1366,6 +1367,12 @@ void MultiRoomMesh::loop() {
     if (peers[pi].next_sync_at && millisHasNowPassed(peers[pi].next_sync_at)) {
       sendSyncReq(pi);
       peers[pi].next_sync_at = futureMillis((uint32_t)_sync_interval_s * 1000);
+    }
+    // Periodic room-key re-sync (JES-848): propagates rooms created while peer was offline
+    // Receive-side dedup (handleRoomSync) makes repeated sends safe.
+    if (peers[pi].next_roomsync_at && millisHasNowPassed(peers[pi].next_roomsync_at)) {
+      sendRoomSync(pi);
+      peers[pi].next_roomsync_at = futureMillis(PEER_ROOMSYNC_INTERVAL_MS);
     }
   }
 
@@ -4220,7 +4227,8 @@ int MultiRoomMesh::addPeerFromWeb(const uint8_t* pub_key, const char* name) {
                          sizeof(peers[i].name));
       peers[i].last_contact = 0;
       peers[i].secret_valid = false;
-      peers[i].next_sync_at = futureMillis(PEER_SYNC_BOOT_DELAY_MS);
+      peers[i].next_sync_at     = futureMillis(PEER_SYNC_BOOT_DELAY_MS);
+      peers[i].next_roomsync_at = futureMillis(PEER_ROOMSYNC_INTERVAL_MS);  // immediate push below; next in 10 min
       _num_peers++;
       savePeerConfig();
       sendRoomSync(i);  // JES-848: push all rooms to new peer immediately
