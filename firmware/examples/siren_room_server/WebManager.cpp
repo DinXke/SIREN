@@ -16,7 +16,8 @@ WebManager::WebManager(MultiRoomMesh& mesh)
   : _server(80), _mesh(mesh), _ui_task(nullptr), _mqtt_mgr(nullptr),
     _started(false), _dns_started(false),
     _mode(MODE_AP),
-    _connect_started(0), _connecting(false)
+    _connect_started(0), _connecting(false),
+    _ntp_synced(false), _ntp_check_ms(0)
 {
   // Default AP SSID: "SIREN-Node" — overwritten in begin() with real node name
   strncpy(_ap_ssid, "SIREN-Node", sizeof(_ap_ssid) - 1);
@@ -24,6 +25,8 @@ WebManager::WebManager(MultiRoomMesh& mesh)
   _ap_pass[0]  = 0;
   _sta_ssid[0] = 0;
   _sta_pass[0] = 0;
+  strncpy(_ntp_server, "pool.ntp.org", sizeof(_ntp_server) - 1);
+  _ntp_server[sizeof(_ntp_server) - 1] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -53,10 +56,17 @@ void WebManager::loadConfig() {
   extractField("mode", mode_str, sizeof(mode_str));
   _mode = (strcmp(mode_str, "sta") == 0) ? MODE_STA : MODE_AP;
 
-  extractField("ap_ssid",  _ap_ssid,  sizeof(_ap_ssid));
-  extractField("ap_pass",  _ap_pass,  sizeof(_ap_pass));
-  extractField("sta_ssid", _sta_ssid, sizeof(_sta_ssid));
-  extractField("sta_pass", _sta_pass, sizeof(_sta_pass));
+  extractField("ap_ssid",    _ap_ssid,    sizeof(_ap_ssid));
+  extractField("ap_pass",    _ap_pass,    sizeof(_ap_pass));
+  extractField("sta_ssid",   _sta_ssid,   sizeof(_sta_ssid));
+  extractField("sta_pass",   _sta_pass,   sizeof(_sta_pass));
+  // ntp_server is optional — keep default "pool.ntp.org" if absent
+  char ntp_buf[64] = {};
+  extractField("ntp_server", ntp_buf, sizeof(ntp_buf));
+  if (ntp_buf[0]) {
+    strncpy(_ntp_server, ntp_buf, sizeof(_ntp_server) - 1);
+    _ntp_server[sizeof(_ntp_server) - 1] = 0;
+  }
 }
 
 void WebManager::saveConfig() {
@@ -64,10 +74,47 @@ void WebManager::saveConfig() {
   if (!f) return;
   f.printf("{\"mode\":\"%s\","
            "\"ap_ssid\":\"%s\",\"ap_pass\":\"%s\","
-           "\"sta_ssid\":\"%s\",\"sta_pass\":\"%s\"}",
+           "\"sta_ssid\":\"%s\",\"sta_pass\":\"%s\","
+           "\"ntp_server\":\"%s\"}",
            _mode == MODE_STA ? "sta" : "ap",
            _ap_ssid, _ap_pass,
-           _sta_ssid, _sta_pass);
+           _sta_ssid, _sta_pass,
+           _ntp_server);
+  f.close();
+}
+
+// ---------------------------------------------------------------------------
+//  Clock epoch persistence — keeps time reasonable across power cycles even
+//  when NTP is unavailable (e.g. AP-only mode).  A single text file stores
+//  the last RTC epoch; it is restored on boot and updated after every
+//  authoritative sync (NTP or browser).
+// ---------------------------------------------------------------------------
+#define CLOCK_EPOCH_PATH  "/clock_epoch"
+// Minimum plausible epoch: 2026-01-01 00:00:00 UTC
+#define CLOCK_EPOCH_FLOOR 1767225600UL
+
+void WebManager::loadClockEpoch() {
+  File f = SPIFFS.open(CLOCK_EPOCH_PATH, "r");
+  if (!f) return;
+  String s = f.readStringUntil('\n');
+  f.close();
+  uint32_t saved = (uint32_t)s.toInt();
+  if (saved > CLOCK_EPOCH_FLOOR) {
+    uint32_t curr = (uint32_t)_mesh.getRTCClock()->getCurrentTime();
+    if (saved > curr) {
+      _mesh.getRTCClock()->setCurrentTime(saved);
+      Serial.printf("[Clock] Restored saved epoch %lu from SPIFFS\n",
+                    (unsigned long)saved);
+    }
+  }
+}
+
+void WebManager::saveClockEpoch() {
+  uint32_t now = (uint32_t)_mesh.getRTCClock()->getCurrentTime();
+  if (now <= CLOCK_EPOCH_FLOOR) return;  // don't persist obviously wrong time
+  File f = SPIFFS.open(CLOCK_EPOCH_PATH, "w");
+  if (!f) return;
+  f.println((unsigned long)now);
   f.close();
 }
 
@@ -209,6 +256,7 @@ String WebManager::buildBackupJson() {
   j += "\"ap_pass\":\"" + jsonEscape(_ap_pass)  + "\",";
   j += "\"sta_ssid\":\"" + jsonEscape(_sta_ssid) + "\",";
   j += "\"sta_pass\":\"" + jsonEscape(_sta_pass)  + "\",";
+  j += "\"ntp_server\":\"" + jsonEscape(_ntp_server) + "\",";
 
   // Rooms — identity bytes = prv(64) || pub(32) = 96 bytes = 192 hex chars
   // PRV_KEY_SIZE=64, PUB_KEY_SIZE=32
@@ -342,6 +390,12 @@ bool WebManager::applyRestore(const String& json) {
   strncpy(_ap_pass,  ap_pass,  sizeof(_ap_pass)  - 1);
   if (sta_ssid[0]) strncpy(_sta_ssid, sta_ssid, sizeof(_sta_ssid) - 1);
   strncpy(_sta_pass, sta_pass, sizeof(_sta_pass) - 1);
+  char ntp_server_r[64] = {};
+  extractField("ntp_server", ntp_server_r, sizeof(ntp_server_r));
+  if (ntp_server_r[0]) {
+    strncpy(_ntp_server, ntp_server_r, sizeof(_ntp_server) - 1);
+    _ntp_server[sizeof(_ntp_server) - 1] = 0;
+  }
   saveConfig();
 
   // Rooms — 96 bytes identity (prv64 + pub32) hex-encoded
@@ -455,6 +509,27 @@ static String base64Encode(const uint8_t* data, size_t len) {
 }
 
 // ---------------------------------------------------------------------------
+//  PrintSink — forwards String-like += calls to an AsyncResponseStream.
+//  Avoids allocating a single large contiguous heap block for the full page.
+//  AsyncResponseStream internally uses a linked list of 1460-byte chunks,
+//  so even a 40KB+ page never needs more than ~2KB of contiguous heap. (JES-854)
+// ---------------------------------------------------------------------------
+struct PrintSink {
+  Print& _p;
+  explicit PrintSink(Print& p) : _p(p) {}
+  void reserve(size_t) {}                              // no-op
+  PrintSink& operator+=(const char* s)                { if (s) _p.print(s); return *this; }
+  PrintSink& operator+=(const String& s)              { _p.print(s); return *this; }
+  PrintSink& operator+=(const __FlashStringHelper* f) { _p.print(f); return *this; }
+  PrintSink& operator+=(int i)           { _p.print(i); return *this; }
+  PrintSink& operator+=(unsigned int u)  { _p.print(u); return *this; }
+  PrintSink& operator+=(long l)          { _p.print(l); return *this; }
+  PrintSink& operator+=(unsigned long u) { _p.print(u); return *this; }
+  PrintSink& operator+=(uint8_t u)       { _p.print(u); return *this; }
+  PrintSink& operator+=(char c)          { _p.print(c); return *this; }
+};
+
+// ---------------------------------------------------------------------------
 //  HTML page builders
 // ---------------------------------------------------------------------------
 static const char HTML_HEAD_PRE[] PROGMEM =
@@ -522,6 +597,8 @@ static const char HTML_HEAD_POST[] PROGMEM =
   ".btngrp button{padding:7px 12px;min-height:36px;font-size:0.82em}"
   /* === Mono hex display === */
   ".hex{font-family:monospace;font-size:0.78em;word-break:break-all;color:#aaa}"
+  /* === Anchor nav links === */
+  "a.tnb{display:flex;align-items:center;text-decoration:none}"
   /* === Responsive overrides for wider screens === */
   "@media(min-width:600px){"
     "body{padding:0}"
@@ -1000,47 +1077,87 @@ String WebManager::buildStatsPage() {
   return page;
 }
 
-String WebManager::buildStatusPage(const char* ip) {
+/* ---- Debug log JSON (JES-852) ------------------------------------------- */
+String WebManager::buildDebugLogJson() {
+  String j = "{\"enabled\":";
+  j += _mesh.isDebugLogEnabled() ? "true" : "false";
+  j += ",\"count\":";
+  j += (int)g_dbglog.count();
+  j += ",\"entries\":[";
+  uint16_t cnt = g_dbglog.count();
+  // Return up to last 200 entries newest-last (oldest first in array)
+  // Entries are already ordered oldest-first by DebugLog::get()
+  for (uint16_t i = 0; i < cnt; i++) {
+    const DebugEntry& e = g_dbglog.get(i);
+    if (i > 0) j += ',';
+    j += "{\"ts\":";
+    j += (unsigned long)e.ts;
+    j += ",\"msg\":\"";
+    // JSON-escape the message (reuse existing jsonEscape helper if available,
+    // otherwise do minimal escaping: backslash and double-quote)
+    for (const char* p = e.msg; *p; p++) {
+      char c = *p;
+      if      (c == '"')  j += "\\\"";
+      else if (c == '\\') j += "\\\\";
+      else if (c == '\n') j += "\\n";
+      else if (c == '\r') j += "\\r";
+      else                j += c;
+    }
+    j += "\"}";
+  }
+  j += "]}";
+  return j;
+}
+
+// Stream the main status page directly to an AsyncResponseStream.
+// Uses PrintSink so the existing page += ... code works without a large
+// ---------------------------------------------------------------------------
+//  Page navigation bar — links to all main pages (JES-854 split)
+// ---------------------------------------------------------------------------
+static void writePageNav(PrintSink& page, const char* active) {
+  struct NavItem { const char* href; const char* label; const char* id; };
+  static const NavItem items[] = {
+    {"/",        "Status",    "status"},
+    {"/rooms",   "Rooms",     "rooms"},
+    {"/network", "Netwerk",   "network"},
+    {"/system",  "Systeem",   "system"},
+    {"/chat",    "Berichten", "chat"},
+    {"/acl",     "ACL",       "acl"},
+    {"/stats",   "Stats",     "stats"},
+  };
+  page += "<div id='tabnav'>";
+  for (int i = 0; i < 7; i++) {
+    bool act = strcmp(active, items[i].id) == 0;
+    page += "<a href='"; page += items[i].href;
+    page += act ? "' class='tnb act'>" : "' class='tnb'>";
+    page += items[i].label;
+    page += "</a>";
+  }
+  page += "</div>";
+}
+
+// Uses AsyncResponseStream (JES-854) — chunked, avoids large contiguous heap alloc.
+void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
   const char* ap_ssid = _ap_ssid;
   const char* sta_ssid = _sta_ssid;
 
-  String page = buildHead(mesh.getNodeName());
+  PrintSink page(out);
+  page += buildHead(mesh.getNodeName());
 
   // ---- Top bar ----
   page += "<div id='topbar'><h1>";
   page += htmlEscape(mesh.getNodeName());
   page += " Room Server</h1></div>";
 
-  // ---- Tab nav bar ----
-  page += "<div id='tabnav'>"
-          "<button class='tnb act' onclick='showTab(0)'>Status</button>"
-          "<button class='tnb' onclick='showTab(1)'>Rooms</button>"
-          "<button class='tnb' onclick='showTab(2)'>Netwerk</button>"
-          "<button class='tnb' onclick='showTab(3)'>Systeem</button>"
-          "</div>"
-          "<script>"
-          "function showTab(n){"
-            "var ps=document.querySelectorAll('.tpanel');"
-            "var bs=document.querySelectorAll('.tnb');"
-            "for(var i=0;i<ps.length;i++){ps[i].classList.remove('act');bs[i].classList.remove('act');}"
-            "ps[n].classList.add('act');bs[n].classList.add('act');"
-          "}"
-          "function editRoom(i,n){"
-            "showTab(1);"
-            "document.getElementById('editIdx').value=i;"
-            "document.getElementById('editName').value=n;"
-            "document.getElementById('editClearPass').checked=false;"
-            "document.getElementById('editClearGuest').checked=false;"
-            "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
-          "}"
-          "</script>";
+  // ---- Page nav bar ----
+  writePageNav(page, "status");
 
   // ================================================================
-  // TAB 0: STATUS
+  // STATUS PAGE CONTENT
   // ================================================================
-  page += "<div class='tpanel act'>";
+  page += "<div style='padding:12px 10px'>";
 
   // Node summary card
   page += "<div class='card'>";
@@ -1051,6 +1168,19 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "</td></tr><tr><th>IP</th><td>"; page += ip;
   page += "</td></tr><tr><th>Rooms actief</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
+  {
+    uint32_t now_ts = mesh.getRTCClock()->getCurrentTime();
+    time_t t = (time_t)now_ts;
+    char tbuf[32] = "niet gesynchroniseerd";
+    if (now_ts > 1000000000UL) {
+      struct tm ti{};
+      gmtime_r(&t, &ti);
+      strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M UTC", &ti);
+    }
+    page += "<tr><th>Klok</th><td>"; page += tbuf;
+    if (_ntp_synced) page += " <span style='color:#00ff88'>(NTP &#10003;)</span>";
+    page += "</td></tr>";
+  }
   page += "</table>";
   // Server name edit form (JES-828)
   page += "<form method='post' action='/api/node/name' style='margin-top:12px'>"
@@ -1065,8 +1195,17 @@ String WebManager::buildStatusPage(const char* ip) {
   // Quick navigation cards
   page += "<div class='card'>"
           "<div style='display:flex;flex-direction:column;gap:8px'>"
+          "<a href='/rooms' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#127979; Rooms &mdash; rooms, zichtbaarheid, notificaties</button>"
+          "</a>"
+          "<a href='/network' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128246; Netwerk &mdash; WiFi, LoRa, peers, sync</button>"
+          "</a>"
+          "<a href='/system' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#9881; Systeem &mdash; backup, OLED, MQTT, OTA, debug</button>"
+          "</a>"
           "<a href='/chat' style='text-decoration:none'>"
-          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128172; Rooms &mdash; berichten bekijken en posten</button>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128172; Berichten &mdash; berichten bekijken en posten</button>"
           "</a>"
           "<a href='/acl' style='text-decoration:none'>"
           "<button style='width:100%;text-align:left;padding:12px 16px'>&#128100; ACL beheer &mdash; rechten per gebruiker</button>"
@@ -1076,12 +1215,52 @@ String WebManager::buildStatusPage(const char* ip) {
           "</a>"
           "</div></div>";
 
-  page += "</div>";  // end tab 0
+  page += "</div>";  // end status content wrapper
 
-  // ================================================================
-  // TAB 1: ROOMS
-  // ================================================================
-  page += "<div class='tpanel'>";
+  page += FPSTR(HTML_FOOT);
+  // (void return — PrintSink wrote directly to the AsyncResponseStream)
+}
+
+// ---------------------------------------------------------------------------
+//  /rooms — Room management page (JES-854 split)
+// ---------------------------------------------------------------------------
+void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
+  MultiRoomMesh& mesh = _mesh;
+  PrintSink page(out);
+  page += buildHead(mesh.getNodeName());
+  page += "<div id='topbar'><h1>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " &mdash; Rooms</h1></div>";
+  writePageNav(page, "rooms");
+  page += "<div style='padding:12px 10px'>";
+  // editRoom helper — pre-fills the edit form and scrolls to it
+  page += "<script>"
+          "function editRoom(i,n){"
+            "document.getElementById('editIdx').value=i;"
+            "document.getElementById('editName').value=n;"
+            "document.getElementById('editClearPass').checked=false;"
+            "document.getElementById('editClearGuest').checked=false;"
+            "document.getElementById('editConfirmName').value='';"
+            "document.getElementById('editCard').dataset.roomName=n;"
+            "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
+          "}"
+          "function submitEditRoom(){"
+            "var card=document.getElementById('editCard');"
+            "var passEl=document.getElementById('editPass');"
+            "var clearPass=document.getElementById('editClearPass').checked;"
+            "var changingPass=(passEl&&passEl.value.length>0)||clearPass;"
+            "if(changingPass){"
+              "var rn=card.dataset.roomName||'';"
+              "var c=window.prompt("
+                "'Waarschuwing: alle companions met het huidige wachtwoord verliezen toegang.\\n'"
+                "+'Dit kan niet ongedaan worden gemaakt.\\n'"
+                "+'Typ de roomnaam (\\''+rn+'\\') ter bevestiging:');"
+              "if(c===null)return;"  // cancelled
+              "document.getElementById('editConfirmName').value=c;"
+            "}"
+            "card.querySelector('form').submit();"
+          "}"
+          "</script>";
 
   // Rooms overview table
   page += "<div class='card'><h2>Rooms</h2>";
@@ -1132,10 +1311,24 @@ String WebManager::buildStatusPage(const char* ip) {
               "\">Rekey</button></form>";
     }
     if (i > 0) {
-      page += "<form method='post' action='/api/room/del'>"
-              "<input type='hidden' name='idx' value='"; page += i;
-      page += "'><button class='del' onclick=\"return confirm('Delete room "; page += i;
-      page += "?')\">Del</button></form>";
+      {
+        const char* del_name = mesh.getRoomName(i);
+        page += "<form method='post' action='/api/room/del'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><input type='hidden' name='confirm_name' id='delConfirmName"; page += i;
+        page += "'>"
+                "<button class='del' data-rname=\""; page += htmlEscape(del_name);
+        page += "\" data-idx='"; page += i;
+        page += "' type='button' onclick=\""
+                "var n=this.dataset.rname;"
+                "var c=window.prompt('Waarschuwing: room ' + this.dataset.idx + ' wordt permanent verwijderd!\\n'"
+                "+'Alle berichten en de room-sleutel gaan verloren.\\n'"
+                "+'Typ de roomnaam (\\'' + n + '\\') ter bevestiging:');"
+                "if(c===null)return;"
+                "this.closest('form').elements.namedItem('confirm_name').value=c;"
+                "this.closest('form').submit();"
+                "\">Del</button></form>";
+      }
     }
     page += "</div></td></tr>";
   }
@@ -1146,17 +1339,18 @@ String WebManager::buildStatusPage(const char* ip) {
   // Edit room form
   page += "<div class='card' id='editCard'><h2>Room bewerken</h2>"
           "<form method='post' action='/api/room/set'>"
+          "<input type='hidden' id='editConfirmName' name='confirm_name'>"
           "<div class='frow'><label>Idx</label><input id='editIdx' name='idx' type='number' min='0' max='15'></div>"
           "<div class='frow'><label>Naam</label><input id='editName' name='name' maxlength='23'></div>"
           "<div class='frow'><label>Wachtwoord</label>"
-          "<input name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
+          "<input id='editPass' name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
           "<label style='font-size:0.85em;font-weight:normal'>"
           "<input type='checkbox' id='editClearPass' name='clear_pass' value='1'> wissen</label></div>"
           "<div class='frow'><label>Gast-ww</label>"
           "<input name='guest' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
           "<label style='font-size:0.85em;font-weight:normal'>"
           "<input type='checkbox' id='editClearGuest' name='clear_guest' value='1'> wissen</label></div>"
-          "<button type='submit'>Opslaan</button></form></div>";
+          "<button type='button' onclick='submitEditRoom()'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle
   {
@@ -1192,6 +1386,33 @@ String WebManager::buildStatusPage(const char* ip) {
             "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
             "10&ndash;3600 s, standaard 120 s. CLI: <code>advert interval &lt;s&gt;</code></p>"
             "</div>";
+  }
+
+  // Repeater modus (JES-855) — independent of stealth
+  {
+    const NodePrefs* p = mesh.getNodePrefs();
+    bool rep_on = (p->disable_fwd == 0);
+    page += "<div class='card'><h2>Repeater modus</h2>";
+    if (rep_on) {
+      page += "<p>Status: <b class='ok'>AAN</b> &mdash; node stuurt LoRa-berichten van andere nodes door.</p>";
+    } else {
+      page += "<p>Status: <b class='warn'>UIT</b> &mdash; node stuurt alleen eigen berichten.</p>";
+    }
+    page += "<p style='font-size:0.84em;color:#aaa;margin:4px 0 10px'>"
+            "Onafhankelijk van stealth: stealth regelt zichtbaarheid van rooms, "
+            "repeater regelt doorsturen van mesh-pakketten.</p>"
+            "<div style='display:flex;gap:8px;flex-wrap:wrap'>"
+            "<form method='post' action='/api/repeater'>"
+            "<button name='repeater' value='on'";
+    if (rep_on) page += " class='ok-btn'";
+    page += ">Repeater AAN</button></form>"
+            "<form method='post' action='/api/repeater'>"
+            "<button name='repeater' value='off'";
+    if (!rep_on) page += " class='warn-btn'";
+    page += ">Repeater UIT</button></form>"
+            "</div>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "CLI: <code>repeater on|off|status</code></p></div>";
   }
 
   // Login notification targets (JES-834)
@@ -1233,12 +1454,25 @@ String WebManager::buildStatusPage(const char* ip) {
     page += "</div>";
   }
 
-  page += "</div>";  // end tab 1
+  page += "</div>";  // end content wrapper
+  page += FPSTR(HTML_FOOT);
+}
 
-  // ================================================================
-  // TAB 2: NETWERK
-  // ================================================================
-  page += "<div class='tpanel'>";
+// ---------------------------------------------------------------------------
+//  /network — Network settings page (JES-854 split)
+// ---------------------------------------------------------------------------
+void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip) {
+  MultiRoomMesh& mesh = _mesh;
+  WifiMode mode        = _mode;
+  const char* ap_ssid  = _ap_ssid;
+  const char* sta_ssid = _sta_ssid;
+  PrintSink page(out);
+  page += buildHead(mesh.getNodeName());
+  page += "<div id='topbar'><h1>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " &mdash; Netwerk</h1></div>";
+  writePageNav(page, "network");
+  page += "<div style='padding:12px 10px'>";
 
   // WiFi config
   page += "<div class='card'><h2>WiFi</h2>";
@@ -1264,7 +1498,40 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "' maxlength='32'></div>"
           "<div class='frow'><label>Wachtwoord</label><input name='pass' type='password' maxlength='63'></div>"
           "<button type='submit'>STA opslaan &amp; verbinden</button></form>"
-          "<p style='margin-top:8px'>Huidig IP: <b>"; page += ip; page += "</b></p></div>";
+          "<p style='margin-top:8px'>Huidig IP: <b>"; page += ip; page += "</b></p>"
+          "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>Klok</h3>"
+          "<p style='font-size:0.9em;color:#aaa'>NTP synchroniseert automatisch zodra de node verbinding heeft met het internet (STA-modus). "
+          "Als NTP niet beschikbaar is, gebruik dan de knop hieronder om de klok in te stellen op de tijd van je browser.</p>"
+          "<button type='button' class='sec' onclick='syncBrowserTime()'>&#128337; Synchroniseer browsertijd</button>"
+          "<span id='ts-status' style='margin-left:10px;font-size:0.85em;color:#aaa'></span>"
+          "<script>"
+          "function syncBrowserTime(){"
+          "  var ts=Math.floor(Date.now()/1000);"
+          "  fetch('/api/set_time',{method:'POST',credentials:'include',"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+          "    body:'ts='+ts})"
+          "  .then(function(r){"
+          "    document.getElementById('ts-status').textContent=r.ok?'Klok ingesteld!':'Fout bij instellen';"
+          "    document.getElementById('ts-status').style.color=r.ok?'#00ff88':'#ff4444';"
+          "  }).catch(function(){document.getElementById('ts-status').textContent='Verbindingsfout';});"
+          "}"
+          "</script>"
+          "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>NTP server</h3>"
+          "<p style='font-size:0.9em;color:#aaa'>Huidige status: ";
+  page += _ntp_synced ? "<span style='color:#00ff88'>&#10003; Gesynchroniseerd</span>"
+                      : "<span style='color:#aaa'>Niet gesynchroniseerd (of AP-modus)</span>";
+  page += "</p>"
+          "<form method='post' action='/api/ntp'>"
+          "<div class='frow'><label>NTP server</label>"
+          "<input name='server' value='";
+  page += htmlEscape(_ntp_server);
+  page += "' maxlength='63' placeholder='pool.ntp.org'>"
+          "</div>"
+          "<button type='submit'>Opslaan &amp; herverbinden</button>"
+          "</form>"
+          "</div>";
 
   // LoRa radio settings
   {
@@ -1315,6 +1582,73 @@ String WebManager::buildStatusPage(const char* ip) {
     page += "<button type='submit'>LoRa opslaan</button></form>"
             "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
             "Freq/BW/SF/CR vereisen herstart. TX power is live.</p></div>";
+  }
+
+  // MeshCore scope/regio instellingen (JES-852)
+  {
+    const NodePrefs* p = mesh.getNodePrefs();
+    char fm_str[8], fmu_str[8], fma_str[8], phm_str[8];
+    snprintf(fm_str,  sizeof(fm_str),  "%d", (int)p->flood_max);
+    snprintf(fmu_str, sizeof(fmu_str), "%d", (int)p->flood_max_unscoped);
+    snprintf(fma_str, sizeof(fma_str), "%d", (int)p->flood_max_advert);
+    snprintf(phm_str, sizeof(phm_str), "%d", (int)p->path_hash_mode);
+
+    page += "<div class='card'><h2>MeshCore Scope &amp; Regio</h2>";
+
+    // Flood forwarding + flood limits
+    page += "<form method='post' action='/api/meshcore' style='margin-bottom:8px'>"
+            "<div class='frow'><label>Flood door sturen</label><select name='fwd'>"
+            "<option value='on'"; page += (p->disable_fwd == 0) ? " selected" : ""; page += ">Aan (aanbevolen)</option>"
+            "<option value='off'"; page += (p->disable_fwd != 0) ? " selected" : ""; page += ">Uit</option>"
+            "</select></div>";
+    page += "<div class='frow'><label>flood_max (scoped)</label>"
+            "<input name='flood_max' type='number' min='1' max='255' value='"; page += fm_str;
+    page += "'></div>"
+            "<div class='frow'><label>flood_max_unscoped</label>"
+            "<input name='flood_max_unscoped' type='number' min='1' max='255' value='"; page += fmu_str;
+    page += "'></div>"
+            "<div class='frow'><label>flood_max_advert</label>"
+            "<input name='flood_max_advert' type='number' min='1' max='255' value='"; page += fma_str;
+    page += "'></div>"
+            "<div class='frow'><label>Path hash mode</label><select name='path_hash'>"
+            "<option value='0'"; page += ((int)p->path_hash_mode == 0) ? " selected" : ""; page += ">0 &ndash; geen</option>"
+            "<option value='1'"; page += ((int)p->path_hash_mode == 1) ? " selected" : ""; page += ">1 &ndash; normaal</option>"
+            "<option value='2'"; page += ((int)p->path_hash_mode == 2) ? " selected" : ""; page += ">2 &ndash; streng</option>"
+            "</select></div>"
+            "<button type='submit'>Opslaan</button></form>";
+
+    // Default scope (region)
+    {
+      const RegionEntry* def = mesh.getDefaultRegion();
+      int rcount = mesh.getRegionCount();
+      page += "<hr style='border-color:#2a3050;margin:10px 0'>"
+              "<h3 style='margin:0 0 6px'>Standaard scope (regio)</h3>"
+              "<p style='font-size:0.84em;color:#aaa;margin:0 0 8px'>"
+              "Huidig: <b>"; page += def ? htmlEscape(def->name) : "geen (globaal)";
+      page += "</b></p>";
+      if (rcount > 0) {
+        page += "<form method='post' action='/api/meshcore/region'>"
+                "<div class='frow'><label>Regio</label><select name='region'>"
+                "<option value='null'"; page += (!def) ? " selected" : ""; page += ">geen (globaal)</option>";
+        for (int ri = 0; ri < rcount; ri++) {
+          const RegionEntry* r = mesh.getRegionByIdx(ri);
+          if (!r || r->isWildcard()) continue;
+          String esc = htmlEscape(r->name);
+          page += "<option value='"; page += esc;
+          if (def && strcmp(r->name, def->name) == 0) page += "' selected='selected";
+          page += "'>"; page += esc; page += "</option>";
+        }
+        page += "</select></div>"
+                "<button type='submit'>Scope instellen</button></form>";
+      } else {
+        page += "<p style='font-size:0.84em;color:#aaa'>Geen regio&apos;s geladen. "
+                "Gebruik CLI: <code>region def &lt;naam&gt;</code></p>";
+      }
+    }
+
+    page += "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "CLI: <code>set flood_max &lt;n&gt;</code> / <code>set fwd on|off</code> / "
+            "<code>region default &lt;naam&gt;</code></p></div>";
   }
 
   // Peer-koppeling (JES-816)
@@ -1447,13 +1781,22 @@ String WebManager::buildStatusPage(const char* ip) {
             "</script>";
   }
 
-  page += "</div>";  // end tab 2
+  page += "</div>";  // end content wrapper
+  page += FPSTR(HTML_FOOT);
+}
 
-  // ================================================================
-  // TAB 3: SYSTEEM
-  // ================================================================
-  page += "<div class='tpanel'>";
-
+// ---------------------------------------------------------------------------
+//  /system — System settings page (JES-854 split)
+// ---------------------------------------------------------------------------
+void WebManager::buildSystemPageStream(AsyncResponseStream& out) {
+  MultiRoomMesh& mesh = _mesh;
+  PrintSink page(out);
+  page += buildHead(mesh.getNodeName());
+  page += "<div id='topbar'><h1>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " &mdash; Systeem</h1></div>";
+  writePageNav(page, "system");
+  page += "<div style='padding:12px 10px'>";
   // Backup / Restore
   page += "<div class='card'><h2>Backup &amp; Restore</h2>";
   page += "<a href='/api/backup' style='text-decoration:none'>"
@@ -1507,10 +1850,59 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "<div class='card'><p style='font-size:0.85em'>"
           "<a href='/update'>Handmatige OTA upload (ElegantOTA)</a></p></div>";
 
-  page += "</div>";  // end tab 3
+  // Debug Log (JES-852) — RAM-only ring buffer, admin-gated
+  {
+    bool dlog_on = mesh.isDebugLogEnabled();
+    page += "<div class='card'><h2>Debug Log</h2>"
+            "<p style='font-size:0.84em;color:#aaa'>"
+            "RAM-ring ("; page += (int)(DEBUG_LOG_MAX_ENTRIES);
+    page += " regels max, ~"; page += (int)(DEBUG_LOG_MAX_ENTRIES * (4 + DEBUG_LOG_MSG_LEN) / 1024);
+    page += " KB). Niet persistent: leeg na herstart.</p>"
+            "<form method='post' action='/api/debuglog/enable' style='display:inline;margin-right:8px'>"
+            "<input type='hidden' name='on' value='"; page += dlog_on ? "0" : "1";
+    page += "'><button type='submit'>"; page += dlog_on ? "Logging UIT" : "Logging AAN";
+    page += "</button></form>"
+            "<form method='post' action='/api/debuglog/clear' style='display:inline'>"
+            "<button type='submit' class='del'>Clear</button></form>"
+            "<div id='dlog-panel' style='margin-top:10px'>"
+            "<p style='color:#aaa;font-size:0.85em'>"; page += dlog_on ? "Laden..." : "Logging uitgeschakeld.";
+    page += "</p></div>";
+    if (dlog_on) {
+      page += "<script>"
+              "function loadDlog(){"
+                "fetch('/api/debuglog',{credentials:'include'})"
+                  ".then(function(r){return r.json();})"
+                  ".then(function(d){"
+                    "var el=document.getElementById('dlog-panel');"
+                    "if(!el)return;"
+                    "while(el.firstChild)el.removeChild(el.firstChild);"
+                    "if(!d.entries||!d.entries.length){"
+                      "var p=document.createElement('p');p.style.color='#aaa';"
+                      "p.textContent='Geen log-regels.';el.appendChild(p);return;"
+                    "}"
+                    "var pre=document.createElement('pre');"
+                    "pre.style.cssText='background:#111;padding:8px;border-radius:4px;"
+                                       "font-size:0.78em;overflow-x:auto;max-height:400px;overflow-y:auto';"
+                    "d.entries.forEach(function(e){"
+                      "var ln=document.createTextNode('['+e.ts+'] '+e.msg+'\\n');"
+                      "pre.appendChild(ln);"
+                    "});"
+                    "el.appendChild(pre);"
+                    "pre.scrollTop=pre.scrollHeight;"
+                  "})"
+                  ".catch(function(){"
+                    "var el=document.getElementById('dlog-panel');"
+                    "if(el){var p=document.createElement('p');p.textContent='Fout.';el.appendChild(p);}"
+                  "});"
+              "}"
+              "loadDlog();setInterval(loadDlog,3000);"
+              "</script>";
+    }
+    page += "</div>";
+  }
 
+  page += "</div>";  // end content wrapper
   page += FPSTR(HTML_FOOT);
-  return page;
 }
 
 // ---------------------------------------------------------------------------
@@ -1655,7 +2047,22 @@ void WebManager::setupRoutes() {
     String ip = (_mode == MODE_AP)
       ? WiFi.softAPIP().toString()
       : WiFi.localIP().toString();
-    req->send(200, "text/html; charset=utf-8", buildStatusPage(ip.c_str()));
+    // Use chunked streaming to avoid a large contiguous heap allocation (JES-854).
+    // AsyncResponseStream buffers in linked 1460-byte chunks, so a 40KB+ page never
+    // requires more than ~2KB contiguous free heap at a time.
+    AsyncResponseStream* stream =
+      req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) {
+      req->send(503, "text/html; charset=utf-8",
+        "<html><body style='background:#0f1117;color:#e0e0e0;font-family:sans-serif;padding:20px'>"
+        "<h2 style='color:#ff4444'>Tijdelijk weinig geheugen</h2>"
+        "<p>Pagina kon niet worden opgebouwd. Herlaad de pagina.</p>"
+        "<p><a href='/' style='color:#00d4ff'>Opnieuw proberen</a></p>"
+        "</body></html>");
+      return;
+    }
+    buildStatusPageStream(*stream, ip.c_str());
+    req->send(stream);
   });
 
   // API: set server (node) name (JES-828)
@@ -1681,7 +2088,7 @@ void WebManager::setupRoutes() {
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       char reply[160] = {};
       _mesh.handleCommand(0, (char*)"room add", reply);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: delete room
@@ -1690,12 +2097,22 @@ void WebManager::setupRoutes() {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
+      int del_idx = req->getParam("idx", true)->value().toInt();
+      if (del_idx <= 0 || del_idx >= MAX_ROOMS || !_mesh.isRoomActive(del_idx)) {
+        req->send(400, "text/plain", "ongeldige of inactieve room"); return;
+      }
+      // Server-side name confirmation (JES-857)
+      if (!req->hasParam("confirm_name", true) ||
+          !req->getParam("confirm_name", true)->value().equals(String(_mesh.getRoomName(del_idx)))) {
+        req->send(400, "text/plain",
+          "Bevestiging onjuist: typ de exacte roomnaam ter bevestiging.");
+        return;
+      }
       char cmd[32];
-      snprintf(cmd, sizeof(cmd), "room del %s",
-               req->getParam("idx", true)->value().c_str());
+      snprintf(cmd, sizeof(cmd), "room del %d", del_idx);
       char reply[160] = {};
       _mesh.handleCommand(0, cmd, reply);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: rekey room — generate new private key; double-confirm required
@@ -1719,7 +2136,7 @@ void WebManager::setupRoutes() {
         return;
       }
       _mesh.rekeyRoom(idx);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: set room fields
@@ -1729,6 +2146,10 @@ void WebManager::setupRoutes() {
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
       const String& idx = req->getParam("idx", true)->value();
+      int idx_int = idx.toInt();
+      if (idx_int < 0 || idx_int >= MAX_ROOMS || !_mesh.isRoomActive(idx_int)) {
+        req->send(400, "text/plain", "ongeldige of inactieve room"); return;
+      }
       char cmd[160], reply[160];
 
       if (req->hasParam("name", true) && req->getParam("name", true)->value().length()) {
@@ -1736,13 +2157,24 @@ void WebManager::setupRoutes() {
                  req->getParam("name", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      if (req->hasParam("clear_pass", true) && req->getParam("clear_pass", true)->value() == "1") {
-        snprintf(cmd, sizeof(cmd), "room set %s pass ", idx.c_str());
-        _mesh.handleCommand(0, cmd, reply);
-      } else if (req->hasParam("pass", true) && req->getParam("pass", true)->value().length()) {
-        snprintf(cmd, sizeof(cmd), "room set %s pass %s", idx.c_str(),
-                 req->getParam("pass", true)->value().c_str());
-        _mesh.handleCommand(0, cmd, reply);
+      // Password change: server-side confirmation required (JES-857)
+      bool clear_pass = req->hasParam("clear_pass", true) && req->getParam("clear_pass", true)->value() == "1";
+      bool set_pass   = req->hasParam("pass", true) && req->getParam("pass", true)->value().length() > 0;
+      if (clear_pass || set_pass) {
+        if (!req->hasParam("confirm_name", true) ||
+            !req->getParam("confirm_name", true)->value().equals(String(_mesh.getRoomName(idx_int)))) {
+          req->send(400, "text/plain",
+            "Bevestiging onjuist: typ de exacte roomnaam ter bevestiging.");
+          return;
+        }
+        if (clear_pass) {
+          snprintf(cmd, sizeof(cmd), "room set %s pass confirm", idx.c_str());
+          _mesh.handleCommand(0, cmd, reply);
+        } else {
+          snprintf(cmd, sizeof(cmd), "room set %s pass %s confirm", idx.c_str(),
+                   req->getParam("pass", true)->value().c_str());
+          _mesh.handleCommand(0, cmd, reply);
+        }
       }
       if (req->hasParam("clear_guest", true) && req->getParam("clear_guest", true)->value() == "1") {
         snprintf(cmd, sizeof(cmd), "room set %s guest ", idx.c_str());
@@ -1752,7 +2184,7 @@ void WebManager::setupRoutes() {
                  req->getParam("guest", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: global stealth toggle (all rooms)
@@ -1762,7 +2194,19 @@ void WebManager::setupRoutes() {
       if (!req->hasParam("stealth", true)) { req->send(400, "text/plain", "missing stealth"); return; }
       bool s = (req->getParam("stealth", true)->value() == "on");
       _mesh.setRoomStealth(-1, s);  // -1 = all rooms
-      req->redirect("/");
+      req->redirect("/rooms");
+    });
+
+  // API: repeater toggle (JES-855) — independent of stealth
+  _server.on("/api/repeater", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("repeater", true)) { req->send(400, "text/plain", "missing repeater"); return; }
+      char cmd[20], reply[80];
+      bool on = (req->getParam("repeater", true)->value() == "on");
+      snprintf(cmd, sizeof(cmd), "set fwd %s", on ? "on" : "off");
+      _mesh.handleCommand(0, cmd, reply);
+      req->redirect("/rooms");
     });
 
   // API: per-room stealth toggle
@@ -1776,7 +2220,7 @@ void WebManager::setupRoutes() {
       int idx = req->getParam("idx", true)->value().toInt();
       bool s  = (req->getParam("stealth", true)->value() == "on");
       _mesh.setRoomStealth(idx, s);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: set global advert interval (seconds)
@@ -1787,7 +2231,7 @@ void WebManager::setupRoutes() {
       int sec = req->getParam("seconds", true)->value().toInt();
       if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
       _mesh.setAdvertIntervalSec((uint16_t)sec);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: set anti-entropy sync interval (seconds) — JES-844
@@ -1798,14 +2242,14 @@ void WebManager::setupRoutes() {
       int sec = req->getParam("seconds", true)->value().toInt();
       if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
       _mesh.setSyncIntervalSec((uint32_t)sec);
-      req->redirect("/");
+      req->redirect("/network");
     });
 
   // API: screensaver / Varia settings
   _server.on("/api/screensaver", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
-      if (!_ui_task) { req->redirect("/"); return; }
+      if (!_ui_task) { req->redirect("/system"); return; }
       if (req->hasParam("ss", true)) {
         _ui_task->setSsEnabled(req->getParam("ss", true)->value() == "on");
       }
@@ -1816,7 +2260,7 @@ void WebManager::setupRoutes() {
         int sec = req->getParam("interval", true)->value().toInt();
         if (sec >= 1 && sec <= 60) _ui_task->setSsPageSec((uint8_t)sec);
       }
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // API: QR code page for a room
@@ -1836,7 +2280,7 @@ void WebManager::setupRoutes() {
         const String& m = req->getParam("mode", true)->value();
         _mode = (m == "sta") ? MODE_STA : MODE_AP;
         saveConfig();
-        req->redirect("/");
+        req->redirect("/network");
         // Apply new mode after redirect is sent
         WiFi.disconnect(true);
         _connecting = false;
@@ -1864,7 +2308,7 @@ void WebManager::setupRoutes() {
         _ap_pass[sizeof(_ap_pass) - 1] = 0;
       }
       saveConfig();
-      req->redirect("/");
+      req->redirect("/network");
       if (_mode == MODE_AP) {
         WiFi.softAPdisconnect(false);
         startAP();
@@ -1884,12 +2328,59 @@ void WebManager::setupRoutes() {
         _sta_pass[sizeof(_sta_pass) - 1] = 0;
       }
       saveConfig();
-      req->redirect("/");
+      req->redirect("/network");
       if (_mode == MODE_STA) {
         WiFi.disconnect(false);
         _connecting = false;
         connectSTA();
       }
+    });
+
+  // API: set clock from browser timestamp (fallback when NTP unavailable)
+  // POST /api/set_time  body: ts=<unix_seconds>
+  // Admin-only; browser sends Math.floor(Date.now()/1000).
+  _server.on("/api/set_time", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      if (!req->hasParam("ts", true)) {
+        req->send(400, "application/json", "{\"error\":\"ts required\"}"); return;
+      }
+      long ts = req->getParam("ts", true)->value().toInt();
+      if (ts < 1000000000L || ts > 2147483647L) {
+        req->send(400, "application/json", "{\"error\":\"ts out of range\"}"); return;
+      }
+      _mesh.getRTCClock()->setCurrentTime((uint32_t)ts);
+      saveClockEpoch();  // persist so next power cycle starts near correct time
+      Serial.printf("[Clock] Time set via browser: %lu\n", (unsigned long)ts);
+      req->send(200, "application/json", "{\"ok\":true}");
+    });
+
+  // POST /api/ntp  body: server=<hostname>
+  // Save NTP server and (re)start SNTP sync (STA mode only).
+  _server.on("/api/ntp", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      if (!req->hasParam("server", true)) {
+        req->send(400, "application/json", "{\"error\":\"server required\"}"); return;
+      }
+      String srv = req->getParam("server", true)->value();
+      srv.trim();
+      if (srv.length() == 0 || srv.length() > 63) {
+        req->send(400, "application/json", "{\"error\":\"server invalid\"}"); return;
+      }
+      strncpy(_ntp_server, srv.c_str(), sizeof(_ntp_server) - 1);
+      _ntp_server[sizeof(_ntp_server) - 1] = 0;
+      saveConfig();
+      // Restart SNTP with new server when in STA mode
+      if (_mode == MODE_STA && WiFi.status() == WL_CONNECTED) {
+        _ntp_synced = false;
+        _ntp_check_ms = millis() + 1000;
+        configTime(0, 0, _ntp_server, "time.cloudflare.com");
+        Serial.printf("[NTP] Server updated to '%s', sync restarted\n", _ntp_server);
+      }
+      req->redirect("/network");
     });
 
   // API: backup download
@@ -1963,19 +2454,119 @@ void WebManager::setupRoutes() {
                  req->getParam("txpower", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      req->redirect("/");
+      req->redirect("/network");
+    });
+
+  // -------------------------------------------------------------------------
+  // API: Debug log (JES-852)
+  // -------------------------------------------------------------------------
+
+  // GET /api/debuglog — JSON array of log entries (admin auth)
+  _server.on("/api/debuglog", HTTP_GET,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      req->send(200, "application/json", buildDebugLogJson());
+    });
+
+  // POST /api/debuglog/enable?on=1|0 — enable or disable logging
+  _server.on("/api/debuglog/enable", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (req->hasParam("on", true)) {
+        bool on = (req->getParam("on", true)->value() == "1");
+        _mesh.enableDebugLog(on);
+      }
+      req->redirect("/system");
+    });
+
+  // POST /api/debuglog/clear — discard all log entries
+  _server.on("/api/debuglog/clear", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      _mesh.clearDebugLog();
+      req->redirect("/system");
+    });
+
+  // -------------------------------------------------------------------------
+  // API: MeshCore scope / region settings (JES-852)
+  // -------------------------------------------------------------------------
+
+  // POST /api/meshcore — flood limits, forwarding, path_hash
+  _server.on("/api/meshcore", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      char cmd[80], reply[160];
+
+      auto param = [&](const char* n) -> const char* {
+        return req->hasParam(n, true) ? req->getParam(n, true)->value().c_str() : nullptr;
+      };
+
+      const char* fwd = param("fwd");
+      if (fwd) {
+        snprintf(cmd, sizeof(cmd), "set fwd %s", (strcmp(fwd, "on") == 0) ? "on" : "off");
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* fm = param("flood_max");
+      if (fm && fm[0]) {
+        snprintf(cmd, sizeof(cmd), "set flood_max %s", fm);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* fmu = param("flood_max_unscoped");
+      if (fmu && fmu[0]) {
+        snprintf(cmd, sizeof(cmd), "set flood_max_unscoped %s", fmu);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* fma = param("flood_max_advert");
+      if (fma && fma[0]) {
+        snprintf(cmd, sizeof(cmd), "set flood_max_advert %s", fma);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* phm = param("path_hash");
+      if (phm && phm[0]) {
+        snprintf(cmd, sizeof(cmd), "set path_hash %s", phm);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      req->redirect("/network");
+    });
+
+  // POST /api/meshcore/region — set default scope region
+  _server.on("/api/meshcore/region", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      char cmd[80], reply[160];
+      if (req->hasParam("region", true)) {
+        const String& rv = req->getParam("region", true)->value();
+        if (rv == "null" || rv.isEmpty()) {
+          snprintf(cmd, sizeof(cmd), "region default null");
+        } else {
+          // Validate: only allow alphanumeric + _ + - (region name chars)
+          bool safe = true;
+          for (size_t i = 0; i < rv.length(); i++) {
+            char c = rv[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
+              safe = false; break;
+            }
+          }
+          if (safe && rv.length() < 30) {
+            snprintf(cmd, sizeof(cmd), "region default %s", rv.c_str());
+            _mesh.handleCommand(0, cmd, reply);
+          }
+        }
+      }
+      req->redirect("/network");
     });
 
   // API: MQTT enable/disable toggle (JES-792)
   _server.on("/api/mqtt/toggle", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
-      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      if (!_mqtt_mgr) { req->redirect("/system"); return; }
       if (!req->hasParam("enable", true)) { req->send(400, "text/plain", "missing enable"); return; }
       char reply[160] = {};
       bool en = (req->getParam("enable", true)->value() == "on");
       _mqtt_mgr->handleMqttCommand(en ? "enable" : "disable", reply);
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // API: MQTT config form save (JES-792)
@@ -1983,7 +2574,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/mqtt/set", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
-      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      if (!_mqtt_mgr) { req->redirect("/system"); return; }
       char reply[160] = {};
       char cmd[200];
 
@@ -2042,7 +2633,7 @@ void WebManager::setupRoutes() {
         snprintf(cmd, sizeof(cmd), "set interval %s", intv);
         _mqtt_mgr->handleMqttCommand(cmd, reply);
       }
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // ---------------------------------------------------------------------------
@@ -2297,7 +2888,7 @@ void WebManager::setupRoutes() {
     if (idx < 0) {
       req->send(409, "text/plain", "peer list full or duplicate"); return;
     }
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // POST /api/peer/del (body: idx=<n>)
@@ -2308,7 +2899,7 @@ void WebManager::setupRoutes() {
     int idx = req->getParam("idx", true)->value().toInt();
     bool ok = _mesh.delPeerFromWeb(idx);
     if (!ok) { req->send(400, "text/plain", "invalid idx"); return; }
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // POST /api/room/delpost (body: room_idx=N&origin_id=XXXXXXXX&post_ts=T) — admin only (JES-824)
@@ -2399,7 +2990,7 @@ void WebManager::setupRoutes() {
       req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
     }
     if (_mesh.addNotifyTarget(idx, key)) {
-      req->redirect("/");
+      req->redirect("/rooms");
     } else {
       req->send(400, "application/json", "{\"error\":\"target list full\"}");
     }
@@ -2425,7 +3016,7 @@ void WebManager::setupRoutes() {
       req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
     }
     _mesh.delNotifyTarget(idx, key);
-    req->redirect("/");
+    req->redirect("/rooms");
   });
 
   // POST /api/peer/sync (body: idx=<n> optional — omit for all peers)
@@ -2436,7 +3027,7 @@ void WebManager::setupRoutes() {
       idx = req->getParam("idx", true)->value().toInt();
     }
     _mesh.triggerPeerSync(idx);
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // POST /api/peer/roomsync — push all local rooms to one or all peers (JES-848)
@@ -2447,7 +3038,7 @@ void WebManager::setupRoutes() {
       idx = req->getParam("idx", true)->value().toInt();
     }
     _mesh.triggerRoomSync(idx);
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // GET /api/sync/status — sync diagnostics (JES-833, admin-auth required)
@@ -2515,6 +3106,34 @@ void WebManager::setupRoutes() {
     req->send(200, "text/html; charset=utf-8", buildStatsPage());
   });
 
+  // GET /rooms — Room management page (JES-854 split)
+  _server.on("/rooms", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncResponseStream* stream = req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) { req->send(503, "text/plain", "OOM"); return; }
+    buildRoomsPageStream(*stream);
+    req->send(stream);
+  });
+
+  // GET /network — Network settings page (JES-854 split)
+  _server.on("/network", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    String ip = (_mode == MODE_AP) ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+    AsyncResponseStream* stream = req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) { req->send(503, "text/plain", "OOM"); return; }
+    buildNetworkPageStream(*stream, ip.c_str());
+    req->send(stream);
+  });
+
+  // GET /system — System settings page (JES-854 split)
+  _server.on("/system", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncResponseStream* stream = req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) { req->send(503, "text/plain", "OOM"); return; }
+    buildSystemPageStream(*stream);
+    req->send(stream);
+  });
+
   // GET /api/stats — statistics JSON (JES-800)
   _server.on("/api/stats", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
@@ -2533,7 +3152,7 @@ void WebManager::setupRoutes() {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       _ota_mgr.startCheck();
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // POST /api/ota/update — trigger async OTA download+flash
@@ -2547,7 +3166,7 @@ void WebManager::setupRoutes() {
           "Geen update beschikbaar — voer eerst 'Controleer op update' uit");
         return;
       }
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // GET /api/ota/status — JSON status (progress, state, versions)
@@ -2618,6 +3237,7 @@ void WebManager::setupRoutes() {
 // ---------------------------------------------------------------------------
 void WebManager::begin() {
   loadConfig();
+  loadClockEpoch();
 
 #if defined(SIREN_DEFAULT_STA_SSID)
   // Provisioning: if no STA credentials configured yet, apply build-time defaults.
@@ -2661,6 +3281,25 @@ void WebManager::loop() {
     _dns.processNextRequest();
   }
 
+  // NTP clock sync: poll SNTP status every 2 s until the RTC is set,
+  // then re-sync once every hour to correct drift.
+  if (_mode == MODE_STA && !_connecting && WiFi.status() == WL_CONNECTED
+      && millis() >= _ntp_check_ms) {
+    _ntp_check_ms = millis() + (_ntp_synced ? 3600000UL : 2000UL);
+    struct tm ti{};
+    if (getLocalTime(&ti, 0)) {
+      time_t now = mktime(&ti);
+      if (now > 1000000000L) {
+        _mesh.getRTCClock()->setCurrentTime((uint32_t)now);
+        if (!_ntp_synced) {
+          _ntp_synced = true;
+          Serial.printf("[NTP] Clock synced — %s", asctime(&ti));
+          saveClockEpoch();  // persist so AP-mode reboots start with correct time
+        }
+      }
+    }
+  }
+
   if (_mode == MODE_STA && _connecting) {
     wl_status_t st = WiFi.status();
     if (st == WL_CONNECTED) {
@@ -2671,6 +3310,11 @@ void WebManager::loop() {
         _started = true;
         Serial.printf("[WiFi] Web UI: http://%s/\n", WiFi.localIP().toString().c_str());
       }
+      // Start NTP sync now that we have internet access
+      _ntp_synced = false;
+      _ntp_check_ms = millis() + 2000;  // first check after 2 s
+      configTime(0, 0, _ntp_server, "time.cloudflare.com");
+      Serial.printf("[NTP] Sync started — server: %s\n", _ntp_server);
     } else if (millis() - _connect_started > WIFI_CONNECT_TIMEOUT_MS) {
       _connecting = false;
       Serial.printf("[WiFi] STA connect timeout (status %d). Falling back to AP mode.\n", st);

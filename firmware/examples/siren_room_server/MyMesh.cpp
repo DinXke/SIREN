@@ -1,7 +1,12 @@
 #include "MyMesh.h"
+#include "DebugLog.h"
 #ifdef ESP32
 #include <esp_system.h>  // esp_fill_random() — SEC-001 first-boot password CSPRNG
 #endif
+
+/* JES-852: RAM debug log singleton — 200 entries × 88 B = ~17.6 KB DRAM.
+   Enable via web UI (Systeem > Debug Log) or serial CLI: debug on */
+DebugLog g_dbglog;
 
 /* ------------------------------------------------------------------ */
 /*  Timing constants                                                    */
@@ -377,6 +382,9 @@ void MultiRoomMesh::rekeyRoom(int idx) {
     rooms[idx].next_local_advert = futureMillis(500);
     rooms[idx].next_flood_advert = futureMillis(500);
   }
+
+  // JES-856: propagate new key to all peers immediately
+  triggerRoomSync(-1);
 }
 
 /* Room config: simple binary layout
@@ -681,6 +689,13 @@ void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
   memcpy(&sender_sync_since, &data[4],   4);
   data[len] = 0;
 
+  DLOG(sender_timestamp,
+       "RX anon room=%d sender=%02x%02x%02x%02x since=%lu len=%d",
+       (int)_active_slot,
+       (unsigned)sender.pub_key[0], (unsigned)sender.pub_key[1],
+       (unsigned)sender.pub_key[2], (unsigned)sender.pub_key[3],
+       (unsigned long)sender_sync_since, (int)len);
+
   ClientInfo* client = nullptr;
 
   if (data[8] == 0) {
@@ -774,6 +789,9 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
     peers[pi].last_contact = getRTCClock()->getCurrentTime();
     if (type == PAYLOAD_TYPE_TXT_MSG && len > 4) {
       uint8_t flags = (data[4] >> 2);
+      DLOG(peers[pi].last_contact,
+           "RX peer[%d] type=%d flags=%d len=%d",
+           pi, (int)type, (int)flags, (int)len);
       if      (flags == TXT_TYPE_SYNCREQ)  handleSyncReq(pi, data, len);
       else if (flags == TXT_TYPE_SYNCDAT)  handleSyncDat(pi, data, len);
       else if (flags == TXT_TYPE_SYNCEND)  handleSyncEnd(pi, data, len);
@@ -1010,6 +1028,13 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   // Phase 5: tag with this room-server as origin
   memcpy(free_slot->origin_id, slot.id.pub_key, 4);
 
+  DLOG(free_slot->post_timestamp,
+       "RX post room=%d auth=%02x%02x%02x%02x ts=%lu txt=%.30s",
+       (int)ridx,
+       (unsigned)free_slot->author.pub_key[0], (unsigned)free_slot->author.pub_key[1],
+       (unsigned)free_slot->author.pub_key[2], (unsigned)free_slot->author.pub_key[3],
+       (unsigned long)free_slot->post_timestamp, text);
+
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   slot.num_posted++;
   _post_dirty_at = futureMillis(5000);  // debounced persist (JES-794)
@@ -1059,6 +1084,12 @@ void MultiRoomMesh::histAdvance(uint32_t now_ts) {
 }
 
 void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post) {
+  DLOG(post.post_timestamp,
+       "TX push→client room=%d client=%02x%02x%02x%02x ts=%lu",
+       (int)(uint8_t)(&slot - rooms),
+       (unsigned)client->id.pub_key[0], (unsigned)client->id.pub_key[1],
+       (unsigned)client->id.pub_key[2], (unsigned)client->id.pub_key[3],
+       (unsigned long)post.post_timestamp);
   int len = 0;
   memcpy(&reply_data[len], &post.post_timestamp, 4); len += 4;
 
@@ -1510,6 +1541,25 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- repeater on|off|status — friendly alias for set fwd (JES-855) ----
+  // Independent of stealth: stealth = room advertising; repeater = flood forwarding.
+  if (memcmp(command, "repeater", 8) == 0 && (command[8] == ' ' || command[8] == 0)) {
+    const char* arg = command + 8;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "on") == 0) {
+      char cmd[20] = "set fwd on";
+      handleCommand(_active_slot, cmd, reply);
+    } else if (strcmp(arg, "off") == 0) {
+      char cmd[20] = "set fwd off";
+      handleCommand(_active_slot, cmd, reply);
+    } else {
+      // "repeater status" or just "repeater"
+      sprintf(reply, "repeater=%s (stealth is separate)",
+              _prefs.disable_fwd ? "off" : "on");
+    }
+    return;
+  }
+
   // ---- set txpower <n> — applies live and persists ----
   if (memcmp(command, "set txpower ", 12) == 0) {
     int8_t pwr = (int8_t)atoi(command + 12);
@@ -1530,10 +1580,34 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
   if (sender_timestamp != 0 && _active_slot != 0) {
     if (memcmp(command, "set repeat", 10) == 0 ||
         memcmp(command, "set flood.max", 13) == 0 ||
-        memcmp(command, "region ", 7) == 0) {
+        memcmp(command, "region ", 7) == 0 ||
+        memcmp(command, "repeater ", 9) == 0) {
       strcpy(reply, "Err - repeater settings only available on management room");
       return;
     }
+  }
+
+  // ---- debug log toggle (JES-852) ----
+  if (memcmp(command, "debug ", 6) == 0) {
+    const char* arg = command + 6;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "on") == 0) {
+      g_dbglog.enable(true);
+      strcpy(reply, "OK - debug logging ON");
+    } else if (strcmp(arg, "off") == 0) {
+      g_dbglog.enable(false);
+      strcpy(reply, "OK - debug logging OFF");
+    } else if (strcmp(arg, "clear") == 0) {
+      g_dbglog.clear();
+      strcpy(reply, "OK - debug log cleared");
+    } else if (strcmp(arg, "status") == 0) {
+      snprintf(reply, 160, "debug log: %s  entries=%d/%d",
+               g_dbglog.isEnabled() ? "ON" : "OFF",
+               (int)g_dbglog.count(), (int)DEBUG_LOG_MAX_ENTRIES);
+    } else {
+      strcpy(reply, "debug on|off|clear|status");
+    }
+    return;
   }
 
   // ---- peer management commands (Phase 5 ground work) ----
@@ -1796,7 +1870,8 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  room export <idx>              Print private key hex [serial only]");
       Serial.println("  room import <idx> <hex128>     Import private key from another node [serial only]");
       Serial.println("  room set <idx> name <val>      Set room name");
-      Serial.println("  room set <idx> pass <val>      Set room password");
+      Serial.println("  room set <idx> pass <val>      Show password-change warning (step 1)");
+      Serial.println("  room set <idx> pass <val> confirm  Set room password (2-step confirm)");
       Serial.println("  room set <idx> guest <val>     Set guest access password");
       Serial.println("  room stealth <idx> on|off      Toggle room visibility");
       Serial.println("  room qr <idx>                  Print join URI");
@@ -1833,6 +1908,7 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  RADIO");
       Serial.println("  -----");
       Serial.println("  stealth on|off|status          Toggle all-room stealth mode");
+      Serial.println("  repeater on|off|status         Toggle flood-repeat (independent of stealth)");
       Serial.println("  advert interval [secs]         Get/set advert broadcast interval");
       Serial.println("  set txpower <dBm>              Set TX power (2-22 dBm)");
       Serial.println("  get freq|sf|bw|cr              Get radio parameter");
@@ -1865,7 +1941,7 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println();
       reply[0] = 0;
     } else {
-      strcpy(reply, "rooms|room|msgs|nicks|say|peer|wifi|mqtt|stealth|get|set|ver|reboot -- type 'help' on serial for full list");
+      strcpy(reply, "rooms|room|msgs|nicks|say|peer|wifi|mqtt|stealth|repeater|get|set|ver|reboot -- type 'help' on serial for full list");
     }
     return;
   }
@@ -2050,14 +2126,42 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     if (memcmp(p, "name ", 5) == 0) {
       StrHelper::strncpy(rooms[idx].name, p + 5, sizeof(rooms[idx].name));
       saveRoomConfig();
+      triggerRoomSync(-1);  // JES-856: propagate name change to all peers
       strcpy(reply, "OK");
     } else if (memcmp(p, "pass ", 5) == 0) {
-      StrHelper::strncpy(rooms[idx].password, p + 5, sizeof(rooms[idx].password));
+      const char* val = p + 5;
+      // Two-step confirmation: require trailing " confirm" (or bare "confirm" for empty password).
+      // Serial CLI: run without confirm to see warning, then re-run with confirm.
+      // Web path: /api/room/set appends " confirm" after server-side name verification (JES-857).
+      size_t vlen = strlen(val);
+      bool has_confirm = (vlen == 7 && memcmp(val, "confirm", 7) == 0) ||
+                         (vlen > 7 && memcmp(val + vlen - 8, " confirm", 8) == 0);
+      if (!has_confirm) {
+        if (serial) {
+          Serial.printf("\n*** WAARSCHUWING: wachtwoord wijzigen room[%d] '%s' ***\n",
+                        idx, rooms[idx].name);
+          Serial.println("  Alle companions met het huidige wachtwoord verliezen toegang.");
+          Serial.println("  Dit kan niet ongedaan worden gemaakt.");
+          Serial.printf("  Voer uit ter bevestiging: room set %d pass %s confirm\n\n",
+                        idx, val);
+        }
+        strcpy(reply, "Aborted - bevestiging vereist (voeg 'confirm' toe aan het einde)");
+        return;
+      }
+      // Strip " confirm" / "confirm" suffix to extract actual password.
+      // bare "confirm" (vlen==7) → empty password (clear_pass path).
+      // "<val> confirm" (vlen>7) → strip trailing " confirm" (8 chars).
+      char pw[sizeof(rooms[idx].password)] = {};
+      size_t pw_len = (vlen >= 8) ? vlen - 8 : 0;
+      if (pw_len > sizeof(pw) - 1) pw_len = sizeof(pw) - 1;
+      memcpy(pw, val, pw_len);
+      StrHelper::strncpy(rooms[idx].password, pw, sizeof(rooms[idx].password));
       saveRoomConfig();
       strcpy(reply, "OK");
     } else if (memcmp(p, "guest ", 6) == 0) {
       StrHelper::strncpy(rooms[idx].guest_password, p + 6, sizeof(rooms[idx].guest_password));
       saveRoomConfig();
+      triggerRoomSync(-1);  // JES-856: propagate guest_password change to all peers
       strcpy(reply, "OK");
     } else {
       strcpy(reply, "Err - unknown field (use name|pass|guest)");
@@ -2076,6 +2180,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
         loadOrCreateRoomIdentity(i);
         _num_active_rooms++;
         saveRoomConfig();
+        triggerRoomSync(-1);  // JES-856: propagate new room to all peers
         sprintf(reply, "OK - room[%d] added, id=", i);
         // append first 4 hex bytes of pub_key
         char hex[12];
@@ -2948,6 +3053,11 @@ void MultiRoomMesh::onAdvertRecv(mesh::Packet* /*pkt*/, const mesh::Identity& id
   if (!parser.isValid() || !parser.hasName()) return;
   const char* adv_name = parser.getName();
   if (!adv_name || adv_name[0] == 0) return;
+  DLOG((uint32_t)(millis()/1000),
+       "RX advert id=%02x%02x%02x%02x name=%.30s",
+       (unsigned)id.pub_key[0], (unsigned)id.pub_key[1],
+       (unsigned)id.pub_key[2], (unsigned)id.pub_key[3],
+       adv_name);
 
   // Find existing entry or lowest-seq victim
   int victim = 0;
@@ -3468,6 +3578,11 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
  */
 void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
   if (post.room_idx == 0) return;  // JES-846: room 0 is identity-only, never sync its posts
+  DLOG(post.post_timestamp,
+       "SYNC DAT→peer[%d] room=%d ts=%lu orig=%02x%02x%02x%02x",
+       pi, (int)post.room_idx, (unsigned long)post.post_timestamp,
+       (unsigned)post.origin_id[0], (unsigned)post.origin_id[1],
+       (unsigned)post.origin_id[2], (unsigned)post.origin_id[3]);
   calcPeerSecret(pi);
 
   int len = 0;
@@ -3564,6 +3679,9 @@ void MultiRoomMesh::sendSyncReq(int pi) {
   Serial.printf("[SYNC] SYNCREQ → peer[%d] '%s' (%d room(s))\n",
                 pi, peers[pi].name, rooms_synced);
   peers[pi].last_syncreq_ts = getRTCClock()->getCurrentTime();
+  DLOG(peers[pi].last_syncreq_ts,
+       "SYNC REQ→peer[%d] '%s' rooms=%d",
+       pi, peers[pi].name, rooms_synced);
   _sync_req_sent++;
 }
 
@@ -3579,6 +3697,12 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
   memcpy(room_hash, &data[5], 4);
   uint8_t num_vv = data[9];
   if ((size_t)(10 + (int)num_vv * 8) > len) return;
+  DLOG((uint32_t)(millis()/1000),
+       "SYNC REQ←peer[%d] hash=%02x%02x%02x%02x vv=%d",
+       pi,
+       (unsigned)room_hash[0], (unsigned)room_hash[1],
+       (unsigned)room_hash[2], (unsigned)room_hash[3],
+       (int)num_vv);
 
   // Find local room matching hash (first 4 bytes of pub_key); skip room 0 (JES-846)
   int ri = -1;
@@ -3755,6 +3879,12 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   _sync_dat_recv++;
 
   bool added = ingestSyncPost((uint8_t)ri, origin_id, post_ts, author_pub, text);
+  DLOG(post_ts,
+       "SYNC DAT←peer[%d] orig=%02x%02x%02x%02x ts=%lu room=%d %s",
+       pi,
+       (unsigned)origin_id[0], (unsigned)origin_id[1],
+       (unsigned)origin_id[2], (unsigned)origin_id[3],
+       (unsigned long)post_ts, ri, added ? "added" : "dup/tomb");
   if (added) {
     Serial.printf("[SYNC] SYNCDAT from peer[%d]: +post ts=%lu → room[%d]\n",
                   pi, (unsigned long)post_ts, ri);
@@ -3785,6 +3915,12 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
   if (num_vv > MAX_VV_ORIGINS) num_vv = MAX_VV_ORIGINS;
   // Bounds-check: each VV entry is 8 bytes; truncate if frame is too short.
   while (num_vv > 0 && (size_t)(10 + (int)num_vv * 8) > len) num_vv--;
+  DLOG((uint32_t)(millis()/1000),
+       "SYNC END←peer[%d] hash=%02x%02x%02x%02x vv=%d",
+       pi,
+       (unsigned)room_hash[0], (unsigned)room_hash[1],
+       (unsigned)room_hash[2], (unsigned)room_hash[3],
+       (int)num_vv);
 
   // Find matching local room (fallback to first active room, same as handleSyncReq); skip room 0 (JES-846).
   int ri = -1;
@@ -3865,6 +4001,10 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
                 pi, pushed, ri);
   // Periodic timer (next_sync_at) is intentionally left at its normal 45 s cadence.
   // No SYNCEND is sent back: avoids infinite ping-pong; next SYNCREQ carries the VV.
+
+  // JES-856: schedule a ROOMSYNC 2 s after sync completes to propagate room configs.
+  // Multiple SYNCENDs (one per room) reset the same timer → one batched send.
+  peers[pi].next_roomsync_at = futureMillis(2000UL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -4024,6 +4164,12 @@ void MultiRoomMesh::handleSyncDel(int pi, uint8_t* data, size_t len) {
   memcpy(room_hash,  &data[5],  4);
   memcpy(origin_id,  &data[9],  4);
   memcpy(&post_ts,   &data[13], 4);
+  DLOG(post_ts,
+       "SYNC DEL←peer[%d] orig=%02x%02x%02x%02x ts=%lu",
+       pi,
+       (unsigned)origin_id[0], (unsigned)origin_id[1],
+       (unsigned)origin_id[2], (unsigned)origin_id[3],
+       (unsigned long)post_ts);
 
   // Find matching local room
   int ri = -1;
@@ -4280,12 +4426,13 @@ void MultiRoomMesh::triggerPeerSync(int idx) {
 /**
  * Send all active rooms (slots 1+) to peer pi via ECDH-encrypted DM.
  *
- * Wire format per room:
- *   [4:ts][1:flags=TXT_TYPE_ROOMSYNC<<2][1:room_idx][64:prv_key][32:pub_key][name\0]
- * Total: 4+1+1+96+max24 = max 126 bytes — well within MAX_PACKET_PAYLOAD.
+ * Wire format per room (JES-856: extended with guest_password):
+ *   [4:ts][1:flags=TXT_TYPE_ROOMSYNC<<2][1:room_idx][64:prv_key][32:pub_key][name\0][guest_password\0]
+ * Total: 4+1+1+96+max24+max16 = max 142 bytes — well within MAX_PACKET_PAYLOAD.
  *
  * Room 0 (node identity) is NEVER sent.
  * SECURITY: private key bytes are in the encrypted payload only — never logged.
+ * Passwords are also in the encrypted ECDH payload only — never logged.
  */
 void MultiRoomMesh::sendRoomSync(int pi) {
   if (!peers[pi].active) return;
@@ -4316,6 +4463,10 @@ void MultiRoomMesh::sendRoomSync(int pi) {
     uint8_t name_len = (uint8_t)strnlen(rooms[ri].name, 23);
     memcpy(&reply_data[len], rooms[ri].name, name_len);  len += name_len;
     reply_data[len++] = 0;  // null terminator
+    // guest_password: null-terminated, max 15 chars (JES-856)
+    uint8_t gp_len = (uint8_t)strnlen(rooms[ri].guest_password, sizeof(rooms[ri].guest_password) - 1);
+    memcpy(&reply_data[len], rooms[ri].guest_password, gp_len);  len += gp_len;
+    reply_data[len++] = 0;  // null terminator
 
     self_id = rooms[0].id;
     auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
@@ -4333,16 +4484,25 @@ void MultiRoomMesh::sendRoomSync(int pi) {
 }
 
 /**
- * Handle incoming ROOMSYNC frame from peer pi.
+ * Handle incoming ROOMSYNC frame from peer pi (JES-848, extended JES-856).
  *
- * Wire format: [4:ts][1:flags][1:room_idx][64:prv_key][32:pub_key][name\0]
+ * Wire format: [4:ts][1:flags][1:room_idx][64:prv_key][32:pub_key][name\0][guest_password\0]
  * Minimum valid length: 4+1+1+64+32+1 = 103 bytes.
  *
- * Room 0 is NEVER accepted. Deduplicates by pub_key. Fills next free slot.
- * SECURITY: private key bytes are never logged.
+ * Room 0 is NEVER accepted. Identified by pub_key.
+ * - New room (pub_key not found): install key + name + guest_password in a free slot.
+ * - Existing room (pub_key found): update name + guest_password (last-writer-wins, JES-856).
+ * SECURITY: private key and passwords are never logged.
  */
 void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
   // Minimum: ts[4] + flags[1] + room_idx[1] + prv[64] + pub[32] + NUL[1] = 103
+  DLOG((uint32_t)(millis()/1000),
+       "SYNC ROOM←peer[%d] len=%d pub=%02x%02x%02x%02x",
+       pi, (int)len,
+       len >= 103 ? (unsigned)data[70] : 0u,
+       len >= 103 ? (unsigned)data[71] : 0u,
+       len >= 103 ? (unsigned)data[72] : 0u,
+       len >= 103 ? (unsigned)data[73] : 0u);
   if (len < 103) {
     Serial.printf("[ROOMSYNC] ignored — frame too short (%u < 103)\n", (unsigned)len);
     return;
@@ -4357,15 +4517,50 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
     return;
   }
 
-  // Dedup: skip if we already have a room with this pub_key
-  for (int i = 0; i < MAX_ROOMS; i++) {
-    if (rooms[i].active && memcmp(rooms[i].id.pub_key, recv_pub, PUB_KEY_SIZE) == 0) {
-      Serial.printf("[ROOMSYNC] skip — room already in slot %d\n", i);
-      return;
+  // Helper: parse NUL-terminated string from payload at given offset, max max_len chars.
+  // Returns length (excluding NUL), advances offset past the NUL.
+  auto parseNulStr = [&](size_t offset, char* dst, size_t dst_max) -> size_t {
+    if (offset >= len) { if (dst) dst[0] = 0; return 0; }
+    size_t avail = len - offset;
+    size_t sl = strnlen((char*)&data[offset], avail < dst_max ? avail : dst_max);
+    if (dst) {
+      memcpy(dst, &data[offset], sl);
+      dst[sl] = 0;
     }
+    return sl;
+  };
+
+  // Check if we already have a room with this pub_key (JES-856: update, not skip).
+  for (int i = 1; i < MAX_ROOMS; i++) {  // never match slot 0
+    if (!rooms[i].active) continue;
+    if (memcmp(rooms[i].id.pub_key, recv_pub, PUB_KEY_SIZE) != 0) continue;
+
+    // Existing room found — update name and guest_password (last-writer-wins).
+    bool changed = false;
+    if (len > 102) {
+      char new_name[24] = {};
+      size_t nl = parseNulStr(102, new_name, 23);
+      if (nl > 0 && strncmp(rooms[i].name, new_name, sizeof(rooms[i].name)) != 0) {
+        StrHelper::strncpy(rooms[i].name, new_name, sizeof(rooms[i].name));
+        changed = true;
+      }
+      // guest_password starts after name + NUL
+      size_t gp_offset = 102 + nl + 1;
+      char new_gp[16] = {};
+      parseNulStr(gp_offset, new_gp, 15);
+      if (strncmp(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password)) != 0) {
+        StrHelper::strncpy(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password));
+        changed = true;
+      }
+    }
+    if (changed) saveRoomConfig();
+    // SECURITY: log only slot + name — passwords never logged
+    Serial.printf("[ROOMSYNC] updated room[%d] '%s' from peer[%d] '%s'\n",
+                  i, rooms[i].name, pi, peers[pi].name);
+    return;
   }
 
-  // Validate private key (basic format check)
+  // Validate private key (basic format check: reject all-0x00 or all-0xFF)
   const uint8_t* recv_prv = &data[6];
   if (!mesh::LocalIdentity::validatePrivateKey(recv_prv)) {
     Serial.printf("[ROOMSYNC] rejected — invalid private key format\n");
@@ -4388,26 +4583,30 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
 
   // Extract name (null-terminated at offset 102, max 23 chars)
   rooms[free_slot].name[0] = 0;
+  size_t name_len = 0;
   if (len > 102) {
-    size_t avail = len - 102;
-    size_t name_len = strnlen((char*)&data[102], avail < 23 ? avail : 23);
-    memcpy(rooms[free_slot].name, &data[102], name_len);
-    rooms[free_slot].name[name_len] = 0;
+    name_len = parseNulStr(102, rooms[free_slot].name, 23);
   }
   if (rooms[free_slot].name[0] == 0) {
     snprintf(rooms[free_slot].name, sizeof(rooms[free_slot].name), "Room%d", free_slot);
   }
 
-  // Activate slot with safe defaults
-  rooms[free_slot].active          = true;
-  rooms[free_slot].stealth         = true;   // stealth by default (JES-772)
+  // Extract guest_password (after name + NUL, max 15 chars; JES-856)
   rooms[free_slot].guest_password[0] = 0;
+  size_t gp_offset = 102 + name_len + 1;
+  if (gp_offset < len) {
+    parseNulStr(gp_offset, rooms[free_slot].guest_password, 15);
+  }
+
+  // Activate slot with safe defaults
+  rooms[free_slot].active  = true;
+  rooms[free_slot].stealth = true;   // stealth by default (JES-772)
   StrHelper::strncpy(rooms[free_slot].password, _prefs.password,
                      sizeof(rooms[free_slot].password));
   _num_active_rooms++;
   saveRoomConfig();
 
-  // SECURITY: log only 4-byte pub prefix + name — private key never logged
+  // SECURITY: log only 4-byte pub prefix + name — private key and passwords never logged
   Serial.printf("[ROOMSYNC] room '%s' installed in slot %d (pub: %02X%02X%02X%02X) from peer[%d] '%s'\n",
                 rooms[free_slot].name, free_slot,
                 recv_pub[0], recv_pub[1], recv_pub[2], recv_pub[3],
