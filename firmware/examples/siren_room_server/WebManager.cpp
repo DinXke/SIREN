@@ -1691,11 +1691,25 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
 
   // Peer-koppeling (JES-816)
   {
-    const uint8_t* own_pub = mesh.getRoomPubKey(0);
+    // JES-865: rooms[0].id.pub_key is rewritten by handleRoomSync() on the main
+    // loop core while this AsyncTCP task reads it — snapshot under the rooms lock
+    // to avoid a torn read that corrupts the request task (std::bad_function_call
+    // crash reported when opening /network during a ROOMSYNC from the peer).
+    // Best-effort: never block the AsyncTCP task; if the lock times out we render
+    // an empty pubkey rather than reading rooms[] unsynchronised.
     char own_hex[65] = {};
-    if (own_pub) {
-      for (int b = 0; b < PUB_KEY_SIZE; b++)
-        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    {
+      uint8_t own_pub[PUB_KEY_SIZE] = {};
+      bool have_pub = false;
+      if (mesh.lockRooms(50)) {
+        const uint8_t* p = mesh.getRoomPubKey(0);
+        if (p) { memcpy(own_pub, p, PUB_KEY_SIZE); have_pub = true; }
+        mesh.unlockRooms();  // JES-865
+      }
+      if (have_pub) {
+        for (int b = 0; b < PUB_KEY_SIZE; b++)
+          snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+      }
     }
     page += "<div class='card'><h2>Peer-koppeling</h2>";
     page += "<p style='font-size:0.88em;color:#aaa'>Eigen node pubkey &mdash; geef dit aan de operator van de andere node:</p>"
@@ -1909,16 +1923,28 @@ static String buildQrPage(MultiRoomMesh& mesh, int idx) {
     return page;
   }
 
-  // Build 64-char hex public key
+  // JES-865: snapshot rooms[idx] pubkey + name under the lock (races
+  // handleRoomSync() on the main loop core). Copy into locals so the rest of the
+  // page renders from a stable snapshot, never a torn read of rooms[].
   char hex64[65] = {};
-  const uint8_t* pub = mesh.getRoomPubKey(idx);
-  for (int b = 0; b < PUB_KEY_SIZE; b++) {
-    snprintf(hex64 + b * 2, 3, "%02x", (unsigned int)pub[b]);
+  char room_name_buf[24] = {};
+  {
+    uint8_t pub[PUB_KEY_SIZE] = {};
+    if (mesh.lockRooms(50)) {
+      const uint8_t* p = mesh.getRoomPubKey(idx);
+      if (p) memcpy(pub, p, PUB_KEY_SIZE);
+      const char* rn = mesh.getRoomName(idx);
+      if (rn) { strncpy(room_name_buf, rn, sizeof(room_name_buf) - 1); }
+      mesh.unlockRooms();  // JES-865
+    }
+    for (int b = 0; b < PUB_KEY_SIZE; b++) {
+      snprintf(hex64 + b * 2, 3, "%02x", (unsigned int)pub[b]);
+    }
   }
+  const char* room_name = room_name_buf;
 
   // URL-encode room name for use in URI
   char enc_name[80] = {};
-  const char* room_name = mesh.getRoomName(idx);
   int ei = 0;
   for (int ni = 0; room_name[ni] && ei < (int)sizeof(enc_name) - 4; ni++) {
     unsigned char c = (unsigned char)room_name[ni];
@@ -2816,11 +2842,20 @@ void WebManager::setupRoutes() {
   // GET /api/peers — JSON list of configured peers + own pubkey
   _server.on("/api/peers", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
-    const uint8_t* own_pub = _mesh.getRoomPubKey(0);
+    // JES-865: snapshot rooms[0] pubkey under the lock (races handleRoomSync()).
     char own_hex[65] = {};
-    if (own_pub) {
-      for (int b = 0; b < PUB_KEY_SIZE; b++)
-        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    {
+      uint8_t own_pub[PUB_KEY_SIZE] = {};
+      bool have_pub = false;
+      if (_mesh.lockRooms(50)) {
+        const uint8_t* p = _mesh.getRoomPubKey(0);
+        if (p) { memcpy(own_pub, p, PUB_KEY_SIZE); have_pub = true; }
+        _mesh.unlockRooms();  // JES-865
+      }
+      if (have_pub) {
+        for (int b = 0; b < PUB_KEY_SIZE; b++)
+          snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+      }
     }
     String json = "{\"own_pub\":\"";
     json += own_hex;
