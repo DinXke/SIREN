@@ -1008,36 +1008,76 @@ String WebManager::buildStatusPage(const char* ip) {
 
   String page = buildHead(mesh.getNodeName());
 
-  // Node info
-  page += "<div class='card'><h2>";
+  // ---- Top bar ----
+  page += "<div id='topbar'><h1>";
   page += htmlEscape(mesh.getNodeName());
-  page += " Room Server</h2>";
+  page += " Room Server</h1></div>";
+
+  // ---- Tab nav bar ----
+  page += "<div id='tabnav'>"
+          "<button class='tnb act' onclick='showTab(0)'>Status</button>"
+          "<button class='tnb' onclick='showTab(1)'>Rooms</button>"
+          "<button class='tnb' onclick='showTab(2)'>Netwerk</button>"
+          "<button class='tnb' onclick='showTab(3)'>Systeem</button>"
+          "</div>"
+          "<script>"
+          "function showTab(n){"
+            "var ps=document.querySelectorAll('.tpanel');"
+            "var bs=document.querySelectorAll('.tnb');"
+            "for(var i=0;i<ps.length;i++){ps[i].classList.remove('act');bs[i].classList.remove('act');}"
+            "ps[n].classList.add('act');bs[n].classList.add('act');"
+          "}"
+          "</script>";
+
+  // ================================================================
+  // TAB 0: STATUS
+  // ================================================================
+  page += "<div class='tpanel act'>";
+
+  // Node summary card
+  page += "<div class='card'>";
   page += "<table>";
-  page += "<tr><th>Node</th><td>"; page += mesh.getNodeName(); page += "</td></tr>";
-  page += "<tr><th>WiFi Mode</th><td>"; page += (mode == MODE_AP ? "AP (hotspot)" : "STA (client)"); page += "</td></tr>";
-  page += "<tr><th>IP</th><td>"; page += ip; page += "</td></tr>";
-  page += "<tr><th>Firmware</th><td>" FIRMWARE_VERSION " (" FIRMWARE_BUILD_DATE ")</td></tr>";
-  page += "<tr><th>Active Rooms</th><td>"; page += mesh.getNumActiveRooms();
+  page += "<tr><th>Firmware</th><td>" FIRMWARE_VERSION "</td></tr>";
+  page += "<tr><th>Build</th><td>" FIRMWARE_BUILD_DATE "</td></tr>";
+  page += "<tr><th>WiFi</th><td>"; page += (mode == MODE_AP ? "AP (hotspot)" : "STA (client)");
+  page += "</td></tr><tr><th>IP</th><td>"; page += ip;
+  page += "</td></tr><tr><th>Rooms actief</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
   page += "</table>";
   // Server name edit form (JES-828)
-  page += "<form method='post' action='/api/node/name' style='margin:6px 0'>"
-          "Server naam: <input name=\"name\" value=\"";
+  page += "<form method='post' action='/api/node/name' style='margin-top:12px'>"
+          "<label style='display:block;color:#aaa;font-size:0.88em;margin-bottom:4px'>Server naam</label>"
+          "<div style='display:flex;gap:6px'>"
+          "<input name='name' value='";
   page += htmlEscape(mesh.getNodeName());
-  page += "\" maxlength='31' size='20'> "
-          "<button type='submit'>Opslaan</button></form>"
-          "<p style='font-size:0.85em;color:#aaa'>CLI: <code>set name &lt;naam&gt;</code></p>";
-  page += "<p><a href='/chat'><button>&#128172; Rooms</button></a>"
-          " &mdash; berichten per kanaal bekijken en posten als operator</p>"
-          "<p><a href='/acl'><button>&#128100; ACL beheer</button></a>"
-          " &mdash; rechten per gebruiker instellen (lees/schrijf/admin)</p>"
-          "<p><a href='/stats'><button>&#128200; Statistieken</button></a>"
-          " &mdash; rooms, gebruikers, RSSI/SNR, berichtenhistogram</p>"
-          "</div>";
+  page += "' maxlength='31' style='flex:1;min-width:0'>"
+          "<button type='submit' style='flex:none'>Opslaan</button></div></form>";
+  page += "</div>";
 
-  // Rooms table
+  // Quick navigation cards
+  page += "<div class='card'>"
+          "<div style='display:flex;flex-direction:column;gap:8px'>"
+          "<a href='/chat' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128172; Rooms &mdash; berichten bekijken en posten</button>"
+          "</a>"
+          "<a href='/acl' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128100; ACL beheer &mdash; rechten per gebruiker</button>"
+          "</a>"
+          "<a href='/stats' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128200; Statistieken &mdash; RSSI/SNR, histogram</button>"
+          "</a>"
+          "</div></div>";
+
+  page += "</div>";  // end tab 0
+
+  // ================================================================
+  // TAB 1: ROOMS
+  // ================================================================
+  page += "<div class='tpanel'>";
+
+  // Rooms overview table
   page += "<div class='card'><h2>Rooms</h2>";
-  page += "<table><tr><th>#</th><th>Name</th><th>Stealth</th><th>Clients</th><th>Posts</th><th>Actions</th></tr>";
+  page += "<table><tr><th>#</th><th>Naam</th><th>Status</th><th>Clients</th><th>Posts</th><th>Acties</th></tr>";
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!mesh.isRoomActive(i)) continue;
     bool stealth_i = mesh.isRoomStealth(i);
@@ -1047,27 +1087,25 @@ String WebManager::buildStatusPage(const char* ip) {
     page += stealth_i ? "<span class='warn'>STEALTH</span>" : "<span class='ok'>VISIBLE</span>";
     page += "</td><td>"; page += mesh.getRoomClientCount(i);
     page += "</td><td>"; page += mesh.getRoomPostCount(i);
-    page += "</td><td>";
-    // Per-room stealth toggle
-    page += "<form method='post' action='/api/room/stealth' style='display:inline'>"
+    page += "</td><td><div class='btngrp'>";
+    // Stealth toggle
+    page += "<form method='post' action='/api/room/stealth'>"
             "<input type='hidden' name='idx' value='"; page += i;
     page += "'><input type='hidden' name='stealth' value='";
     page += stealth_i ? "off" : "on";
     page += "'><button type='submit'>";
-    page += stealth_i ? "Make Visible" : "Hide";
+    page += stealth_i ? "Zichtbaar" : "Verberg";
     page += "</button></form>";
-    // QR join code button
-    page += " <a href='/api/room/qr?idx="; page += i;
+    // QR join
+    page += "<a href='/api/room/qr?idx="; page += i;
     page += "' style='text-decoration:none'><button>QR</button></a>";
-    // Rekey button — double-confirm via JS prompt (type room name or REKEY for room 0).
-    // Room name stored in data-exp attribute (htmlEscape covers & < > "); JS reads via
-    // dataset to avoid JS-string-literal injection (single-quote breakout).
+    // Rekey — dataset avoids JS-string-literal injection
     {
       const char* exp_name = (i == 0) ? "REKEY" : mesh.getRoomName(i);
-      page += " <form method='post' action='/api/room/rekey' style='display:inline'>"
+      page += "<form method='post' action='/api/room/rekey'>"
               "<input type='hidden' name='idx' value='"; page += i;
       page += "'><input type='hidden' name='confirm' value=''>"
-              "<button type='button' data-exp=\""; page += htmlEscape(exp_name);
+              "<button type='button' class='warn-btn' data-exp=\""; page += htmlEscape(exp_name);
       page += "\" onclick=\""
               "var e=this.dataset.exp;"
               "var w="; page += (i == 0) ? "'Room 0 = node-identiteit. Alle peer-links verbreken!'" : "'Bestaande QR-codes en join-URIs worden ongeldig.'";
@@ -1080,189 +1118,25 @@ String WebManager::buildStatusPage(const char* ip) {
               "\">Rekey</button></form>";
     }
     if (i > 0) {
-      page += " <form method='post' action='/api/room/del' style='display:inline'>"
+      page += "<form method='post' action='/api/room/del'>"
               "<input type='hidden' name='idx' value='"; page += i;
-      page += "'><button onclick=\"return confirm('Delete room "; page += i;
+      page += "'><button class='del' onclick=\"return confirm('Delete room "; page += i;
       page += "?')\">Del</button></form>";
     }
-    page += "</td></tr>";
+    page += "</div></td></tr>";
   }
   page += "</table>";
-  page += "<form method='post' action='/api/room/add'>"
-          "<button type='submit'>+ Add Room</button></form></div>";
-
-  // Peer-koppeling (JES-816)
-  {
-    // Own node pubkey (rooms[0]) — share this with the other node's operator
-    const uint8_t* own_pub = mesh.getRoomPubKey(0);
-    char own_hex[65] = {};
-    if (own_pub) {
-      for (int b = 0; b < PUB_KEY_SIZE; b++)
-        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
-    }
-    page += "<div class='card'><h2>Peer-koppeling (Multi-room Replicatie)</h2>";
-    page += "<p><b>Eigen node pubkey</b> &mdash; geef dit aan de operator van de andere node:<br>"
-            "<code style='word-break:break-all;font-size:0.85em'>";
-    page += own_hex;
-    page += "</code></p>";
-
-    // Peers table
-    int np = mesh.getNumPeers();
-    page += "<p>"; page += np; page += " / "; page += MAX_PEERS; page += " peers geconfigureerd</p>";
-    if (np > 0) {
-      page += "<table><tr><th>#</th><th>Naam</th><th>Pubkey prefix</th><th>Laatste contact</th><th>Acties</th></tr>";
-      for (int i = 0; i < MAX_PEERS; i++) {
-        const PeerInfo* peer = mesh.getPeer(i);
-        if (!peer || !peer->active) continue;
-        char pfx[9] = {};
-        for (int b = 0; b < 4; b++)
-          snprintf(pfx + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
-        page += "<tr><td>"; page += i;
-        page += "</td><td>"; page += htmlEscape(peer->name);
-        page += "</td><td><code>"; page += pfx; page += "...</code>";
-        page += "</td><td>";
-        page += (peer->last_contact > 0 ? String((unsigned long)peer->last_contact) : "nooit");
-        page += "</td><td>";
-        page += "<form method='post' action='/api/peer/sync' style='display:inline'>"
-                "<input type='hidden' name='idx' value='"; page += i;
-        page += "'><button type='submit'>Sync</button></form> ";
-        page += "<form method='post' action='/api/peer/del' style='display:inline'>"
-                "<input type='hidden' name='idx' value='"; page += i;
-        page += "'><button onclick=\"return confirm('Peer "; page += i;
-        page += " verwijderen?')\">Del</button></form>";
-        page += "</td></tr>";
-      }
-      page += "</table>";
-    }
-
-    // Add peer form
-    page += "<br><b>Peer toevoegen</b> (voer de volledige 64-char hex pubkey in van de andere node)<br>"
-            "<form method='post' action='/api/peer/add'>"
-            "Pubkey: <input name='pub' size='36' maxlength='64' placeholder='64 hex chars' required> "
-            "Naam: <input name='name' size='16' maxlength='23'> "
-            "<button type='submit'>Toevoegen</button></form>";
-
-    // Sync all button
-    page += "<form method='post' action='/api/peer/sync' style='margin-top:6px'>"
-            "<button type='submit'>Sync All Nu</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>CLI (serial): "
-            "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code> &nbsp; "
-            "<code>peer del &lt;idx&gt;</code> &nbsp; "
-            "<code>peer sync</code></p>"
-            "</div>";
-
-    // Sync diagnostics panel (JES-833) — fetches /api/sync/status every 10 s
-    page += "<div class='card'><h2>Sync Diagnostiek</h2>"
-            "<div id='sync-panel'><p>Laden...</p></div>"
-            "<p style='font-size:0.8em;color:#aaa'>Auto-refresh 10s &bull; RAM-counters (reset bij reboot) &bull; "
-            "<code>sync status</code> voor serial CLI</p></div>"
-            "<script>"
-            "function renderSync(d){"
-              "var el=document.getElementById('sync-panel');"
-              "if(!el)return;"
-              "while(el.firstChild)el.removeChild(el.firstChild);"
-              // Counters paragraph
-              "var cp=document.createElement('p');"
-              "cp.textContent='SYNCREQ: '+d.counters.sync_req_sent"
-                "+'  |  SYNCDAT: '+d.counters.sync_dat_recv"
-                "+'  |  Posts ontvangen: '+d.counters.sync_posts_recv"
-                "+'  |  Posts verzonden: '+d.counters.sync_posts_sent;"
-              "el.appendChild(cp);"
-              // Room hashes paragraph
-              "if(d.rooms&&d.rooms.length){"
-                "var rp=document.createElement('p');"
-                "var rb=document.createElement('b');rb.textContent='Room hashes: ';rp.appendChild(rb);"
-                "d.rooms.forEach(function(r){"
-                  "var s=document.createElement('span');"
-                  "s.textContent='['+r.idx+'] '+r.name+' ('+r.hash+'...)  ';"
-                  "rp.appendChild(s);"
-                "});"
-                "el.appendChild(rp);"
-              "}"
-              // Peers table
-              "if(!d.peers||!d.peers.length){"
-                "var np=document.createElement('p');np.textContent='Geen peers.';el.appendChild(np);return;"
-              "}"
-              "var tbl=document.createElement('table');"
-              "var hr=document.createElement('tr');"
-              "['#','Naam','Status','SYNCREQ ts','SYNCDAT ts','SYNCEND ts','Recv','Sent'].forEach(function(h){"
-                "var th=document.createElement('th');th.textContent=h;hr.appendChild(th);"
-              "});"
-              "tbl.appendChild(hr);"
-              "d.peers.forEach(function(p){"
-                "var tr=document.createElement('tr');"
-                "[p.idx,p.name,p.status,"
-                  "p.last_syncreq_ts||'-',p.last_syncdat_ts||'-',p.last_syncend_ts||'-',"
-                  "p.sync_posts_recv,p.sync_posts_sent"
-                "].forEach(function(v){"
-                  "var td=document.createElement('td');td.textContent=v;tr.appendChild(td);"
-                "});"
-                "tbl.appendChild(tr);"
-              "});"
-              "el.appendChild(tbl);"
-            "}"
-            "function loadSync(){"
-              "fetch('/api/sync/status')"
-                ".then(function(r){return r.json();})"
-                ".then(renderSync)"
-                ".catch(function(){"
-                  "var el=document.getElementById('sync-panel');"
-                  "if(el){var e=document.createElement('p');e.textContent='Fout bij ophalen.';el.appendChild(e);}"
-                "});"
-            "}"
-            "loadSync();setInterval(loadSync,10000);"
-            "</script>";
-  }
+  page += "<form method='post' action='/api/room/add' style='margin-top:8px'>"
+          "<button type='submit'>+ Room toevoegen</button></form></div>";
 
   // Edit room form
-  page += "<div class='card'><h2>Edit Room</h2>"
+  page += "<div class='card'><h2>Room bewerken</h2>"
           "<form method='post' action='/api/room/set'>"
-          "Idx: <input name='idx' size='3'> "
-          "Name: <input name='name' size='20'> "
-          "Pass: <input name='pass' size='16'> "
-          "Guest: <input name='guest' size='16'> "
-          "<button type='submit'>Save</button></form></div>";
-
-  // Login notification targets (JES-834)
-  {
-    page += "<div class='card'><h2>Login Notificaties</h2>"
-            "<p style='font-size:0.85em;color:#aaa'>"
-            "Stuur een DM naar deze pubkeys bij elke inlogpoging. "
-            "Voeg de volledige 64-hex pubkey van het companion-apparaat toe. "
-            "Max " + String(MAX_NOTIFY_TARGETS) + " per room.</p>";
-    for (int i = 0; i < MAX_ROOMS; i++) {
-      if (!mesh.isRoomActive(i)) continue;
-      int cnt = mesh.getNotifyTargetCount(i);
-      page += "<p><b>Room " + String(i) + " &mdash; ";
-      page += htmlEscape(mesh.getRoomName(i));
-      page += "</b> (";
-      page += cnt;
-      page += "/" + String(MAX_NOTIFY_TARGETS) + " targets)";
-      if (cnt > 0) {
-        page += "<br>";
-        for (int t = 0; t < cnt; t++) {
-          const uint8_t* k = mesh.getNotifyTarget(i, t);
-          char hex[65] = {};
-          for (int b = 0; b < PUB_KEY_SIZE; b++) snprintf(hex + b * 2, 3, "%02x", k[b]);
-          page += "<code style='font-size:0.8em'>" + String(hex).substring(0, 8) + "&hellip;</code> ";
-          page += "<form method='post' action='/api/room/notify/del' style='display:inline'>"
-                  "<input type='hidden' name='idx' value='" + String(i) + "'>"
-                  "<input type='hidden' name='pubkey' value='" + String(hex) + "'>"
-                  "<button type='submit' style='font-size:0.8em;padding:1px 6px'>&#x2715;</button>"
-                  "</form> ";
-        }
-      }
-      if (cnt < MAX_NOTIFY_TARGETS) {
-        page += "<form method='post' action='/api/room/notify/add' style='display:inline'>"
-                "<input type='hidden' name='idx' value='" + String(i) + "'>"
-                "<input name='pubkey' size='64' placeholder='64-hex pubkey van companion'> "
-                "<button type='submit'>Toevoegen</button>"
-                "</form>";
-      }
-      page += "</p>";
-    }
-    page += "</div>";
-  }
+          "<div class='frow'><label>Idx</label><input name='idx' type='number' min='0' max='15'></div>"
+          "<div class='frow'><label>Naam</label><input name='name' maxlength='23'></div>"
+          "<div class='frow'><label>Wachtwoord</label><input name='pass' maxlength='15'></div>"
+          "<div class='frow'><label>Gast-ww</label><input name='guest' maxlength='15'></div>"
+          "<button type='submit'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle
   {
@@ -1273,30 +1147,104 @@ String WebManager::buildStatusPage(const char* ip) {
       any_active = true;
       if (!mesh.isRoomStealth(i)) { all_stealth = false; break; }
     }
-    page += "<div class='card'><h2>Visibility</h2>";
+    page += "<div class='card'><h2>Zichtbaarheid</h2>";
     if (any_active && all_stealth) {
-      page += "<p>All rooms: <b class='warn'>STEALTH</b> — no adverts sent. "
-              "Rooms are joinable if you know the key (QR / out-of-band).</p>";
+      page += "<p>Alle rooms: <b class='warn'>STEALTH</b> &mdash; geen adverts verstuurd. "
+              "Rooms zijn joinbaar via QR/uri als je de sleutel kent.</p>";
     } else {
-      page += "<p>One or more rooms: <b class='ok'>VISIBLE</b> — adverts active.</p>";
+      page += "<p>Een of meer rooms: <b class='ok'>ZICHTBAAR</b> &mdash; adverts actief.</p>";
     }
-    page += "<form method='post' action='/api/stealth'>"
-            "<button name='stealth' value='off'>Make All Visible</button> "
-            "<button name='stealth' value='on' onclick=\"return confirm('Hide all rooms? They stop broadcasting adverts.')\">Hide All (Stealth)</button>"
-            "</form>"
-            "<p style='font-size:0.85em;color:#aaa'>Per-room: use the toggle buttons in the Rooms table above, "
-            "or CLI: <code>room stealth &lt;idx&gt; on|off</code></p>";
+    page += "<div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px'>"
+            "<form method='post' action='/api/stealth'>"
+            "<button name='stealth' value='off'>Alles zichtbaar</button></form>"
+            "<form method='post' action='/api/stealth'>"
+            "<button class='warn-btn' name='stealth' value='on' "
+            "onclick=\"return confirm('Alle rooms verbergen? Adverts stoppen.')\">Alles verbergen</button></form>"
+            "</div>";
     char adv_sec_str[8];
     snprintf(adv_sec_str, sizeof(adv_sec_str), "%d", (int)mesh.getAdvertIntervalSec());
-    page += "<form method='post' action='/api/advert/interval' style='margin-top:0.5em'>"
-            "Advert interval (when visible): <input name='seconds' type='number' min='10' max='3600' value='";
+    page += "<form method='post' action='/api/advert/interval'>"
+            "<div class='frow'><label>Advert interval</label>"
+            "<input name='seconds' type='number' min='10' max='3600' value='";
     page += adv_sec_str;
-    page += "' size='6'> s "
-            "<button type='submit'>Save</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>Range 10&ndash;3600 s, default 120 s. "
-            "CLI: <code>advert interval &lt;seconds&gt;</code></p>"
+    page += "'> s</div>"
+            "<button type='submit'>Opslaan</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "10&ndash;3600 s, standaard 120 s. CLI: <code>advert interval &lt;s&gt;</code></p>"
             "</div>";
   }
+
+  // Login notification targets (JES-834)
+  {
+    page += "<div class='card'><h2>Login Notificaties</h2>"
+            "<p style='font-size:0.85em;color:#aaa'>"
+            "Stuur een DM naar deze pubkeys bij elke inlogpoging. Max ";
+    page += MAX_NOTIFY_TARGETS;
+    page += " per room.</p>";
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (!mesh.isRoomActive(i)) continue;
+      int cnt = mesh.getNotifyTargetCount(i);
+      page += "<p><b>Room "; page += i; page += " &mdash; ";
+      page += htmlEscape(mesh.getRoomName(i));
+      page += "</b> ("; page += cnt; page += "/"; page += MAX_NOTIFY_TARGETS; page += ")";
+      if (cnt > 0) {
+        page += "<br>";
+        for (int t = 0; t < cnt; t++) {
+          const uint8_t* k = mesh.getNotifyTarget(i, t);
+          char hex[65] = {};
+          for (int b = 0; b < PUB_KEY_SIZE; b++) snprintf(hex + b * 2, 3, "%02x", k[b]);
+          page += "<code>"; page += String(hex).substring(0, 8); page += "&hellip;</code> ";
+          page += "<form method='post' action='/api/room/notify/del' style='display:inline'>"
+                  "<input type='hidden' name='idx' value='"; page += i; page += "'>"
+                  "<input type='hidden' name='pubkey' value='"; page += hex; page += "'>"
+                  "<button type='submit' style='min-height:32px;padding:2px 10px'>&#x2715;</button>"
+                  "</form> ";
+        }
+      }
+      if (cnt < MAX_NOTIFY_TARGETS) {
+        page += "<form method='post' action='/api/room/notify/add' style='margin-top:6px'>"
+                "<input type='hidden' name='idx' value='"; page += i; page += "'>"
+                "<input name='pubkey' maxlength='64' placeholder='64-hex pubkey van companion'>"
+                "<button type='submit' style='margin-top:6px'>Toevoegen</button>"
+                "</form>";
+      }
+      page += "</p>";
+    }
+    page += "</div>";
+  }
+
+  page += "</div>";  // end tab 1
+
+  // ================================================================
+  // TAB 2: NETWERK
+  // ================================================================
+  page += "<div class='tpanel'>";
+
+  // WiFi config
+  page += "<div class='card'><h2>WiFi</h2>";
+  page += "<form method='post' action='/api/wifi/mode'>"
+          "<div class='frow'><label>Mode</label><select name='mode'>"
+          "<option value='ap'"; page += (mode == MODE_AP ? " selected" : ""); page += ">AP (eigen hotspot)</option>"
+          "<option value='sta'"; page += (mode == MODE_STA ? " selected" : ""); page += ">STA (verbinden met netwerk)</option>"
+          "</select></div>"
+          "<button type='submit'>Wissel modus</button></form>";
+
+  page += "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>AP instellingen</h3>"
+          "<form method='post' action='/api/wifi/ap'>"
+          "<div class='frow'><label>SSID</label><input name='ssid' value='"; page += ap_ssid;
+  page += "' maxlength='32'></div>"
+          "<div class='frow'><label>Wachtwoord</label><input name='pass' type='password' maxlength='63' placeholder='leeg = open'></div>"
+          "<button type='submit'>AP opslaan</button></form>";
+
+  page += "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>STA instellingen</h3>"
+          "<form method='post' action='/api/wifi/sta'>"
+          "<div class='frow'><label>SSID</label><input name='ssid' value='"; page += sta_ssid;
+  page += "' maxlength='32'></div>"
+          "<div class='frow'><label>Wachtwoord</label><input name='pass' type='password' maxlength='63'></div>"
+          "<button type='submit'>STA opslaan &amp; verbinden</button></form>"
+          "<p style='margin-top:8px'>Huidig IP: <b>"; page += ip; page += "</b></p></div>";
 
   // LoRa radio settings
   {
@@ -1317,11 +1265,9 @@ String WebManager::buildStatusPage(const char* ip) {
     page += "</td></tr><tr><th>TX Power</th><td>"; page += tx_str;
     page += " dBm</td></tr></table>";
 
-    page += "<form method='post' action='/api/lora'>"
-            "Freq (MHz): <input name='freq' value='"; page += freq_str;
-    page += "' size='10'> "
-            "BW (kHz): <select name='bw'>";
-
+    page += "<form method='post' action='/api/lora' style='margin-top:10px'>";
+    page += "<div class='frow'><label>Freq (MHz)</label><input name='freq' value='"; page += freq_str; page += "'></div>";
+    page += "<div class='frow'><label>BW (kHz)</label><select name='bw'>";
     static const float BW_OPTS[]   = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f};
     static const char* BW_LABELS[] = {"7.80","10.40","15.60","20.80","31.25","41.70","62.50","125.00","250.00","500.00"};
     for (int i = 0; i < 10; i++) {
@@ -1329,59 +1275,155 @@ String WebManager::buildStatusPage(const char* ip) {
       if (fabsf(BW_OPTS[i] - p->bw) < 0.5f) page += "' selected='selected";
       page += "'>"; page += BW_LABELS[i]; page += "</option>";
     }
-    page += "</select> "
-            "SF: <select name='sf'>";
+    page += "</select></div>";
+    page += "<div class='frow'><label>SF</label><select name='sf'>";
     for (int sf = 5; sf <= 12; sf++) {
       page += "<option value='"; page += sf;
       if (sf == (int)p->sf) page += "' selected='selected";
       page += "'>SF"; page += sf; page += "</option>";
     }
-    page += "</select> "
-            "CR: <select name='cr'>";
+    page += "</select></div>";
+    page += "<div class='frow'><label>CR</label><select name='cr'>";
     for (int cr = 5; cr <= 8; cr++) {
       page += "<option value='"; page += cr;
       if (cr == (int)p->cr) page += "' selected='selected";
       page += "'>4/"; page += cr; page += "</option>";
     }
-    page += "</select> "
-            "TX (dBm): <input name='txpower' value='"; page += tx_str;
-    page += "' size='4' type='number' min='2' max='22'> "
-            "<button type='submit'>Save LoRa</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>Freq/BW/SF/CR changes require reboot to apply. TX power is live.</p>"
-            "</div>";
+    page += "</select></div>";
+    page += "<div class='frow'><label>TX (dBm)</label><input name='txpower' value='"; page += tx_str;
+    page += "' type='number' min='2' max='22'></div>";
+    page += "<button type='submit'>LoRa opslaan</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "Freq/BW/SF/CR vereisen herstart. TX power is live.</p></div>";
   }
 
-  // WiFi config
-  page += "<div class='card'><h2>WiFi</h2>";
-  page += "<form method='post' action='/api/wifi/mode'>"
-          "Mode: <select name='mode'>"
-          "<option value='ap'"; page += (mode == MODE_AP ? " selected" : ""); page += ">AP (own hotspot)</option>"
-          "<option value='sta'"; page += (mode == MODE_STA ? " selected" : ""); page += ">STA (connect to network)</option>"
-          "</select> <button type='submit'>Switch Mode</button></form>";
+  // Peer-koppeling (JES-816)
+  {
+    const uint8_t* own_pub = mesh.getRoomPubKey(0);
+    char own_hex[65] = {};
+    if (own_pub) {
+      for (int b = 0; b < PUB_KEY_SIZE; b++)
+        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    }
+    page += "<div class='card'><h2>Peer-koppeling</h2>";
+    page += "<p style='font-size:0.88em;color:#aaa'>Eigen node pubkey &mdash; geef dit aan de operator van de andere node:</p>"
+            "<p class='hex'>"; page += own_hex; page += "</p>";
 
-  page += "<br><b>AP Settings</b>"
-          "<form method='post' action='/api/wifi/ap'>"
-          "SSID: <input name='ssid' value='"; page += ap_ssid;
-  page += "' size='24'> "
-          "Password: <input name='pass' type='password' size='24' placeholder='empty=open'> "
-          "<button type='submit'>Save AP</button></form>";
+    int np = mesh.getNumPeers();
+    page += "<p style='margin:6px 0'>"; page += np; page += " / "; page += MAX_PEERS; page += " peers</p>";
+    if (np > 0) {
+      page += "<table><tr><th>#</th><th>Naam</th><th>Pubkey</th><th>Contact</th><th>Acties</th></tr>";
+      for (int i = 0; i < MAX_PEERS; i++) {
+        const PeerInfo* peer = mesh.getPeer(i);
+        if (!peer || !peer->active) continue;
+        char pfx[9] = {};
+        for (int b = 0; b < 4; b++)
+          snprintf(pfx + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
+        page += "<tr><td>"; page += i;
+        page += "</td><td>"; page += htmlEscape(peer->name);
+        page += "</td><td><code>"; page += pfx; page += "&hellip;</code>";
+        page += "</td><td>";
+        page += (peer->last_contact > 0 ? String((unsigned long)peer->last_contact) : "nooit");
+        page += "</td><td><div class='btngrp'>";
+        page += "<form method='post' action='/api/peer/sync'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button type='submit'>Sync</button></form>";
+        page += "<form method='post' action='/api/peer/del'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button class='del' onclick=\"return confirm('Peer "; page += i;
+        page += " verwijderen?')\">Del</button></form>";
+        page += "</div></td></tr>";
+      }
+      page += "</table>";
+    }
+    page += "<h3 style='margin-top:12px'>Peer toevoegen</h3>"
+            "<form method='post' action='/api/peer/add'>"
+            "<div class='frow'><label>Pubkey</label><input name='pub' maxlength='64' placeholder='64 hex chars' required></div>"
+            "<div class='frow'><label>Naam</label><input name='name' maxlength='23'></div>"
+            "<button type='submit'>Toevoegen</button></form>";
+    page += "<form method='post' action='/api/peer/sync' style='margin-top:8px'>"
+            "<button type='submit'>Sync All Nu</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>CLI: "
+            "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code></p></div>";
 
-  page += "<br><b>STA Settings</b>"
-          "<form method='post' action='/api/wifi/sta'>"
-          "SSID: <input name='ssid' value='"; page += sta_ssid;
-  page += "' size='24'> "
-          "Password: <input name='pass' type='password' size='24'> "
-          "<button type='submit'>Save STA &amp; Connect</button></form>"
-          "<p>Current IP: <b>"; page += ip;
-  page += "</b></p></div>";
+    // Sync diagnostics panel (JES-833)
+    page += "<div class='card'><h2>Sync Diagnostiek</h2>"
+            "<div id='sync-panel'><p style='color:#aaa'>Laden...</p></div>"
+            "<p style='font-size:0.8em;color:#aaa'>Auto-refresh 10s &bull; RAM-counters (reset bij reboot)</p></div>"
+            "<script>"
+            "function renderSync(d){"
+              "var el=document.getElementById('sync-panel');"
+              "if(!el)return;"
+              "while(el.firstChild)el.removeChild(el.firstChild);"
+              "var cp=document.createElement('p');"
+              "cp.style.fontSize='0.85em';"
+              "cp.textContent='REQ: '+d.counters.sync_req_sent"
+                "+'  DAT: '+d.counters.sync_dat_recv"
+                "+'  Recv: '+d.counters.sync_posts_recv"
+                "+'  Sent: '+d.counters.sync_posts_sent;"
+              "el.appendChild(cp);"
+              "if(d.rooms&&d.rooms.length){"
+                "var rp=document.createElement('p');"
+                "rp.style.fontSize='0.82em';"
+                "var rb=document.createElement('b');rb.textContent='Room hashes: ';rp.appendChild(rb);"
+                "d.rooms.forEach(function(r){"
+                  "var s=document.createElement('span');"
+                  "s.textContent='['+r.idx+'] '+r.name+' ('+r.hash+'...)  ';"
+                  "rp.appendChild(s);"
+                "});"
+                "el.appendChild(rp);"
+              "}"
+              "if(!d.peers||!d.peers.length){"
+                "var np=document.createElement('p');np.textContent='Geen peers.';el.appendChild(np);return;"
+              "}"
+              "var tbl=document.createElement('table');"
+              "var hr=document.createElement('tr');"
+              "['#','Naam','Status','Recv','Sent'].forEach(function(h){"
+                "var th=document.createElement('th');th.textContent=h;hr.appendChild(th);"
+              "});"
+              "tbl.appendChild(hr);"
+              "d.peers.forEach(function(p){"
+                "var tr=document.createElement('tr');"
+                "[p.idx,p.name,p.status,p.sync_posts_recv,p.sync_posts_sent"
+                "].forEach(function(v){"
+                  "var td=document.createElement('td');td.textContent=v;tr.appendChild(td);"
+                "});"
+                "tbl.appendChild(tr);"
+              "});"
+              "el.appendChild(tbl);"
+            "}"
+            "function loadSync(){"
+              "fetch('/api/sync/status')"
+                ".then(function(r){return r.json();})"
+                ".then(renderSync)"
+                ".catch(function(){"
+                  "var el=document.getElementById('sync-panel');"
+                  "if(el){var e=document.createElement('p');e.textContent='Fout.';el.appendChild(e);}"
+                "});"
+            "}"
+            "loadSync();setInterval(loadSync,10000);"
+            "</script>";
+  }
+
+  page += "</div>";  // end tab 2
+
+  // ================================================================
+  // TAB 3: SYSTEEM
+  // ================================================================
+  page += "<div class='tpanel'>";
 
   // Backup / Restore
   page += "<div class='card'><h2>Backup &amp; Restore</h2>";
-  page += "<p><a href='/api/backup'><button>Download Backup</button></a> "
-          "— exports all settings + private keys as JSON</p>";
+  page += "<a href='/api/backup' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px;margin-bottom:8px'>"
+          "&#8681; Download backup</button></a>"
+          "<p style='font-size:0.82em;color:#aaa;margin-bottom:10px'>"
+          "Exporteert alle instellingen + private keys als JSON.</p>";
   page += "<form method='post' action='/api/restore' enctype='multipart/form-data'>"
-          "Restore: <input type='file' name='backup' accept='.json'> "
-          "<button type='submit' onclick=\"return confirm('Restore will overwrite all settings and reboot. Continue?')\">Restore &amp; Reboot</button>"
+          "<label style='display:block;color:#aaa;font-size:0.88em;margin-bottom:6px'>Backup bestand</label>"
+          "<input type='file' name='backup' accept='.json' style='margin-bottom:8px'>"
+          "<button type='submit' class='del' style='width:100%' "
+          "onclick=\"return confirm('Restore overschrijft alle instellingen en herstart. Doorgaan?')\">&#8679; Restore &amp; Herstart</button>"
           "</form></div>";
 
   // Varia — screensaver / OLED settings
@@ -1389,41 +1431,26 @@ String WebManager::buildStatusPage(const char* ip) {
     bool    ss_on    = _ui_task->isSsEnabled();
     bool    keep_on  = _ui_task->isSsKeepOn();
     uint8_t page_sec = _ui_task->getSsPageSec();
-    page += "<div class='card'><h2>Varia</h2>";
-    page += "<p><b>Screensaver (OLED)</b> &mdash; cycles stats on screen to prevent burn-in "
-            "and keeps the display alive on units with glued buttons.</p>";
-    page += "<form method='post' action='/api/screensaver'>"
-            "Screensaver: <select name='ss'>"
-            "<option value='on'";
-    page += ss_on ? " selected" : "";
-    page += ">ON (aanbevolen)</option>"
-            "<option value='off'";
-    page += !ss_on ? " selected" : "";
-    page += ">OFF</option>"
-            "</select> "
-            "Keep screen on (when SS off): <select name='keep'>"
-            "<option value='off'";
-    page += !keep_on ? " selected" : "";
-    page += ">Uit na 60s</option>"
-            "<option value='on'";
-    page += keep_on ? " selected" : "";
-    page += ">Altijd aan</option>"
-            "</select>"
-            " &nbsp; Wisseltijd: <select name='interval'>";
-    // Selectable page-dwell times in seconds
+    page += "<div class='card'><h2>Scherm (OLED)</h2>";
+    page += "<p style='font-size:0.85em;color:#aaa'>Screensaver beschermt het OLED-scherm tegen inbranding.</p>";
+    page += "<form method='post' action='/api/screensaver'>";
+    page += "<div class='frow'><label>Screensaver</label><select name='ss'>"
+            "<option value='on'"; page += ss_on ? " selected" : ""; page += ">Aan (aanbevolen)</option>"
+            "<option value='off'"; page += !ss_on ? " selected" : ""; page += ">Uit</option>"
+            "</select></div>";
+    page += "<div class='frow'><label>Scherm aan</label><select name='keep'>"
+            "<option value='off'"; page += !keep_on ? " selected" : ""; page += ">Uit na 60s</option>"
+            "<option value='on'"; page += keep_on ? " selected" : ""; page += ">Altijd aan</option>"
+            "</select></div>";
+    page += "<div class='frow'><label>Wisseltijd</label><select name='interval'>";
     const uint8_t opts[] = {1, 2, 3, 5, 10, 15, 20, 30, 60};
     for (int i = 0; i < (int)(sizeof(opts)/sizeof(opts[0])); i++) {
       page += String("<option value='") + opts[i] + "'";
       if (opts[i] == page_sec) page += " selected";
       page += String(">") + opts[i] + "s</option>";
     }
-    page += "</select> "
-            "<button type='submit'>Opslaan</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>CLI: "
-            "<code>screensaver on|off</code> &nbsp; "
-            "<code>screensaver keep-on on|off</code> &nbsp; "
-            "<code>screensaver interval &lt;1-60&gt;</code></p>"
-            "</div>";
+    page += "</select></div>";
+    page += "<button type='submit'>Opslaan</button></form></div>";
   }
 
   // MQTT section (JES-792)
@@ -1435,7 +1462,10 @@ String WebManager::buildStatusPage(const char* ip) {
   page += _ota_mgr.buildWebSection();
 
   // Legacy ElegantOTA serial-upload link (fallback)
-  page += "<div class='card'><small><a href='/update'>Handmatige OTA upload (ElegantOTA)</a></small></div>";
+  page += "<div class='card'><p style='font-size:0.85em'>"
+          "<a href='/update'>Handmatige OTA upload (ElegantOTA)</a></p></div>";
+
+  page += "</div>";  // end tab 3
 
   page += FPSTR(HTML_FOOT);
   return page;
@@ -1447,10 +1477,13 @@ String WebManager::buildStatusPage(const char* ip) {
 static String buildQrPage(MultiRoomMesh& mesh, int idx) {
   String page = buildHead(mesh.getNodeName());
 
+  page += "<div id='topbar'><h1>QR Join</h1><a href='/'>&#8592; Beheer</a></div>"
+          "<div style='padding:10px'>";
+
   if (idx < 0 || idx >= MAX_ROOMS || !mesh.isRoomActive(idx)) {
     page += "<div class='card'><p class='err'>Room ";
     page += idx;
-    page += " is not active.</p><p><a href='/'>&#8592; Back</a></p></div>";
+    page += " is niet actief.</p><p><a href='/'>&#8592; Terug</a></p></div>";
     page += FPSTR(HTML_FOOT);
     return page;
   }
@@ -1560,7 +1593,8 @@ static String buildQrPage(MultiRoomMesh& mesh, int idx) {
             "This QR is the only out-of-band join path.</p>";
   }
 
-  page += "<p><a href='/'>&#8592; Back</a></p></div>";
+  page += "<p><a href='/'>&#8592; Terug</a></p></div>"
+          "</div>";  // padding wrapper
   page += FPSTR(HTML_FOOT);
   return page;
 }
