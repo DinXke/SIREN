@@ -459,30 +459,82 @@ static String base64Encode(const uint8_t* data, size_t len) {
 // ---------------------------------------------------------------------------
 static const char HTML_HEAD_PRE[] PROGMEM =
   "<!DOCTYPE html><html><head>"
-  "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+  "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'>"
+  "<meta charset='utf-8'>"
   "<title>";
 
 static const char HTML_HEAD_POST[] PROGMEM =
   "</title>"
   "<style>"
-  "body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:12px;}"
-  "h2{color:#00d4ff;margin:0 0 8px}"
-  "table{border-collapse:collapse;width:100%;margin-bottom:12px}"
-  "th,td{border:1px solid #333;padding:4px 8px;text-align:left}"
-  "th{background:#2a2a4a;color:#00d4ff}"
-  "form{margin-top:8px}"
-  "input,select{background:#2a2a4a;border:1px solid #555;color:#e0e0e0;padding:4px;margin:2px}"
-  "button{background:#00d4ff;border:none;color:#000;padding:5px 12px;cursor:pointer;margin:2px}"
-  ".card{background:#16213e;border:1px solid #333;padding:10px;margin-bottom:10px;border-radius:4px}"
-  ".ok{color:#00ff88}.err{color:#ff4444}.warn{color:#ffcc00}"
+  /* === Reset & Base === */
+  "*{box-sizing:border-box}"
+  "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+       "background:#0f1117;color:#e0e0e0;margin:0;padding:0;font-size:16px;line-height:1.4}"
+  "h2{color:#00d4ff;font-size:1.1em;margin:0 0 10px;font-weight:600}"
+  "h3{color:#00d4ff;font-size:1em;margin:0 0 8px;font-weight:600}"
   "a{color:#00d4ff}"
+  "code{font-family:monospace;font-size:0.85em;background:#1e2235;padding:1px 4px;border-radius:3px}"
+  /* === Cards === */
+  ".card{background:#16213e;border:1px solid #2a3050;padding:14px;margin-bottom:12px;"
+        "border-radius:8px;overflow-x:auto}"
+  /* === Tables — scrollable on small screens === */
+  "table{border-collapse:collapse;width:100%;margin-bottom:8px;font-size:0.88em}"
+  "th,td{border:1px solid #2a3050;padding:6px 10px;text-align:left}"
+  "th{background:#1e2a4a;color:#00d4ff;white-space:nowrap}"
+  /* === Forms — full-width on mobile === */
+  "form{margin-top:10px}"
+  ".frow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}"
+  ".frow label{color:#aaa;font-size:0.88em;min-width:80px}"
+  "input,select{background:#1e2235;border:1px solid #3a4060;color:#e0e0e0;"
+               "padding:10px 12px;border-radius:6px;font-size:0.95em;"
+               "width:100%;max-width:400px;min-height:44px}"
+  "input[type=number]{max-width:110px}"
+  "input[type=file]{padding:8px;min-height:44px}"
+  "select{min-height:44px}"
+  /* === Buttons === */
+  "button,.btn{background:#00d4ff;border:none;color:#000;padding:10px 18px;"
+              "border-radius:6px;cursor:pointer;font-size:0.95em;font-weight:600;"
+              "min-height:44px;min-width:60px;white-space:nowrap;margin:2px 0}"
+  "button.sec{background:#2a3a4a;color:#e0e0e0;border:1px solid #3a4060}"
+  "button.del{background:#b22222;color:#fff}"
+  "button.warn-btn{background:#cc7700;color:#fff}"
+  /* === Status indicators === */
+  ".ok{color:#00ff88}.err{color:#ff4444}.warn{color:#ffcc00}"
+  /* === Top nav bar === */
+  "#topbar{background:#0d1020;border-bottom:1px solid #2a3050;"
+           "padding:10px 14px;display:flex;align-items:center;justify-content:space-between}"
+  "#topbar h1{font-size:1em;color:#00d4ff;margin:0;font-weight:600}"
+  "#topbar a{color:#aaa;font-size:0.85em;text-decoration:none}"
+  /* === Tab navigation === */
+  "#tabnav{display:flex;overflow-x:auto;background:#0d1020;border-bottom:1px solid #2a3050;"
+           "padding:0 6px;-webkit-overflow-scrolling:touch;scrollbar-width:none}"
+  "#tabnav::-webkit-scrollbar{display:none}"
+  ".tnb{flex:none;padding:12px 16px;color:#aaa;cursor:pointer;border:none;"
+        "background:transparent;font-size:0.9em;font-weight:500;border-bottom:2px solid transparent;"
+        "white-space:nowrap;min-height:44px}"
+  ".tnb.act{color:#00d4ff;border-bottom-color:#00d4ff}"
+  /* === Tab panels === */
+  ".tpanel{display:none;padding:12px 10px}"
+  ".tpanel.act{display:block}"
+  /* === Inline button groups in table cells === */
+  ".btngrp{display:flex;flex-wrap:wrap;gap:4px}"
+  ".btngrp form{margin:0}"
+  ".btngrp button{padding:7px 12px;min-height:36px;font-size:0.82em}"
+  /* === Mono hex display === */
+  ".hex{font-family:monospace;font-size:0.78em;word-break:break-all;color:#aaa}"
+  /* === Responsive overrides for wider screens === */
+  "@media(min-width:600px){"
+    "body{padding:0}"
+    ".tpanel{padding:16px 14px}"
+    "input,select{width:auto}"
+  "}"
   "</style></head><body>";
 
 // Build the HTML <head> with the node name in the <title>.
 static String buildHead(const char* node_name) {
   String h = FPSTR(HTML_HEAD_PRE);
   h += htmlEscape(node_name);
-  h += F(" Room Server");
+  h += F(" \u2014 SIREN");
   h += FPSTR(HTML_HEAD_POST);
   return h;
 }
@@ -492,22 +544,27 @@ static const char HTML_FOOT[] PROGMEM = "</body></html>";
 String WebManager::buildChatPage() {
   String page = buildHead(_mesh.getNodeName());
 
-  // Tab CSS (scoped to this page)
-  page += "<style>.tab{background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;"
-          "padding:5px 14px;cursor:pointer;border-radius:4px;margin:2px}"
-          ".tab.act{background:#00d4ff;color:#000}</style>";
+  // Tab CSS for chat room tabs (uses room-tab class to avoid conflict with top nav)
+  page += "<style>"
+          ".rtab{background:#1e2235;color:#aaa;border:1px solid #2a3050;"
+                "padding:9px 16px;cursor:pointer;border-radius:6px;margin:2px;"
+                "font-size:0.9em;min-height:40px;border:none}"
+          ".rtab.act{background:#00d4ff;color:#000;font-weight:600}"
+          "</style>";
 
-  // Nav back to management UI
-  page += "<div class='card'><h2>Rooms &mdash; ";
+  // Top bar with back link
+  page += "<div id='topbar'>"
+          "<h1>&#128172; Rooms &mdash; ";
   page += htmlEscape(_mesh.getNodeName());
-  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
+  page += "</h1>"
+          "<a href='/'>&#8592; Beheer</a></div>";
 
-  // Tab bar — one tab per active room; htmlEscape ensures XSS safety for labels
+  // Tab bar — one tab per active room
   int _firstRoom = -1;
-  page += "<div style='display:flex;flex-wrap:wrap;gap:4px'>";
+  page += "<div style='display:flex;flex-wrap:wrap;gap:6px;padding:10px 10px 0'>";
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!_mesh.isRoomActive(i)) continue;
-    page += "<button class='tab";
+    page += "<button class='rtab";
     page += (_firstRoom < 0 ? " act" : "");
     page += "' onclick='selTab(this,";
     page += i;
@@ -516,41 +573,41 @@ String WebManager::buildChatPage() {
     page += "</button>";
     if (_firstRoom < 0) _firstRoom = i;
   }
-  page += "</div></div>";
-
-  // Chat pane: messages + nicklist
-  page += "<div style='display:flex;gap:10px;align-items:flex-start'>";
-
-  // Messages column
-  page += "<div class='card' style='flex:1;min-width:0'>";
-  page += "<div id='msgs' style='height:320px;overflow-y:auto;background:#0d0d1a;"
-          "border:1px solid #333;padding:6px;font-size:0.9em'></div>";
-  page += "<form id='post-form' onsubmit='postMsg(event)' style='margin-top:6px'>"
-          "<input id='post-txt' style='width:75%' maxlength='140' "
-          "placeholder='Bericht als operator (max 140 tekens)...'> "
-          "<button type='submit'>Post</button></form>";
   page += "</div>";
 
-  // Nicklist column — names are clickable to open DM
-  page += "<div class='card' style='min-width:120px;width:140px'>"
-          "<b style='color:#00d4ff'>Users</b>"
-          "<div id='nicks' style='font-size:0.85em;margin-top:6px'></div>"
-          "</div>";
+  // Messages box — full width on mobile
+  page += "<div style='padding:10px'>";
+  page += "<div id='msgs' style='height:50vh;min-height:200px;max-height:420px;"
+          "overflow-y:auto;background:#0d0d1a;border:1px solid #2a3050;"
+          "padding:8px;font-size:0.9em;border-radius:6px'></div>";
+  page += "<form id='post-form' onsubmit='postMsg(event)' style='margin-top:8px;display:flex;gap:6px'>"
+          "<input id='post-txt' style='flex:1;min-width:0' maxlength='140' "
+          "placeholder='Bericht als operator...'>"
+          "<button type='submit' style='flex:none'>Post</button></form>";
 
-  page += "</div>";  // flex pane
+  // Nicklist (collapsed by default on mobile, toggle button)
+  page += "<div style='margin-top:8px'>"
+          "<button class='sec' onclick='toggleNicks()' style='width:100%;text-align:left'>"
+          "&#128100; Users <span id='nick-count'></span> &#9660;</button>"
+          "<div id='nicks' style='display:none;background:#1e2235;border:1px solid #2a3050;"
+          "border-radius:0 0 6px 6px;padding:8px;font-size:0.9em'></div>"
+          "</div>";
 
   // DM pane (hidden until a user is clicked)
-  page += "<div id='dm-pane' class='card' style='display:none'>"
-          "<div style='display:flex;justify-content:space-between;align-items:center'>"
+  page += "<div id='dm-pane' style='display:none;margin-top:8px;background:#16213e;"
+          "border:1px solid #2a3050;border-radius:8px;padding:12px'>"
+          "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>"
           "<b id='dm-title' style='color:#ffcc00'>DM</b>"
-          "<button onclick='closeDm()' style='font-size:0.75em'>&#x2715; Sluiten</button>"
+          "<button class='sec' onclick='closeDm()' style='min-height:36px;padding:4px 12px'>&#x2715; Sluiten</button>"
           "</div>"
           "<div id='dm-msgs' style='height:200px;overflow-y:auto;background:#0d0d1a;"
-          "border:1px solid #333;padding:6px;font-size:0.9em;margin-top:6px'></div>"
-          "<form id='dm-form' onsubmit='sendDm(event)' style='margin-top:6px'>"
-          "<input id='dm-txt' style='width:75%' maxlength='140' placeholder='Privébericht...'> "
-          "<button type='submit'>Stuur</button></form>"
+          "border:1px solid #2a3050;padding:8px;font-size:0.9em;border-radius:6px'></div>"
+          "<form id='dm-form' onsubmit='sendDm(event)' style='margin-top:8px;display:flex;gap:6px'>"
+          "<input id='dm-txt' style='flex:1;min-width:0' maxlength='140' placeholder='Privébericht...'>"
+          "<button type='submit' style='flex:none'>Stuur</button></form>"
           "</div>";
+
+  page += "</div>";  // padding wrapper
 
   // Inline JS — uses textContent (not innerHTML) for safe display
   page += "<script>\n";
@@ -559,11 +616,15 @@ String WebManager::buildChatPage() {
   page += "function selTab(btn,idx){\n"
           "  room=idx;since=0;\n"
           "  document.getElementById('msgs').innerHTML='';\n"
-          "  var ts=document.querySelectorAll('.tab');\n"
+          "  var ts=document.querySelectorAll('.rtab');\n"
           "  for(var i=0;i<ts.length;i++)ts[i].classList.remove('act');\n"
           "  btn.classList.add('act');\n"
           "  clearTimeout(pollT);clearTimeout(nickT);\n"
           "  fetchMsgs();fetchNicks();\n"
+          "}\n"
+          "function toggleNicks(){\n"
+          "  var n=document.getElementById('nicks');\n"
+          "  n.style.display=(n.style.display==='none'?'block':'none');\n"
           "}\n"
           "function delPost(ridx,oid,pts,el){\n"
           "  if(!confirm('Verwijder dit bericht?'))return;\n"
@@ -610,9 +671,12 @@ String WebManager::buildChatPage() {
           "  .then(function(r){return r.json();})\n"
           "  .then(function(data){\n"
           "    var box=document.getElementById('nicks');\n"
+          "    var cnt=document.getElementById('nick-count');\n"
+          "    if(cnt)cnt.textContent='('+data.length+')';\n"
           "    box.innerHTML='';\n"
           "    data.forEach(function(n){\n"
           "      var d=document.createElement('div');\n"
+          "      d.style.padding='4px 0';\n"
           "      d.style.color=(n.role>=3?'#ffcc00':(n.role>=2?'#00ff88':'#aaa'));\n"
           "      d.style.cursor='pointer';\n"
           "      d.title='Klik om te DM\\'en';\n"
@@ -697,11 +761,12 @@ String WebManager::buildChatPage() {
 String WebManager::buildAclPage() {
   String page = buildHead(_mesh.getNodeName());
 
-  page += "<div class='card'><h2>ACL &mdash; ";
+  page += "<div id='topbar'><h1>&#128100; ACL &mdash; ";
   page += htmlEscape(_mesh.getNodeName());
-  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>"
-          "<p style='color:#aaa;font-size:0.85em'>Beheer wie in elke room mag schrijven. "
-          "Sla op om rechten direct te wijzigen (geen herstart nodig).</p></div>";
+  page += "</h1><a href='/'>&#8592; Beheer</a></div>"
+          "<div style='padding:10px'>"
+          "<p style='color:#aaa;font-size:0.88em;margin:0 0 10px'>Beheer wie in elke room mag schrijven. "
+          "Sla op om rechten direct te wijzigen (geen herstart nodig).</p>";
 
   // Role labels
   static const char* ROLE_NAMES[] = { "GUEST (geen toegang)", "Read-only", "Read-write", "ADMIN" };
@@ -767,6 +832,7 @@ String WebManager::buildAclPage() {
     page += "</div>";
   }
 
+  page += "</div>";  // padding wrapper
   page += FPSTR(HTML_FOOT);
   return page;
 }
@@ -851,9 +917,10 @@ String WebManager::buildStatsPage() {
   MultiRoomMesh& mesh = _mesh;
   String page = buildHead(mesh.getNodeName());
 
-  page += "<div class='card'><h2>Statistieken &mdash; ";
+  page += "<div id='topbar'><h1>&#128200; Statistieken &mdash; ";
   page += htmlEscape(mesh.getNodeName());
-  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
+  page += "</h1><a href='/'>&#8592; Beheer</a></div>"
+          "<div style='padding:10px'>";
 
   // Totals summary
   unsigned long upSec = (unsigned long)(mesh.getUptimeMillis() / 1000UL);
@@ -928,6 +995,7 @@ String WebManager::buildStatsPage() {
           "Elke balk = 1 uur. Links = 23 uur geleden, rechts = huidig uur.</p>";
   page += "</div>";
 
+  page += "</div>";  // padding wrapper
   page += FPSTR(HTML_FOOT);
   return page;
 }
