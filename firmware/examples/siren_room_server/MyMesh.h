@@ -101,6 +101,7 @@
 #define TXT_TYPE_SYNCDAT  5   // B→A one post       [ts][flags][room_hash[4]][post_ts][orig[4]][auth[4]][1:name_len][name][text]
 #define TXT_TYPE_SYNCEND  6   // B→A end of stream  [ts][flags][num_vv][VV...]
 #define TXT_TYPE_SYNCDEL  7   // delete tombstone   [ts][flags][room_hash[4]][origin_id[4]][post_ts[4]]
+#define TXT_TYPE_ROOMSYNC 8   // room key push      [ts][flags][room_idx[1]][prv[64]][pub[32]][name\0]
 
 /* Name resolution table — maps pubkey prefix → advertised node name.
    Populated from onAdvertRecv(); persisted to SPIFFS /names.          */
@@ -300,6 +301,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool deletePostEntry(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts);
   void emitSyncDel(const uint8_t* room_hash, const uint8_t* origin_id, uint32_t post_ts);
   void handleSyncDel(int pi, uint8_t* data, size_t len);
+
+  /* ---- Room-key propagation (JES-848) ---- */
+  void sendRoomSync(int pi);
+  void handleRoomSync(int pi, uint8_t* data, size_t len);
 
   /* ---- Name resolution table (JES-798) ---- */
   NameEntry     _names[NAME_TABLE_SIZE];
@@ -603,6 +608,8 @@ public:
   bool delPeerFromWeb(int idx);
   /** Trigger immediate SYNCREQ: idx >= 0 = one peer, idx == -1 = all peers. */
   void triggerPeerSync(int idx);
+  /** Push all active rooms (1+) to one peer (idx >= 0) or all peers (idx == -1). */
+  void triggerRoomSync(int idx);
 
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {
