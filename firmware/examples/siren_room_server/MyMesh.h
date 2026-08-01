@@ -93,7 +93,8 @@
 #define MAX_SYNC_POSTS  8    // SYNCDAT frames per SYNCREQ response (airtime guard)
 /* Periodic anti-entropy pull interval — runtime-configurable (JES-844).
    Default 180 s; boot delay 60 s.  Range 10–3600 s; persisted to /sync_cfg. */
-#define PEER_SYNC_BOOT_DELAY_MS 60000UL
+#define PEER_SYNC_BOOT_DELAY_MS     60000UL
+#define PEER_ROOMSYNC_INTERVAL_MS  600000UL  // 10-min periodic room key re-sync (JES-848)
 
 /* Server-to-server sync TXT sub-types (data[4] >> 2).
    Range 4-6 is free above the existing SIGNED_PLAIN=2, CLI_DATA=1, PLAIN=0. */
@@ -146,6 +147,7 @@ struct PeerInfo {
   uint8_t  shared_secret[PUB_KEY_SIZE]; // ECDH(rooms[0].priv, pub_key)
   bool     secret_valid;                // true once calcPeerSecret() called
   unsigned long next_sync_at;           // millis() deadline for next SYNCREQ
+  unsigned long next_roomsync_at;       // millis() deadline for next periodic ROOMSYNC
   /* SYNC DIAGNOSTICS (JES-833) — not persisted, reset on reboot */
   uint32_t last_syncreq_ts;  // RTC epoch of last SYNCREQ sent to this peer (0 = never)
   uint32_t last_syncdat_ts;  // RTC epoch of last SYNCDAT received from this peer (0 = never)
