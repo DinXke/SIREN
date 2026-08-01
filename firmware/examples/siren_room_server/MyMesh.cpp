@@ -74,7 +74,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _prefs.bw           = LORA_BW;
   _prefs.cr           = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
-  _prefs.disable_fwd  = 1;
+  _prefs.disable_fwd  = 0;  // JES-842: flood forwarding ON by default
   _prefs.advert_interval       = 1;   // 2 min
   _prefs.flood_advert_interval = 47;  // 47 h
   _prefs.flood_max         = 64;
