@@ -67,7 +67,7 @@ build_target() {
 
   mkdir -p "dist/$out_dir"
 
-  # Build OTA binary
+  # Build OTA binary (compilation)
   "$PIO" run -e "$env"
 
   local build_dir=".pio/build/$env"
@@ -77,11 +77,14 @@ build_target() {
   echo "  -> dist/$out_dir/${env}.bin (OTA)"
 
   # Full-flash merged binary (bootloader + partition table + app)
+  # Run mergebin explicitly so the merged binary is always fresh (compiled objects are cached).
+  "$PIO" run -e "$env" -t mergebin 2>&1 | grep -v "^$" | tail -3
   if [ -f "$build_dir/firmware-merged.bin" ]; then
     cp "$build_dir/firmware-merged.bin" "dist/$out_dir/${env}-full-flash.bin"
     echo "  -> dist/$out_dir/${env}-full-flash.bin (full flash)"
   else
-    echo "  NOTE: merged binary not found — run 'pio run -e $env -t mergebin' to generate it"
+    echo "  ERROR: merged binary not found after mergebin target"
+    exit 1
   fi
 }
 
