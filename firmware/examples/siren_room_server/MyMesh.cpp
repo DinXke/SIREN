@@ -3684,24 +3684,105 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
 /**
  * Handle incoming SYNCEND from peer pi (JES-816 multi-room).
  * Wire format: [4:ts][1:flags][4:room_hash][1:num_vv][N*8:VVEntry{origin[4],seq[4]}]
- * Informational only — our VV grows naturally as posts arrive via SYNCDAT.
+ *
+ * Bidirectionality (JES-841 fix): the SYNCEND carries the peer's VV.  We use
+ * that VV to immediately push back any local posts the peer is missing.  This
+ * completes a full two-way exchange in one round-trip WITHOUT resetting the
+ * periodic timer to 2 s (which caused a tight A→B pull loop that starved the
+ * independent B→A pull direction and exhausted LoRa duty-cycle).
+ *
+ * We do NOT send a reverse SYNCEND here to avoid an infinite ping-pong:
+ * the next periodic SYNCREQ from either side will carry the updated VV.
  */
 void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
   if (len < 10) return;  // [4:ts][1:flags][4:room_hash][1:num_vv]
-  // Find matching room (informational)
+
+  uint8_t room_hash[4];
+  memcpy(room_hash, &data[5], 4);
+  uint8_t num_vv = data[9];
+  if (num_vv > MAX_VV_ORIGINS) num_vv = MAX_VV_ORIGINS;
+  // Bounds-check: each VV entry is 8 bytes; truncate if frame is too short.
+  while (num_vv > 0 && (size_t)(10 + (int)num_vv * 8) > len) num_vv--;
+
+  // Find matching local room (fallback to first active room, same as handleSyncReq).
   int ri = -1;
   for (int i = 0; i < MAX_ROOMS; i++) {
-    if (rooms[i].active && memcmp(rooms[i].id.pub_key, &data[5], 4) == 0) {
+    if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
       ri = i; break;
     }
   }
-  (void)ri;  // informational only
+  if (ri < 0) {
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (rooms[i].active) { ri = i; break; }
+    }
+  }
+
   peers[pi].last_syncend_ts = getRTCClock()->getCurrentTime();
   Serial.printf("[SYNC] SYNCEND from peer[%d] room[%d]\n", pi, ri);
-  // Trigger immediate reverse SYNCREQ so both directions complete in one round.
-  // Small delay (2 s) to let any in-flight SYNCDAT frames land first.
-  // Reset the periodic timer to avoid double-send.
-  peers[pi].next_sync_at = futureMillis(2000);
+
+  if (ri < 0) return;  // no active room — nothing to push
+
+  // --- Reverse push: send peer any posts it doesn't have yet ---
+  // Parse peer's VV (embedded in SYNCEND payload).
+  struct { uint8_t orig[4]; uint32_t seq; } peer_vv[MAX_VV_ORIGINS];
+  for (int i = 0; i < num_vv; i++) {
+    memcpy(peer_vv[i].orig, &data[10 + i * 8],     4);
+    memcpy(&peer_vv[i].seq,  &data[10 + i * 8 + 4], 4);
+  }
+  auto peerKnows = [&](const uint8_t* orig) -> uint32_t {
+    for (int i = 0; i < num_vv; i++) {
+      if (memcmp(peer_vv[i].orig, orig, 4) == 0) return peer_vv[i].seq;
+    }
+    return 0;
+  };
+
+  calcPeerSecret(pi);
+  mesh::Identity peer_id;
+  memset(peer_id.pub_key, 0, PUB_KEY_SIZE);
+  memcpy(peer_id.pub_key, peers[pi].pub_key, PUB_KEY_SIZE);
+
+  int pushed = 0;
+  uint32_t delay_ms = 300;  // small initial delay — peer's in-flight frames land first
+  for (int k = 0; k < MAX_TOTAL_POSTS && pushed < MAX_SYNC_POSTS; k++) {
+    const PostInfo& p = _post_pool[k];
+    if (p.room_idx != (uint8_t)ri) continue;
+    uint32_t peer_knows = peerKnows(p.origin_id);
+    if (p.post_timestamp <= peer_knows) continue;
+    if (isTombstoned(p.origin_id, p.post_timestamp)) continue;
+
+    int dlen = 0;
+    uint8_t buf[MAX_PACKET_PAYLOAD];
+    uint32_t now = getRTCClock()->getCurrentTimeUnique();
+    memcpy(&buf[dlen], &now, 4);               dlen += 4;
+    buf[dlen++] = (TXT_TYPE_SYNCDAT << 2);
+    memcpy(&buf[dlen], room_hash, 4);          dlen += 4;
+    memcpy(&buf[dlen], &p.post_timestamp, 4);  dlen += 4;
+    memcpy(&buf[dlen], p.origin_id, 4);        dlen += 4;
+    memcpy(&buf[dlen], p.author.pub_key, 4);   dlen += 4;
+    const char* pname = resolveName(p.author.pub_key);
+    uint8_t pname_len = (uint8_t)strlen(pname);
+    if (pname_len > 23) pname_len = 23;
+    buf[dlen++] = pname_len;
+    memcpy(&buf[dlen], pname, pname_len);      dlen += pname_len;
+    int max_tlen = (int)sizeof(buf) - dlen;
+    if (max_tlen < 0) max_tlen = 0;
+    int tlen = strlen(p.text);
+    if (tlen > max_tlen) tlen = max_tlen;
+    memcpy(&buf[dlen], p.text, tlen);          dlen += tlen;
+
+    self_id = rooms[0].id;
+    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
+                               peers[pi].shared_secret, buf, dlen);
+    if (pkt) {
+      sendFlood(pkt, delay_ms, _prefs.path_hash_mode + 1);
+      delay_ms += 500;
+      pushed++;
+    }
+  }
+  Serial.printf("[SYNC] reverse push → peer[%d]: %d post(s) for room[%d]\n",
+                pi, pushed, ri);
+  // Periodic timer (next_sync_at) is intentionally left at its normal 45 s cadence.
+  // No SYNCEND is sent back: avoids infinite ping-pong; next SYNCREQ carries the VV.
 }
 
 /* ------------------------------------------------------------------ */
