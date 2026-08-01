@@ -49,9 +49,12 @@
 #ifndef LORA_TX_POWER
   #define LORA_TX_POWER        20
 #endif
-#ifndef ADMIN_PASSWORD
-  #define ADMIN_PASSWORD       "password"
-#endif
+// SEC-001: no compile-time default password.
+// Admin password is randomised on first boot and persisted to SPIFFS.
+// Operators may still override at build time via platformio_local.ini:
+//   build_flags = ... -D ADMIN_PASSWORD='"mypassword"'
+// That value is used as the initial seed; if it equals the legacy "password"
+// the firmware still randomises to protect public dist/ binaries.
 #ifndef SERVER_RESPONSE_DELAY
   #define SERVER_RESPONSE_DELAY  300
 #endif
@@ -383,6 +386,10 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
+
+  /* ---- Security: runtime admin password (SEC-001) ---- */
+  /** Returns the current admin password from _prefs (randomised on first boot). */
+  const char* getAdminPassword() const { return _prefs.password; }
 
   /* ---- Public accessors for web management UI (Phase 9) ---- */
   int  getNumActiveRooms() const  { return _num_active_rooms; }

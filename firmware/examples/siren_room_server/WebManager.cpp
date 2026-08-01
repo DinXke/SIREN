@@ -6,10 +6,6 @@
 #include <AsyncElegantOTA.h>
 #include <qrcode.h>
 
-#ifndef ADMIN_PASSWORD
-  #define ADMIN_PASSWORD "password"
-#endif
-
 // Default AP SSID prefix — node name is appended at runtime
 #define AP_SSID_PREFIX "SIREN-"
 
@@ -1105,7 +1101,7 @@ static String buildQrPage(MultiRoomMesh& mesh, int idx) {
 // ---------------------------------------------------------------------------
 void WebManager::setupRoutes() {
   const char* user = "admin";
-  const char* pass = ADMIN_PASSWORD;
+  const char* pass = _mesh.getAdminPassword();  // SEC-001: runtime password (randomised on first boot)
 
   // Main status page
   _server.on("/", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {

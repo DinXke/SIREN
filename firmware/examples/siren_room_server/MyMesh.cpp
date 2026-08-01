@@ -1,4 +1,7 @@
 #include "MyMesh.h"
+#ifdef ESP32
+#include <esp_system.h>  // esp_fill_random() — SEC-001 first-boot password CSPRNG
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Timing constants                                                    */
@@ -76,7 +79,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _prefs.flood_max_advert  = 8;
   _prefs.interference_threshold = 0;
   StrHelper::strncpy(_prefs.node_name, "SIREN", sizeof(_prefs.node_name));
-  StrHelper::strncpy(_prefs.password, ADMIN_PASSWORD, sizeof(_prefs.password));
+  _prefs.password[0] = 0;  // empty; randomised or loaded from SPIFFS in begin()
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
   memset(rooms, 0, sizeof(rooms));
@@ -114,6 +117,39 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
 
   _cli.loadPrefs(_fs);
 
+  // SEC-001: ensure admin password is never the well-known default "password".
+  // On first boot _prefs.password is empty (constructor) or may have been
+  // set to the legacy "password" by a build flag.  Both cases trigger a random
+  // password that is persisted immediately so all subsequent boots load it.
+  {
+    bool needs_rand = (_prefs.password[0] == 0 ||
+                       strcmp(_prefs.password, "password") == 0);
+#ifdef ADMIN_PASSWORD
+    // Operator supplied a custom password at build time — honour it unless it
+    // is the unsafe well-known default.
+    if (!needs_rand) {
+      // already loaded a non-default password from prefs — keep it
+    } else if (strcmp(ADMIN_PASSWORD, "password") != 0) {
+      // operator-supplied non-default → use it
+      StrHelper::strncpy(_prefs.password, ADMIN_PASSWORD, sizeof(_prefs.password));
+      _cli.savePrefs(_fs);
+      needs_rand = false;
+    }
+#endif
+    if (needs_rand) {
+      // Generate a random 10-char password using ESP32 hardware CSPRNG.
+      static const char charset[] = "abcdefghijkmnpqrstuvwxyz23456789";  // 32 chars, no ambiguous
+      uint8_t rnd[10];
+      esp_fill_random(rnd, sizeof(rnd));
+      for (int i = 0; i < 10; i++)
+        _prefs.password[i] = charset[rnd[i] & 0x1F];  // 2^5 = 32
+      _prefs.password[10] = 0;
+      _cli.savePrefs(_fs);
+      Serial.printf("[SIREN] First-boot admin password: %s\n", _prefs.password);
+      Serial.printf("[SIREN] Change via web UI > Settings or serial CLI: set password <new>\n");
+    }
+  }
+
 #ifdef FORCE_RADIO_PREFS
   // One-shot radio settings correction: overwrite any stale prefs from a
   // previous firmware's SPIFFS while preserving node name, identity, and all
@@ -141,7 +177,7 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
     // Create default room 0
     rooms[0].active = true;
     StrHelper::strncpy(rooms[0].name, _prefs.node_name, sizeof(rooms[0].name));
-    StrHelper::strncpy(rooms[0].password, ADMIN_PASSWORD, sizeof(rooms[0].password));
+    StrHelper::strncpy(rooms[0].password, _prefs.password, sizeof(rooms[0].password));
     _num_active_rooms = 1;
     loadOrCreateRoomIdentity(0);
     saveRoomConfig();
@@ -502,6 +538,9 @@ void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
                                    const mesh::Identity& sender,
                                    uint8_t* data, size_t len) {
   if (packet->getPayloadType() != PAYLOAD_TYPE_ANON_REQ) return;
+  // SEC-002: guard against truncated ANON_REQ (pre-auth path, must be ≥9 bytes:
+  // 4-byte timestamp + 4-byte sync_since + at least NUL terminator of password)
+  if (len < 9) return;
 
   RoomSlot& slot = rooms[_active_slot];
 
@@ -1630,7 +1669,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
       if (!rooms[i].active) {
         rooms[i].active = true;
         snprintf(rooms[i].name, sizeof(rooms[i].name), "Room%d", i);
-        StrHelper::strncpy(rooms[i].password, ADMIN_PASSWORD, sizeof(rooms[i].password));
+        StrHelper::strncpy(rooms[i].password, _prefs.password, sizeof(rooms[i].password));
         rooms[i].guest_password[0] = 0;
         loadOrCreateRoomIdentity(i);
         _num_active_rooms++;
