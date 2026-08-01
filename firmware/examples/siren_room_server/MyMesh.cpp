@@ -1538,6 +1538,25 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- repeater on|off|status — friendly alias for set fwd (JES-855) ----
+  // Independent of stealth: stealth = room advertising; repeater = flood forwarding.
+  if (memcmp(command, "repeater", 8) == 0 && (command[8] == ' ' || command[8] == 0)) {
+    const char* arg = command + 8;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "on") == 0) {
+      char cmd[20] = "set fwd on";
+      handleCommand(_active_slot, cmd, reply);
+    } else if (strcmp(arg, "off") == 0) {
+      char cmd[20] = "set fwd off";
+      handleCommand(_active_slot, cmd, reply);
+    } else {
+      // "repeater status" or just "repeater"
+      sprintf(reply, "repeater=%s (stealth is separate)",
+              _prefs.disable_fwd ? "off" : "on");
+    }
+    return;
+  }
+
   // ---- set txpower <n> — applies live and persists ----
   if (memcmp(command, "set txpower ", 12) == 0) {
     int8_t pwr = (int8_t)atoi(command + 12);
@@ -1558,7 +1577,8 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
   if (sender_timestamp != 0 && _active_slot != 0) {
     if (memcmp(command, "set repeat", 10) == 0 ||
         memcmp(command, "set flood.max", 13) == 0 ||
-        memcmp(command, "region ", 7) == 0) {
+        memcmp(command, "region ", 7) == 0 ||
+        memcmp(command, "repeater ", 9) == 0) {
       strcpy(reply, "Err - repeater settings only available on management room");
       return;
     }
@@ -1884,6 +1904,7 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  RADIO");
       Serial.println("  -----");
       Serial.println("  stealth on|off|status          Toggle all-room stealth mode");
+      Serial.println("  repeater on|off|status         Toggle flood-repeat (independent of stealth)");
       Serial.println("  advert interval [secs]         Get/set advert broadcast interval");
       Serial.println("  set txpower <dBm>              Set TX power (2-22 dBm)");
       Serial.println("  get freq|sf|bw|cr              Get radio parameter");
@@ -1916,7 +1937,7 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println();
       reply[0] = 0;
     } else {
-      strcpy(reply, "rooms|room|msgs|nicks|say|peer|wifi|mqtt|stealth|get|set|ver|reboot -- type 'help' on serial for full list");
+      strcpy(reply, "rooms|room|msgs|nicks|say|peer|wifi|mqtt|stealth|repeater|get|set|ver|reboot -- type 'help' on serial for full list");
     }
     return;
   }
