@@ -96,14 +96,24 @@ If two rooms happen to share the same hash prefix (a collision), the firmware tr
 
 ---
 
-## Room 0: The Management Room
+## Room 0: Identity Layer (Not a Chat Room)
 
-Room 0 is special:
+Room 0 is special and **cannot be used for messages**:
 
 - It always exists (cannot be deleted)
+- It is the **node identity**: `self_id = rooms[0].id` at startup; its public key is used as the node's `origin_id` in version vectors and for peer ECDH key exchange
 - It is the room whose ACL is exposed to the `CommonCLI` (`setperm`, `get acl` commands)
-- It is used as the base identity for the Mesh (`self_id = rooms[0].id` at startup)
 - Repeater configuration commands are restricted to authenticated admins of room 0 (the "management room")
+
+**Why no messages in room 0?** Two nodes that share the same default private key (e.g. freshly flashed devices before rekey — see JES-767) would have the same room 0 public key and therefore the same `origin_id`. The sync protocol would treat them as the same node, causing post conflicts and wrong message attribution. Room 0 is therefore reserved as pure transport/identity layer; all chat traffic lives in rooms 1–15.
+
+The firmware enforces this at every entry point:
+- `addPost()` rejects `room_idx == 0`
+- Web UI `POST /api/chat/post` returns 400 for `room_idx <= 0`
+- CLI `say` rejects room index 0 with an error message
+- `sendSyncReq()` iterates `i = 1` to `MAX_ROOMS - 1` (room 0 skipped)
+- `handleSyncReq/Dat/End()` ignores frames whose `room_hash` matches room 0
+- The Rooms web page and `/api/chat/rooms` filter out room 0
 
 All other rooms (1-15) can be created, renamed, and deleted freely.
 
