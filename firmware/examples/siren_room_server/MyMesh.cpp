@@ -1438,6 +1438,85 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- help / ? — grouped CLI reference ----
+  if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
+    if (is_serial) {
+      Serial.println();
+      Serial.println("+---------------------------------------------------------------+");
+      Serial.println("|                      SIREN CLI Help                          |");
+      Serial.println("+---------------------------------------------------------------+");
+      Serial.println();
+      Serial.println("  ROOMS");
+      Serial.println("  -----");
+      Serial.println("  rooms                          List active rooms (compact)");
+      Serial.println("  room list                      List all rooms with details");
+      Serial.println("  room add                       Add a new room slot");
+      Serial.println("  room del <idx>                 Delete room [serial only]");
+      Serial.println("  room set <idx> name <val>      Set room name");
+      Serial.println("  room set <idx> pass <val>      Set room password");
+      Serial.println("  room set <idx> guest <val>     Set guest access password");
+      Serial.println("  room stealth <idx> on|off      Toggle room visibility");
+      Serial.println("  room qr <idx>                  Print join URI");
+      Serial.println("  room read <idx|name> [n]       Show last N messages (def 20)");
+      Serial.println("  room clients <idx>             List clients in room");
+      Serial.println("  room status <idx>              Show per-client sync status");
+      Serial.println("  msgs <idx> [n]                 Show last N posts by room index");
+      Serial.println("  nicks <idx>                    Show nicklist for room");
+      Serial.println("  say <idx> <text>               Post server-authored message");
+      Serial.println("  setperm <hex> <perms>          Set ACL (0=guest 1=ro 2=rw 3=admin)");
+      Serial.println();
+      Serial.println("  PEERS");
+      Serial.println("  -----");
+      Serial.println("  peer list                      List known peer nodes");
+      Serial.println("  peer add <hex> <name>          Add peer node [serial only]");
+      Serial.println("  peer del <idx>                 Remove peer node [serial only]");
+      Serial.println("  peer sync                      Trigger manual anti-entropy sync");
+      Serial.println();
+      Serial.println("  WIFI");
+      Serial.println("  ----");
+      Serial.println("  wifi mode ap|sta               Set WiFi mode");
+      Serial.println("  wifi ap ssid <ssid>            Set AP network name");
+      Serial.println("  wifi ssid <ssid>               Set STA network SSID");
+      Serial.println("  wifi connect                   Connect to STA network");
+      Serial.println("  wifi status                    Show WiFi/IP status");
+      Serial.println("  mqtt status                    Show MQTT broker status");
+      Serial.println();
+      Serial.println("  RADIO");
+      Serial.println("  -----");
+      Serial.println("  stealth on|off|status          Toggle all-room stealth mode");
+      Serial.println("  advert interval [secs]         Get/set advert broadcast interval");
+      Serial.println("  set txpower <dBm>              Set TX power (2-22 dBm)");
+      Serial.println("  get freq|sf|bw|cr              Get radio parameter");
+      Serial.println("  set freq|sf|bw|cr <val>        Set radio parameter");
+      Serial.println();
+      Serial.println("  SYSTEM");
+      Serial.println("  ------");
+      Serial.println("  get name|password              Get node name or password");
+      Serial.println("  set name <val>                 Set node name");
+      Serial.println("  password <val>                 Set admin password");
+      Serial.println("  ver                            Show firmware version");
+      Serial.println("  board                          Show board info");
+      Serial.println("  clock                          Show current time");
+      Serial.println("  reboot                         Reboot node");
+      Serial.println("  screensaver on|off             Toggle OLED screensaver");
+      Serial.println("  menu                           Open interactive settings menu");
+      Serial.println();
+      Serial.println("  STATS");
+      Serial.println("  -----");
+      Serial.println("  get stats                      Show node statistics summary");
+      Serial.println("  stats-core                     Show core stats [serial only]");
+      Serial.println("  stats-radio                    Show radio stats [serial only]");
+      Serial.println("  neighbors                      List mesh neighbors");
+      Serial.println();
+      Serial.println("+---------------------------------------------------------------+");
+      Serial.println();
+      reply[0] = 0;
+    } else {
+      strcpy(reply, "rooms|room|msgs|nicks|say|peer|wifi|mqtt|stealth|get|set|ver|reboot -- type 'help' on serial for full list");
+    }
+    return;
+  }
+
   // Fall through to shared CommonCLI
   _cli.handleCommand(sender_timestamp, command, reply);
 }
@@ -1700,7 +1779,99 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
+  // "room read <idx|name> [n]" — show last N messages from a room (default 20)
+  if (memcmp(args, "read", 4) == 0 && (args[4] == ' ' || args[4] == 0)) {
+    const char* rp = args + 4;
+    while (*rp == ' ') rp++;
+
+    // parse room identifier (up to next space or end)
+    char id_buf[24] = {};
+    const char* id_end = rp;
+    while (*id_end && *id_end != ' ') id_end++;
+    int id_len = (int)(id_end - rp);
+    if (id_len > 0 && id_len < (int)sizeof(id_buf)) {
+      memcpy(id_buf, rp, id_len);
+    }
+
+    // optional count argument
+    const char* cnt_p = id_end;
+    while (*cnt_p == ' ') cnt_p++;
+    int n = (*cnt_p) ? atoi(cnt_p) : 20;
+    if (n < 1 || n > 50) n = 20;
+
+    // resolve room: numeric index or name (case-insensitive, prefix ok)
+    int ridx = -1;
+    bool all_digits = (id_len > 0);
+    for (int k = 0; k < id_len; k++) {
+      if (id_buf[k] < '0' || id_buf[k] > '9') { all_digits = false; break; }
+    }
+    if (all_digits && id_len > 0) {
+      ridx = atoi(id_buf);
+    } else if (id_len > 0) {
+      // exact match first
+      for (int i = 0; i < MAX_ROOMS; i++) {
+        if (rooms[i].active && strcasecmp(rooms[i].name, id_buf) == 0) {
+          ridx = i; break;
+        }
+      }
+      // prefix match fallback
+      if (ridx < 0) {
+        for (int i = 0; i < MAX_ROOMS; i++) {
+          if (rooms[i].active &&
+              strncasecmp(rooms[i].name, id_buf, id_len) == 0) {
+            ridx = i; break;
+          }
+        }
+      }
+    }
+
+    if (ridx < 0 || ridx >= MAX_ROOMS || !rooms[ridx].active) {
+      strcpy(reply, "Err - room not found"); return;
+    }
+
+    // collect and insertion-sort posts for this room by timestamp ascending
+    const PostInfo* sorted[MAX_TOTAL_POSTS];
+    int cnt = 0;
+    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+      if (_post_pool[i].room_idx == (uint8_t)ridx) sorted[cnt++] = &_post_pool[i];
+    }
+    for (int i = 1; i < cnt; i++) {
+      const PostInfo* key = sorted[i];
+      int j = i - 1;
+      while (j >= 0 && sorted[j]->post_timestamp > key->post_timestamp) {
+        sorted[j+1] = sorted[j]; j--;
+      }
+      sorted[j+1] = key;
+    }
+
+    int start = (cnt > n) ? cnt - n : 0;
+    if (serial) {
+      Serial.printf("Room [%d] '%s' — showing %d/%d messages:\n",
+                    ridx, rooms[ridx].name, cnt - start, cnt);
+      for (int i = start; i < cnt; i++) {
+        const PostInfo* post = sorted[i];
+        uint32_t ts = post->post_timestamp;
+        uint32_t hh = (ts % 86400) / 3600;
+        uint32_t mm = (ts % 3600) / 60;
+        Serial.printf("  [%02u:%02u] %-12s  %s\n",
+                      hh, mm, resolveName(post->author.pub_key), post->text);
+      }
+      reply[0] = 0;
+    } else {
+      // mesh-DM: compact last-2 summary
+      char* p2 = reply;
+      char* end = reply + 180;
+      p2 += snprintf(p2, end - p2, "r%d %d msgs:", ridx, cnt);
+      int show = (cnt > 2) ? 2 : cnt;
+      for (int i = cnt - show; i < cnt && p2 < end - 10; i++) {
+        p2 += snprintf(p2, end - p2, " <%s>%.28s",
+                       resolveName(sorted[i]->author.pub_key), sorted[i]->text);
+      }
+    }
+    return;
+  }
+
+  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
 }
 
 /* ------------------------------------------------------------------ */
