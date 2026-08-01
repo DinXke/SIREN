@@ -1613,7 +1613,7 @@ void WebManager::setupRoutes() {
     String ip = (_mode == MODE_AP)
       ? WiFi.softAPIP().toString()
       : WiFi.localIP().toString();
-    req->send(200, "text/html", buildStatusPage(ip.c_str()));
+    req->send(200, "text/html; charset=utf-8", buildStatusPage(ip.c_str()));
   });
 
   // API: set server (node) name (JES-828)
@@ -1766,7 +1766,7 @@ void WebManager::setupRoutes() {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       if (!req->hasParam("idx")) { req->send(400, "text/plain", "missing idx"); return; }
       int idx = req->getParam("idx")->value().toInt();
-      req->send(200, "text/html", buildQrPage(_mesh, idx));
+      req->send(200, "text/html; charset=utf-8", buildQrPage(_mesh, idx));
     });
 
   // API: switch WiFi mode
@@ -1862,7 +1862,7 @@ void WebManager::setupRoutes() {
               "<p class='ok'>Settings applied. Rebooting in 2 seconds...</p>"
               "<p><a href='/'>Back</a></p></div>";
         pg += FPSTR(HTML_FOOT);
-        req->send(200, "text/html", pg);
+        req->send(200, "text/html; charset=utf-8", pg);
         delay(2000);
         ESP.restart();
       } else {
@@ -1871,7 +1871,7 @@ void WebManager::setupRoutes() {
               "<p class='err'>Invalid or incompatible backup file (version mismatch?).</p>"
               "<p><a href='/'>Back</a></p></div>";
         pg += FPSTR(HTML_FOOT);
-        req->send(400, "text/html", pg);
+        req->send(400, "text/html; charset=utf-8", pg);
       }
     },
     // onUpload — accumulate file chunks into _restore_buf
@@ -1993,7 +1993,7 @@ void WebManager::setupRoutes() {
   // GET /chat — IRC-style channel/messages/nicklist page
   _server.on("/chat", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
-    req->send(200, "text/html", buildChatPage());
+    req->send(200, "text/html; charset=utf-8", buildChatPage());
   });
 
   // GET /api/chat/messages?room=<idx>&since=<ts>
@@ -2127,7 +2127,7 @@ void WebManager::setupRoutes() {
 
   _server.on("/acl", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
-    req->send(200, "text/html", buildAclPage());
+    req->send(200, "text/html; charset=utf-8", buildAclPage());
   });
 
   // GET /api/acl?room=<idx>  — JSON array of clients for that room
@@ -2442,7 +2442,7 @@ void WebManager::setupRoutes() {
   // GET /stats — statistics page (JES-800)
   _server.on("/stats", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
-    req->send(200, "text/html", buildStatsPage());
+    req->send(200, "text/html; charset=utf-8", buildStatsPage());
   });
 
   // GET /api/stats — statistics JSON (JES-800)
