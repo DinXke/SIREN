@@ -97,15 +97,6 @@ MeshCore uses ESP-IDF OTA with two app partitions. If the new firmware fails to 
 
 **Warning**: Full re-flash erases all configuration (room identities, member lists, radio settings, WiFi credentials). Have a backup before doing this if you care about the existing room identities.
 
-### Recovery: No USB, OTA-only device (Unit B)
-
-If a device has no working USB and a bad OTA image is installed:
-1. The device may still create its WiFi AP if the boot gets far enough
-2. Attempt to access `http://192.168.4.1` and use the OTA update page
-3. If the device cannot start its WiFi stack, it is unrecoverable without USB access
-
-**This is why we test on Unit A (USB available) before sending any OTA to Unit B.**
-
 ---
 
 ## Radio Verification
@@ -174,16 +165,16 @@ ota status         # show current state / progress
 
 ## OTA Update Checklist
 
-Before sending an OTA update to any device, especially Unit B (no USB):
+Before sending an OTA update to any device:
 
-- [ ] New firmware has been built with `pio run -e SIREN_v3_room_server`
-- [ ] Build succeeded with no errors; RAM ≤ 95%, Flash ≤ 95%
-- [ ] New firmware tested on Unit A (USB available) — device boots cleanly
+- [ ] New firmware has been built for **both** targets: `bash scripts/build-dist.sh`
+- [ ] Both builds succeeded with no errors; RAM ≤ 95%, Flash ≤ 95%
+- [ ] Firmware tested via serial — device boots cleanly
 - [ ] Serial console confirms correct radio settings after boot
 - [ ] Web UI accessible after boot
 - [ ] At least one room is active and joinable
-- [ ] Backup of Unit B's settings downloaded before updating
-- [ ] OTA image is `SIREN_v3_room_server.bin` (NOT the full-flash binary)
+- [ ] Backup of the device's settings downloaded before updating
+- [ ] OTA image matches hardware: `SIREN_v3_room_server.bin` for V3, `SIREN_v4_room_server.bin` for V4 (NOT the full-flash binary)
 
 ---
 

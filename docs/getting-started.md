@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks you through flashing a Heltec LoRa32 V3 with SIREN firmware for the first time, and how to update it later.
+This guide walks you through flashing a Heltec LoRa32 V3 or V4 with SIREN firmware for the first time, and how to update it later.
 
 ---
 
@@ -8,7 +8,7 @@ This guide walks you through flashing a Heltec LoRa32 V3 with SIREN firmware for
 
 You will need:
 
-- A **Heltec LoRa32 V3** board
+- A **Heltec LoRa32 V3** or **Heltec LoRa32 V4** board
 - A **LoRa antenna** connected to the SMA port (required — never power on without antenna)
 - A **USB-C cable** connected to a PC
 - **Chrome or Edge browser** (required for the web flasher)
@@ -18,10 +18,15 @@ You will need:
 
 ## Step 1 — Download the Firmware
 
-From the [SIREN GitHub repository](https://github.com/DinXke/SIREN/tree/multiroom/dist):
+From the [SIREN GitHub repository](https://github.com/DinXke/SIREN/tree/multiroom/dist), pick the files matching your hardware:
 
-- **`SIREN_v3_room_server-full-flash.bin`** — use this for the **first time** you flash a device (full image including bootloader and partition table)
-- **`SIREN_v3_room_server.bin`** — use this for **OTA updates** (app image only, no bootloader)
+**Heltec V3:**
+- **`SIREN_v3_room_server-full-flash.bin`** — use this for the **first time** you flash a V3 device (full image including bootloader and partition table)
+- **`SIREN_v3_room_server.bin`** — use this for **OTA updates** of a V3 device (app image only)
+
+**Heltec V4:**
+- **`SIREN_v4_room_server-full-flash.bin`** — use this for the **first time** you flash a V4 device
+- **`SIREN_v4_room_server.bin`** — use this for **OTA updates** of a V4 device
 
 ---
 
@@ -43,7 +48,7 @@ https://espressif.github.io/esptool-js/
 2. A browser dialog will ask you to choose a serial port — select the one that appeared when you plugged in the Heltec (typically **COM3** on Windows, or `/dev/ttyUSB0` on Linux).
 3. Click **Flash** (or Erase + Flash if you want a fully clean start).
 4. Set the flash offset to **`0x0`** (zero).
-5. Click the file picker and select **`SIREN_v3_room_server-full-flash.bin`**.
+5. Click the file picker and select the correct full-flash binary for your hardware (`SIREN_v3_room_server-full-flash.bin` for V3, `SIREN_v4_room_server-full-flash.bin` for V4).
 6. Click **Program** and wait for it to complete (typically 30-60 seconds).
 
 ### 2c. Reboot
@@ -109,7 +114,7 @@ Once SIREN is running, you never need to use USB flash again. Use Over-The-Air (
 1. Connect to the device's WiFi (AP mode) or find it on your LAN (STA mode).
 2. Open the web management page.
 3. Navigate to **System → Firmware Update**.
-4. Upload `SIREN_v3_room_server.bin` (the OTA image — not the full-flash binary).
+4. Upload the OTA image matching your hardware (`SIREN_v3_room_server.bin` for V3, `SIREN_v4_room_server.bin` for V4) — not the full-flash binary.
 5. Wait for the upload and reboot to complete.
 
 ### What OTA preserves
@@ -121,7 +126,7 @@ OTA updates install new firmware into the inactive partition and reboot into it.
 - Radio preferences (SPIFFS: loaded from NVS/CommonCLI prefs)
 - Node name, admin password
 
-**Warning for Unit B (glued/no-serial)**: If an OTA image fails to boot (e.g., due to a bug), the device may be unrecoverable. Always test a new build on Unit A (serial available) first and confirm it boots cleanly before sending it to Unit B.
+**OTA safety**: The ESP-IDF bootloader will automatically roll back to the previous firmware if the new image fails to complete its startup sequence. All current deployment units have working USB serial, so a failed OTA can always be recovered by re-flashing via USB.
 
 ---
 
