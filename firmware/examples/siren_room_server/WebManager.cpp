@@ -1327,6 +1327,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/add", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       char reply[160] = {};
       _mesh.handleCommand(0, (char*)"room add", reply);
       req->redirect("/");
@@ -1374,6 +1375,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/set", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
       const String& idx = req->getParam("idx", true)->value();
       char cmd[160], reply[160];
@@ -1410,6 +1412,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/stealth", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true) || !req->hasParam("stealth", true)) {
         req->send(400, "text/plain", "missing idx or stealth"); return;
       }
@@ -1898,6 +1901,7 @@ void WebManager::setupRoutes() {
   // POST /api/peer/add (body: pub=<64hex>&name=<name>)
   _server.on("/api/peer/add", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
     if (!req->hasParam("pub", true)) { req->send(400, "text/plain", "missing pub"); return; }
     const String& pub_str = req->getParam("pub", true)->value();
     // Validate: must be exactly 64 hex characters
@@ -1931,6 +1935,7 @@ void WebManager::setupRoutes() {
   // POST /api/peer/del (body: idx=<n>)
   _server.on("/api/peer/del", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
     if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
     int idx = req->getParam("idx", true)->value().toInt();
     bool ok = _mesh.delPeerFromWeb(idx);
@@ -1941,6 +1946,7 @@ void WebManager::setupRoutes() {
   // POST /api/room/delpost (body: room_idx=N&origin_id=XXXXXXXX&post_ts=T) — admin only (JES-824)
   _server.on("/api/room/delpost", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
     if (!req->hasParam("room_idx", true) || !req->hasParam("origin_id", true) ||
         !req->hasParam("post_ts", true)) {
       req->send(400, "application/json", "{\"error\":\"missing params\"}"); return;
@@ -2094,6 +2100,21 @@ void WebManager::setupRoutes() {
 // ---------------------------------------------------------------------------
 void WebManager::begin() {
   loadConfig();
+
+#if defined(SIREN_DEFAULT_STA_SSID)
+  // Provisioning: if no STA credentials configured yet, apply build-time defaults.
+  if (_sta_ssid[0] == 0) {
+    strncpy(_sta_ssid, SIREN_DEFAULT_STA_SSID, sizeof(_sta_ssid) - 1);
+    _sta_ssid[sizeof(_sta_ssid) - 1] = 0;
+#if defined(SIREN_DEFAULT_STA_PASS)
+    strncpy(_sta_pass, SIREN_DEFAULT_STA_PASS, sizeof(_sta_pass) - 1);
+    _sta_pass[sizeof(_sta_pass) - 1] = 0;
+#endif
+    _mode = MODE_STA;
+    saveConfig();
+    Serial.printf("[WiFi] Provisioned STA from build defaults: '%s'\n", _sta_ssid);
+  }
+#endif
 
   // Ensure AP SSID is set (use node name if default/empty after config load)
   if (_ap_ssid[0] == 0) {
