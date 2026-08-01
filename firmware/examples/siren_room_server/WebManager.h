@@ -62,6 +62,10 @@ private:
   unsigned long    _connect_started;
   bool             _connecting;
 
+  // NTP clock sync state (STA mode)
+  bool             _ntp_synced;       // true once the RTC has been set via NTP
+  unsigned long    _ntp_check_ms;     // millis() of next SNTP status poll
+
   // Accumulation buffer for POST /api/restore upload body
   String           _restore_buf;
 
@@ -72,7 +76,7 @@ private:
   void stopCaptivePortal();
   void connectSTA();
 
-  String buildStatusPage(const char* ip);
+  void buildStatusPageStream(AsyncResponseStream& out, const char* ip);
   String buildChatPage();
   String buildAclPage();
   String buildStatsPage();
