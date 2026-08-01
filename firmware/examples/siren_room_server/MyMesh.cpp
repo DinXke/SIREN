@@ -56,6 +56,8 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _logging = false;
   region_load_active = false;
   set_radio_at = revert_radio_at = 0;
+  _web_syncreq_pending = _web_roomsync_pending = false;
+  _web_syncreq_idx = _web_roomsync_idx = -1;
   _post_dirty_at = 0;
   _mqtt_post_cb  = nullptr;
   _mqtt_post_ctx = nullptr;
@@ -1420,6 +1422,27 @@ void MultiRoomMesh::loop() {
     if (peers[pi].next_roomsync_at && millisHasNowPassed(peers[pi].next_roomsync_at)) {
       sendRoomSync(pi);
       peers[pi].next_roomsync_at = futureMillis(PEER_ROOMSYNC_INTERVAL_MS);
+    }
+  }
+
+  // Deferred web-triggered sync (JES-864): executed here on the mesh task so the
+  // radio TX + self_id swap never race the AsyncTCP web callback (Core0).
+  if (_web_syncreq_pending) {
+    _web_syncreq_pending = false;
+    int idx = _web_syncreq_idx;
+    if (idx >= 0) {
+      if (idx < MAX_PEERS && peers[idx].active) sendSyncReq(idx);
+    } else {
+      for (int i = 0; i < MAX_PEERS; i++) if (peers[i].active) sendSyncReq(i);
+    }
+  }
+  if (_web_roomsync_pending) {
+    _web_roomsync_pending = false;
+    int idx = _web_roomsync_idx;
+    if (idx >= 0) {
+      if (idx < MAX_PEERS && peers[idx].active) sendRoomSync(idx);
+    } else {
+      for (int i = 0; i < MAX_PEERS; i++) if (peers[i].active) sendRoomSync(i);
     }
   }
 
@@ -4395,7 +4418,7 @@ int MultiRoomMesh::addPeerFromWeb(const uint8_t* pub_key, const char* name) {
       peers[i].next_roomsync_at = futureMillis(PEER_ROOMSYNC_INTERVAL_MS);  // immediate push below; next in 10 min
       _num_peers++;
       savePeerConfig();
-      sendRoomSync(i);  // JES-848: push all rooms to new peer immediately
+      triggerRoomSync(i);  // JES-848: push all rooms to new peer (deferred to loop, JES-864)
       return i;
     }
   }
@@ -4419,13 +4442,11 @@ bool MultiRoomMesh::delPeerFromWeb(int idx) {
  * Trigger immediate SYNCREQ to one peer (idx >= 0) or all peers (idx == -1).
  */
 void MultiRoomMesh::triggerPeerSync(int idx) {
-  if (idx >= 0) {
-    if (idx < MAX_PEERS && peers[idx].active) sendSyncReq(idx);
-  } else {
-    for (int i = 0; i < MAX_PEERS; i++) {
-      if (peers[i].active) sendSyncReq(i);
-    }
-  }
+  // Runs on the AsyncTCP web task — do NOT TX here (JES-864). Record the request
+  // and let loop() (mesh task) send it. Coalesce differing targets to "all".
+  if (_web_syncreq_pending && _web_syncreq_idx != idx) idx = -1;
+  _web_syncreq_idx = idx;
+  _web_syncreq_pending = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -4658,13 +4679,12 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
  * Push all active rooms (1+) to one peer (idx >= 0) or all peers (idx == -1).
  */
 void MultiRoomMesh::triggerRoomSync(int idx) {
-  if (idx >= 0) {
-    if (idx < MAX_PEERS && peers[idx].active) sendRoomSync(idx);
-  } else {
-    for (int i = 0; i < MAX_PEERS; i++) {
-      if (peers[i].active) sendRoomSync(i);
-    }
-  }
+  // May run on the AsyncTCP web task (room create/rename/rekey/manual push) —
+  // do NOT TX here (JES-864). Record the request; loop() (mesh task) sends it.
+  // Coalesce differing targets to "all". Safe when called from the mesh task too.
+  if (_web_roomsync_pending && _web_roomsync_idx != idx) idx = -1;
+  _web_roomsync_idx = idx;
+  _web_roomsync_pending = true;
 }
 
 /* ------------------------------------------------------------------ */

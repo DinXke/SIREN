@@ -281,6 +281,17 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   float         pending_freq, pending_bw;
   uint8_t       pending_sf, pending_cr;
 
+  /* ---- Deferred web-triggered sync (JES-864) ----
+     The AsyncTCP web callbacks run on a separate task/core from the mesh
+     loop(). sendSyncReq()/sendRoomSync() swap the shared self_id singleton and
+     perform radio TX (packet pool + dispatcher), none of which is thread-safe.
+     Web handlers therefore only SET these request flags; loop() (mesh task)
+     performs the actual TX. idx>=0 = one peer, -1 = all peers. */
+  volatile bool _web_syncreq_pending;   // manual SYNCREQ requested from web
+  volatile int  _web_syncreq_idx;
+  volatile bool _web_roomsync_pending;  // ROOMSYNC push requested from web
+  volatile int  _web_roomsync_idx;
+
   /* ---- Post-pool dirty timer (JES-794) ---- */
   unsigned long _post_dirty_at;   // 0 = not dirty; set to futureMillis(5000) on new post
 
