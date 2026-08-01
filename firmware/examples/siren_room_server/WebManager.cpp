@@ -1240,7 +1240,25 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
             "document.getElementById('editName').value=n;"
             "document.getElementById('editClearPass').checked=false;"
             "document.getElementById('editClearGuest').checked=false;"
+            "document.getElementById('editConfirmName').value='';"
+            "document.getElementById('editCard').dataset.roomName=n;"
             "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
+          "}"
+          "function submitEditRoom(){"
+            "var card=document.getElementById('editCard');"
+            "var passEl=document.getElementById('editPass');"
+            "var clearPass=document.getElementById('editClearPass').checked;"
+            "var changingPass=(passEl&&passEl.value.length>0)||clearPass;"
+            "if(changingPass){"
+              "var rn=card.dataset.roomName||'';"
+              "var c=window.prompt("
+                "'Waarschuwing: alle companions met het huidige wachtwoord verliezen toegang.\\n'"
+                "+'Dit kan niet ongedaan worden gemaakt.\\n'"
+                "+'Typ de roomnaam (\\''+rn+'\\') ter bevestiging:');"
+              "if(c===null)return;"  // cancelled
+              "document.getElementById('editConfirmName').value=c;"
+            "}"
+            "card.querySelector('form').submit();"
           "}"
           "</script>";
 
@@ -1293,10 +1311,24 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
               "\">Rekey</button></form>";
     }
     if (i > 0) {
-      page += "<form method='post' action='/api/room/del'>"
-              "<input type='hidden' name='idx' value='"; page += i;
-      page += "'><button class='del' onclick=\"return confirm('Delete room "; page += i;
-      page += "?')\">Del</button></form>";
+      {
+        const char* del_name = mesh.getRoomName(i);
+        page += "<form method='post' action='/api/room/del'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><input type='hidden' name='confirm_name' id='delConfirmName"; page += i;
+        page += "'>"
+                "<button class='del' data-rname=\""; page += htmlEscape(del_name);
+        page += "\" data-idx='"; page += i;
+        page += "' type='button' onclick=\""
+                "var n=this.dataset.rname;"
+                "var c=window.prompt('Waarschuwing: room ' + this.dataset.idx + ' wordt permanent verwijderd!\\n'"
+                "+'Alle berichten en de room-sleutel gaan verloren.\\n'"
+                "+'Typ de roomnaam (\\'' + n + '\\') ter bevestiging:');"
+                "if(c===null)return;"
+                "this.closest('form').elements.namedItem('confirm_name').value=c;"
+                "this.closest('form').submit();"
+                "\">Del</button></form>";
+      }
     }
     page += "</div></td></tr>";
   }
@@ -1307,17 +1339,18 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
   // Edit room form
   page += "<div class='card' id='editCard'><h2>Room bewerken</h2>"
           "<form method='post' action='/api/room/set'>"
+          "<input type='hidden' id='editConfirmName' name='confirm_name'>"
           "<div class='frow'><label>Idx</label><input id='editIdx' name='idx' type='number' min='0' max='15'></div>"
           "<div class='frow'><label>Naam</label><input id='editName' name='name' maxlength='23'></div>"
           "<div class='frow'><label>Wachtwoord</label>"
-          "<input name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
+          "<input id='editPass' name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
           "<label style='font-size:0.85em;font-weight:normal'>"
           "<input type='checkbox' id='editClearPass' name='clear_pass' value='1'> wissen</label></div>"
           "<div class='frow'><label>Gast-ww</label>"
           "<input name='guest' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
           "<label style='font-size:0.85em;font-weight:normal'>"
           "<input type='checkbox' id='editClearGuest' name='clear_guest' value='1'> wissen</label></div>"
-          "<button type='submit'>Opslaan</button></form></div>";
+          "<button type='button' onclick='submitEditRoom()'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle
   {
@@ -2064,9 +2097,19 @@ void WebManager::setupRoutes() {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
+      int del_idx = req->getParam("idx", true)->value().toInt();
+      if (del_idx <= 0 || del_idx >= MAX_ROOMS || !_mesh.isRoomActive(del_idx)) {
+        req->send(400, "text/plain", "ongeldige of inactieve room"); return;
+      }
+      // Server-side name confirmation (JES-857)
+      if (!req->hasParam("confirm_name", true) ||
+          !req->getParam("confirm_name", true)->value().equals(String(_mesh.getRoomName(del_idx)))) {
+        req->send(400, "text/plain",
+          "Bevestiging onjuist: typ de exacte roomnaam ter bevestiging.");
+        return;
+      }
       char cmd[32];
-      snprintf(cmd, sizeof(cmd), "room del %s",
-               req->getParam("idx", true)->value().c_str());
+      snprintf(cmd, sizeof(cmd), "room del %d", del_idx);
       char reply[160] = {};
       _mesh.handleCommand(0, cmd, reply);
       req->redirect("/rooms");
@@ -2103,6 +2146,10 @@ void WebManager::setupRoutes() {
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
       const String& idx = req->getParam("idx", true)->value();
+      int idx_int = idx.toInt();
+      if (idx_int < 0 || idx_int >= MAX_ROOMS || !_mesh.isRoomActive(idx_int)) {
+        req->send(400, "text/plain", "ongeldige of inactieve room"); return;
+      }
       char cmd[160], reply[160];
 
       if (req->hasParam("name", true) && req->getParam("name", true)->value().length()) {
@@ -2110,13 +2157,24 @@ void WebManager::setupRoutes() {
                  req->getParam("name", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      if (req->hasParam("clear_pass", true) && req->getParam("clear_pass", true)->value() == "1") {
-        snprintf(cmd, sizeof(cmd), "room set %s pass ", idx.c_str());
-        _mesh.handleCommand(0, cmd, reply);
-      } else if (req->hasParam("pass", true) && req->getParam("pass", true)->value().length()) {
-        snprintf(cmd, sizeof(cmd), "room set %s pass %s", idx.c_str(),
-                 req->getParam("pass", true)->value().c_str());
-        _mesh.handleCommand(0, cmd, reply);
+      // Password change: server-side confirmation required (JES-857)
+      bool clear_pass = req->hasParam("clear_pass", true) && req->getParam("clear_pass", true)->value() == "1";
+      bool set_pass   = req->hasParam("pass", true) && req->getParam("pass", true)->value().length() > 0;
+      if (clear_pass || set_pass) {
+        if (!req->hasParam("confirm_name", true) ||
+            !req->getParam("confirm_name", true)->value().equals(String(_mesh.getRoomName(idx_int)))) {
+          req->send(400, "text/plain",
+            "Bevestiging onjuist: typ de exacte roomnaam ter bevestiging.");
+          return;
+        }
+        if (clear_pass) {
+          snprintf(cmd, sizeof(cmd), "room set %s pass confirm", idx.c_str());
+          _mesh.handleCommand(0, cmd, reply);
+        } else {
+          snprintf(cmd, sizeof(cmd), "room set %s pass %s confirm", idx.c_str(),
+                   req->getParam("pass", true)->value().c_str());
+          _mesh.handleCommand(0, cmd, reply);
+        }
       }
       if (req->hasParam("clear_guest", true) && req->getParam("clear_guest", true)->value() == "1") {
         snprintf(cmd, sizeof(cmd), "room set %s guest ", idx.c_str());
