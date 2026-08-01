@@ -8,12 +8,12 @@
 
 // Manifest URL — public GitHub raw, branch multiroom
 #define OTA_MANIFEST_URL \
-  "https://raw.githubusercontent.com/DinXke/SIREN/multiroom/dist/version.json"
+  "https://raw.githubusercontent.com/DinXke/SIREN/multiroom/firmware/dist/version.json"
 
 // Binary download URL — derived from SIREN_HARDWARE_TARGET at runtime
-// e.g. dist/heltec_v3/SIREN_v3_room_server.bin
+// e.g. firmware/dist/heltec_v3/SIREN_v3_room_server.bin
 #define OTA_BIN_URL_FMT \
-  "https://raw.githubusercontent.com/DinXke/SIREN/multiroom/dist/heltec_%s/SIREN_%s_room_server.bin"
+  "https://raw.githubusercontent.com/DinXke/SIREN/multiroom/firmware/dist/heltec_%s/SIREN_%s_room_server.bin"
 
 // Hardware target string baked in per-target platformio.ini
 #ifndef SIREN_HARDWARE_TARGET
