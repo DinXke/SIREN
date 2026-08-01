@@ -78,6 +78,11 @@
   #define MAX_TOMBSTONES 64
 #endif
 
+/* Maximum login-notification targets per room (JES-834). */
+#ifndef MAX_NOTIFY_TARGETS
+  #define MAX_NOTIFY_TARGETS 4
+#endif
+
 /* Maximum peer room-server nodes tracked for Phase 5 replication. */
 #ifndef MAX_PEERS
   #define MAX_PEERS  8
@@ -86,16 +91,18 @@
 /* Phase 5: version-vector replication constants. */
 #define MAX_VV_ORIGINS  8    // per-room VV entries (one per known origin server)
 #define MAX_SYNC_POSTS  8    // SYNCDAT frames per SYNCREQ response (airtime guard)
-/* Periodic anti-entropy pull interval. 3-min default; boot delay is 45 s per peer. */
-#define PEER_SYNC_INTERVAL_MS   (3UL * 60 * 1000)
-#define PEER_SYNC_BOOT_DELAY_MS 45000UL
+/* Periodic anti-entropy pull interval — runtime-configurable (JES-844).
+   Default 180 s; boot delay 60 s.  Range 10–3600 s; persisted to /sync_cfg. */
+#define PEER_SYNC_BOOT_DELAY_MS     60000UL
+#define PEER_ROOMSYNC_INTERVAL_MS  600000UL  // 10-min periodic room key re-sync (JES-848)
 
 /* Server-to-server sync TXT sub-types (data[4] >> 2).
    Range 4-6 is free above the existing SIGNED_PLAIN=2, CLI_DATA=1, PLAIN=0. */
 #define TXT_TYPE_SYNCREQ  4   // A→B pull request  [ts][flags][num_vv][VV...]
-#define TXT_TYPE_SYNCDAT  5   // B→A one post       [ts][flags][post_ts][orig[4]][auth[4]][text]
+#define TXT_TYPE_SYNCDAT  5   // B→A one post       [ts][flags][room_hash[4]][post_ts][orig[4]][auth[4]][1:name_len][name][text]
 #define TXT_TYPE_SYNCEND  6   // B→A end of stream  [ts][flags][num_vv][VV...]
 #define TXT_TYPE_SYNCDEL  7   // delete tombstone   [ts][flags][room_hash[4]][origin_id[4]][post_ts[4]]
+#define TXT_TYPE_ROOMSYNC 8   // room key push      [ts][flags][room_idx[1]][prv[64]][pub[32]][name\0]
 
 /* Name resolution table — maps pubkey prefix → advertised node name.
    Populated from onAdvertRecv(); persisted to SPIFFS /names.          */
@@ -140,6 +147,7 @@ struct PeerInfo {
   uint8_t  shared_secret[PUB_KEY_SIZE]; // ECDH(rooms[0].priv, pub_key)
   bool     secret_valid;                // true once calcPeerSecret() called
   unsigned long next_sync_at;           // millis() deadline for next SYNCREQ
+  unsigned long next_roomsync_at;       // millis() deadline for next periodic ROOMSYNC
   /* SYNC DIAGNOSTICS (JES-833) — not persisted, reset on reboot */
   uint32_t last_syncreq_ts;  // RTC epoch of last SYNCREQ sent to this peer (0 = never)
   uint32_t last_syncdat_ts;  // RTC epoch of last SYNCDAT received from this peer (0 = never)
@@ -242,6 +250,7 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool          _logging;
   bool          region_load_active;
   uint16_t      _advert_interval_sec;  // local advert period in seconds (10-3600, default 120)
+  uint32_t      _sync_interval_s;      // anti-entropy pull interval in seconds (10-3600, default 180, JES-844)
 
   NodePrefs         _prefs;         // radio / mesh settings (shared)
   TransportKeyStore key_store;
@@ -275,8 +284,17 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t  _sync_posts_recv;  // total posts ingested via sync
   uint32_t  _sync_posts_sent;  // total posts pushed to peers
 
-  /* ---- Login notification rate-limit (JES-834) ---- */
+  /* ---- Login notification targets + rate-limit (JES-834) ---- */
   uint32_t  _last_login_notify_ms[MAX_ROOMS];  // millis() of last DM sent per room
+  uint8_t   _notify_targets[MAX_ROOMS][MAX_NOTIFY_TARGETS][PUB_KEY_SIZE];
+  uint8_t   _notify_target_count[MAX_ROOMS];
+
+  /* ---- Message-rate histogram ring-buffer (JES-800) ---- */
+  /* 24 buckets × 1 hour = rolling 24-hour window. RAM: 24×2 = 48 bytes. */
+  #define HIST_BUCKETS 24
+  uint16_t  _hist_ring[HIST_BUCKETS];   // messages in each 1-hour bucket
+  uint8_t   _hist_head;                 // current (write) bucket index
+  uint32_t  _hist_bucket_ts;            // RTC timestamp when _hist_head bucket started
 
   void saveTombstones();
   void loadTombstones();
@@ -285,6 +303,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool deletePostEntry(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts);
   void emitSyncDel(const uint8_t* room_hash, const uint8_t* origin_id, uint32_t post_ts);
   void handleSyncDel(int pi, uint8_t* data, size_t len);
+
+  /* ---- Room-key propagation (JES-848) ---- */
+  void sendRoomSync(int pi);
+  void handleRoomSync(int pi, uint8_t* data, size_t len);
 
   /* ---- Name resolution table (JES-798) ---- */
   NameEntry     _names[NAME_TABLE_SIZE];
@@ -326,6 +348,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          savePeerConfig();
   void          loadPeerConfig();
 
+  /* ---- Sync-interval persistence (JES-844) ---- */
+  void          saveSyncConfig();
+  void          loadSyncConfig();
+
   /* ---- Phase 5 anti-entropy helpers ---- */
   void          calcPeerSecret(int pi);
   bool          vvUpdate(RoomSlot& slot, const uint8_t* origin_id, uint32_t ts);
@@ -343,6 +369,9 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   /* ---- Login-attempt admin notification (JES-834) ---- */
   void          _notifyAdminsLoginAttempt(int slot_idx, const uint8_t* caller_pubkey, bool success);
+
+  void          saveNotifyTargets();
+  void          loadNotifyTargets();
 
   /* ---- CLI helpers ---- */
   void          handleRoomCommand(char* args, char* reply, bool serial);
@@ -456,9 +485,19 @@ public:
   /** Set stealth for one room and persist; idx -1 = all rooms. */
   void setRoomStealth(int idx, bool s);
 
+  /* Notify target management (JES-834) — public for WebManager access */
+  bool          addNotifyTarget(int room_idx, const uint8_t* pub_key);
+  bool          delNotifyTarget(int room_idx, const uint8_t* pub_key);
+  int           getNotifyTargetCount(int room_idx) const;
+  const uint8_t* getNotifyTarget(int room_idx, int i) const;
+
   /** Get/set local advert interval in seconds (10-3600). Persisted to SPIFFS. */
   uint16_t getAdvertIntervalSec() const { return _advert_interval_sec; }
   void     setAdvertIntervalSec(uint16_t sec);
+
+  /** Get/set anti-entropy sync interval in seconds (10-3600). Persisted to /sync_cfg (JES-844). */
+  uint32_t getSyncIntervalSec() const { return _sync_interval_s; }
+  void     setSyncIntervalSec(uint32_t sec);
 
   /** Return pointer to room i's 32-byte Ed25519 public key (PUB_KEY_SIZE bytes). */
   const uint8_t* getRoomPubKey(int i) const {
@@ -499,6 +538,16 @@ public:
   uint32_t getSyncPostsRecv() const { return _sync_posts_recv; }
   uint32_t getSyncPostsSent() const { return _sync_posts_sent; }
 
+  /* ---- Message-rate histogram accessors (JES-800) ---- */
+  /** Returns message count for histogram bucket idx (0=current, 1=1h ago, …, 23=23h ago). */
+  uint16_t getHistBucket(int idx) const {
+    if (idx < 0 || idx >= HIST_BUCKETS) return 0;
+    int i = ((int)_hist_head - idx + HIST_BUCKETS) % HIST_BUCKETS;
+    return _hist_ring[i];
+  }
+  /** Advance histogram to the correct bucket for the current RTC time. */
+  void histAdvance(uint32_t now_ts);
+
   /* ---- Post pool backup / restore (JES-790) ---- */
   /** Serialise active posts as flat JSON key-value pairs for inclusion in backup. */
   String getPostsFlatJson() const;
@@ -515,6 +564,7 @@ public:
   /* ---- IRC / chat accessors (JES-798) ---- */
   /** Resolve a 32-byte pubkey to an advertised name. Falls back to 8-char hex prefix. */
   const char* resolveName(const uint8_t* pubkey);
+  void        storeName(const uint8_t* pub4, const char* name);
   /** Direct access to the global post pool for web/CLI inspection. */
   const PostInfo* getPostPool() const { return _post_pool; }
   /** Post a server-authored message to a room. Pushes to connected companions. */
@@ -560,6 +610,8 @@ public:
   bool delPeerFromWeb(int idx);
   /** Trigger immediate SYNCREQ: idx >= 0 = one peer, idx == -1 = all peers. */
   void triggerPeerSync(int idx);
+  /** Push all active rooms (1+) to one peer (idx >= 0) or all peers (idx == -1). */
+  void triggerRoomSync(int idx);
 
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {

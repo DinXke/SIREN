@@ -326,7 +326,7 @@ The following commands are inherited from the MeshCore `CommonCLI` layer and wor
 
 ## CLI-over-Mesh
 
-When USB serial is not available (e.g., on the board's glued unit), you can send commands from another MeshCore node with admin rights.
+CLI-over-mesh lets you send commands from another MeshCore node with admin rights, without needing a direct USB serial connection to the target device.
 
 ### How it works
 

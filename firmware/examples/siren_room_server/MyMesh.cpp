@@ -74,7 +74,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _prefs.bw           = LORA_BW;
   _prefs.cr           = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
-  _prefs.disable_fwd  = 1;
+  _prefs.disable_fwd  = 0;  // JES-842: flood forwarding ON by default
   _prefs.advert_interval       = 1;   // 2 min
   _prefs.flood_advert_interval = 47;  // 47 h
   _prefs.flood_max         = 64;
@@ -95,8 +95,14 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
     peers[i].next_sync_at = 0;
   }
   _sync_req_sent = _sync_dat_recv = _sync_posts_recv = _sync_posts_sent = 0;
-  memset(_last_login_notify_ms, 0, sizeof(_last_login_notify_ms));
+  memset(_last_login_notify_ms,  0, sizeof(_last_login_notify_ms));
+  memset(_notify_targets,        0, sizeof(_notify_targets));
+  memset(_notify_target_count,   0, sizeof(_notify_target_count));
+  memset(_hist_ring, 0, sizeof(_hist_ring));
+  _hist_head      = 0;
+  _hist_bucket_ts = 0;
   _advert_interval_sec = 120;
+  _sync_interval_s     = 180;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
     rooms[i].active          = false;
@@ -121,6 +127,15 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   _fs = fs;
 
   _cli.loadPrefs(_fs);
+
+  // JES-842: room server must always forward flood packets. Older firmware had
+  // disable_fwd=1 hardcoded and that value gets saved to /com_prefs. Force it
+  // back to 0 and re-save so OTA upgrades from old firmware self-heal on first boot.
+  if (_prefs.disable_fwd != 0) {
+    _prefs.disable_fwd = 0;
+    _cli.savePrefs(_fs);
+    Serial.printf("[SIREN] JES-842: flood forwarding was disabled — re-enabled and saved\n");
+  }
 
   // SEC-001: ensure admin password is never the well-known default "password".
   // On first boot _prefs.password is empty (constructor) or may have been
@@ -189,15 +204,18 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   }
 
   loadPeerConfig();
+  loadSyncConfig();    // restore configurable anti-entropy interval (JES-844)
   // Schedule staggered initial sync for each configured peer (Phase 5)
   for (int i = 0; i < MAX_PEERS; i++) {
     if (peers[i].active) {
-      peers[i].next_sync_at = futureMillis(PEER_SYNC_BOOT_DELAY_MS + (uint32_t)i * 5000);
+      peers[i].next_sync_at     = futureMillis(PEER_SYNC_BOOT_DELAY_MS + (uint32_t)i * 5000);
+      peers[i].next_roomsync_at = futureMillis(PEER_SYNC_BOOT_DELAY_MS + (uint32_t)i * 5000 + 30000UL);
     }
   }
   loadPostPool();      // restore persisted messages (JES-787)
-  loadTombstones();   // restore delete tombstones (JES-824)
-  loadNameTable();    // restore advertised-name cache (JES-798)
+  loadTombstones();     // restore delete tombstones (JES-824)
+  loadNameTable();      // restore advertised-name cache (JES-798)
+  loadNotifyTargets();  // restore login notification targets (JES-834)
 
   region_map.load(_fs);
 
@@ -478,6 +496,49 @@ void MultiRoomMesh::setAdvertIntervalSec(uint16_t sec) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Sync interval: configurable anti-entropy pull period (JES-844)     */
+/* ------------------------------------------------------------------ */
+#define SYNC_CFG_PATH "/sync_cfg"
+
+void MultiRoomMesh::setSyncIntervalSec(uint32_t sec) {
+  if (sec < 10)   sec = 10;
+  if (sec > 3600) sec = 3600;
+  _sync_interval_s = sec;
+  // Reschedule pending peer sync timers to respect new interval immediately
+  for (int i = 0; i < MAX_PEERS; i++) {
+    if (!peers[i].active) continue;
+    peers[i].next_sync_at = futureMillis((uint32_t)_sync_interval_s * 1000);
+  }
+  saveSyncConfig();
+}
+
+void MultiRoomMesh::saveSyncConfig() {
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(SYNC_CFG_PATH, "w");
+#else
+  File f = _fs->open(SYNC_CFG_PATH, "w");
+#endif
+  if (!f) return;
+  f.write((uint8_t*)&_sync_interval_s, 4);
+  f.close();
+}
+
+void MultiRoomMesh::loadSyncConfig() {
+  if (!_fs->exists(SYNC_CFG_PATH)) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(SYNC_CFG_PATH, "r");
+#else
+  File f = _fs->open(SYNC_CFG_PATH);
+#endif
+  if (!f) return;
+  uint32_t sec = 180;
+  f.read((uint8_t*)&sec, 4);
+  f.close();
+  if (sec < 10 || sec > 3600) sec = 180;
+  _sync_interval_s = sec;
+}
+
+/* ------------------------------------------------------------------ */
 /*  onRecvPacket — multi-room routing override                          */
 /* ------------------------------------------------------------------ */
 mesh::DispatcherAction MultiRoomMesh::onRecvPacket(mesh::Packet* pkt) {
@@ -552,10 +613,12 @@ void MultiRoomMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  _notifyAdminsLoginAttempt — DM to online admins on login (JES-834) */
-/* ------------------------------------------------------------------ */
+/*  _notifyAdminsLoginAttempt — P2P DM to configured notify targets on login (JES-834) */
+/* ------------------------------------------------------------------------------- */
 void MultiRoomMesh::_notifyAdminsLoginAttempt(
     int slot_idx, const uint8_t* caller_pubkey, bool success) {
+
+  if (_notify_target_count[slot_idx] == 0) return;
 
   uint32_t now_ms = millis();
   if ((now_ms - _last_login_notify_ms[slot_idx]) < 30000) return;  // rate limit
@@ -573,26 +636,31 @@ void MultiRoomMesh::_notifyAdminsLoginAttempt(
   int msg_len = strlen(msg);
 
   uint32_t now_rtc = getRTCClock()->getCurrentTimeUnique();
-  RoomSlot& slot = rooms[slot_idx];
 
-  for (int i = 0; i < slot.acl.getNumClients(); i++) {
-    ClientInfo* admin = slot.acl.getClientByIdx(i);
-    if (!admin || !admin->isAdmin()) continue;
-    // Skip admins whose shared_secret is all-zero (never completed ECDH)
-    if (admin->shared_secret[0] == 0 && admin->shared_secret[1] == 0 &&
-        admin->shared_secret[2] == 0 && admin->shared_secret[3] == 0) continue;
+  // Send as P2P DM from rooms[0].id (node identity) to each configured target.
+  // The companion can decrypt using ECDH(companion_priv, rooms[0].pub_key) and
+  // will show this as a direct message, not a room chat message.
+  for (int i = 0; i < _notify_target_count[slot_idx]; i++) {
+    const uint8_t* target_pub = _notify_targets[slot_idx][i];
+
+    uint8_t shared[PUB_KEY_SIZE];
+    rooms[0].id.calcSharedSecret(shared, target_pub);
+
+    mesh::Identity target_id;
+    memset(target_id.pub_key, 0, PUB_KEY_SIZE);
+    memcpy(target_id.pub_key, target_pub, PUB_KEY_SIZE);
 
     uint8_t buf[5 + 80];
     memcpy(buf, &now_rtc, 4);
     buf[4] = (TXT_TYPE_PLAIN << 2);
     memcpy(&buf[5], msg, msg_len);
 
-    self_id = slot.id;
-    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, admin->id, admin->shared_secret,
+    self_id = rooms[0].id;
+    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, target_id, shared,
                               buf, 5 + msg_len);
     if (pkt) sendFloodScoped(default_scope, pkt, 500, _prefs.path_hash_mode + 1);
   }
-  // self_id stays as slot.id — onAnonDataRecv already had it set to rooms[_active_slot].id
+  self_id = rooms[slot_idx].id;  // restore for onAnonDataRecv continuation
 }
 
 /* ------------------------------------------------------------------ */
@@ -658,6 +726,10 @@ void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
     client->out_path_len = OUT_PATH_UNKNOWN;
   }
 
+  // Update per-client radio stats (JES-800)
+  client->last_rssi = (int8_t)radio_driver.getLastRSSI();
+  client->last_snr  = (int8_t)(radio_driver.getLastSNR() * 4);
+
   uint32_t now = getRTCClock()->getCurrentTimeUnique();
   memcpy(reply_data, &now, 4);
   reply_data[4] = RESP_SERVER_LOGIN_OK;
@@ -702,10 +774,11 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
     peers[pi].last_contact = getRTCClock()->getCurrentTime();
     if (type == PAYLOAD_TYPE_TXT_MSG && len > 4) {
       uint8_t flags = (data[4] >> 2);
-      if      (flags == TXT_TYPE_SYNCREQ) handleSyncReq(pi, data, len);
-      else if (flags == TXT_TYPE_SYNCDAT) handleSyncDat(pi, data, len);
-      else if (flags == TXT_TYPE_SYNCEND) handleSyncEnd(pi, data, len);
-      else if (flags == TXT_TYPE_SYNCDEL) handleSyncDel(pi, data, len);
+      if      (flags == TXT_TYPE_SYNCREQ)  handleSyncReq(pi, data, len);
+      else if (flags == TXT_TYPE_SYNCDAT)  handleSyncDat(pi, data, len);
+      else if (flags == TXT_TYPE_SYNCEND)  handleSyncEnd(pi, data, len);
+      else if (flags == TXT_TYPE_SYNCDEL)  handleSyncDel(pi, data, len);
+      else if (flags == TXT_TYPE_ROOMSYNC) handleRoomSync(pi, data, len);
     }
     return;
   }
@@ -730,6 +803,9 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
       uint32_t now = getRTCClock()->getCurrentTimeUnique();
       client->last_activity = now;
       client->extra.room.push_failures = 0;
+      // Update per-client radio stats (JES-800)
+      client->last_rssi = (int8_t)radio_driver.getLastRSSI();
+      client->last_snr  = (int8_t)(radio_driver.getLastSNR() * 4);
 
       data[len] = 0;
 
@@ -889,6 +965,7 @@ void MultiRoomMesh::onAckRecv(mesh::Packet* packet, uint32_t ack_crc) {
 /* ------------------------------------------------------------------ */
 void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text) {
   uint8_t ridx = (uint8_t)(&slot - rooms);
+  if (ridx == 0) return;  // JES-846: room 0 is identity-only, no posts allowed
   int quota = MAX_TOTAL_POSTS / (_num_active_rooms > 0 ? _num_active_rooms : 1);
 
   // Find a free slot; also track oldest post owned by this room
@@ -937,6 +1014,13 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   slot.num_posted++;
   _post_dirty_at = futureMillis(5000);  // debounced persist (JES-794)
 
+  // Per-client message counter (JES-800)
+  if (client && client->msg_count < 0xFFFF) client->msg_count++;
+
+  // Histogram ring-buffer: advance to current bucket then increment (JES-800)
+  histAdvance(free_slot->post_timestamp);
+  _hist_ring[_hist_head]++;
+
   // Phase 5: update local VV and push to peers immediately
   vvUpdate(slot, free_slot->origin_id, free_slot->post_timestamp);
   for (int pi = 0; pi < MAX_PEERS; pi++) {
@@ -949,6 +1033,29 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
                   free_slot->author.pub_key, free_slot->text,
                   _mqtt_post_ctx);
   }
+}
+
+/* Advance the histogram ring-buffer so _hist_ring[_hist_head] covers now_ts.
+ * Skipped buckets (node was offline or no posts for >1 h) are zeroed. */
+void MultiRoomMesh::histAdvance(uint32_t now_ts) {
+  if (_hist_bucket_ts == 0) {
+    // First ever post — seed bucket timestamp
+    _hist_bucket_ts = now_ts;
+    return;
+  }
+  if (now_ts < _hist_bucket_ts) return;  // clock skew guard
+  uint32_t elapsed_secs = now_ts - _hist_bucket_ts;
+  uint32_t buckets_elapsed = elapsed_secs / 3600u;
+  if (buckets_elapsed == 0) return;  // still within current bucket
+
+  // Advance at most HIST_BUCKETS steps; if more, zero the entire ring
+  uint32_t steps = buckets_elapsed < (uint32_t)HIST_BUCKETS
+                   ? buckets_elapsed : (uint32_t)HIST_BUCKETS;
+  for (uint32_t s = 0; s < steps; s++) {
+    _hist_head = (_hist_head + 1) % HIST_BUCKETS;
+    _hist_ring[_hist_head] = 0;
+  }
+  _hist_bucket_ts += buckets_elapsed * 3600u;  // align to bucket boundary
 }
 
 void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post) {
@@ -1268,7 +1375,13 @@ void MultiRoomMesh::loop() {
     if (!peers[pi].active) continue;
     if (peers[pi].next_sync_at && millisHasNowPassed(peers[pi].next_sync_at)) {
       sendSyncReq(pi);
-      peers[pi].next_sync_at = futureMillis(PEER_SYNC_INTERVAL_MS);
+      peers[pi].next_sync_at = futureMillis((uint32_t)_sync_interval_s * 1000);
+    }
+    // Periodic room-key re-sync (JES-848): propagates rooms created while peer was offline
+    // Receive-side dedup (handleRoomSync) makes repeated sends safe.
+    if (peers[pi].next_roomsync_at && millisHasNowPassed(peers[pi].next_roomsync_at)) {
+      sendRoomSync(pi);
+      peers[pi].next_roomsync_at = futureMillis(PEER_ROOMSYNC_INTERVAL_MS);
     }
   }
 
@@ -1429,6 +1542,82 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- login notification target management (JES-834) ----
+  // notify <room_idx> list|add <hex64>|del <hex64>
+  if (memcmp(command, "notify ", 7) == 0) {
+    char* args = command + 7;
+    while (*args == ' ') args++;
+    int room_idx = atoi(args);
+    while (*args && *args != ' ') args++;
+    while (*args == ' ') args++;
+    // args now points to sub-command: list|add|del
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !isRoomActive(room_idx)) {
+      strcpy(reply, "Err - invalid or inactive room index"); return;
+    }
+    if (strcmp(args, "list") == 0) {
+      int cnt = getNotifyTargetCount(room_idx);
+      if (cnt == 0) {
+        snprintf(reply, 160, "notify room[%d]: no targets configured", room_idx);
+      } else {
+        int pos = snprintf(reply, 160, "notify room[%d] (%d):", room_idx, cnt);
+        for (int i = 0; i < cnt && pos < 155; i++) {
+          const uint8_t* k = getNotifyTarget(room_idx, i);
+          char hex[9];
+          snprintf(hex, sizeof(hex), " %02x%02x%02x%02x", k[0], k[1], k[2], k[3]);
+          pos += snprintf(reply + pos, 160 - pos, "%s", hex);
+        }
+      }
+      return;
+    }
+    if (memcmp(args, "add ", 4) == 0 || memcmp(args, "del ", 4) == 0) {
+      bool do_add = (args[0] == 'a');
+      char* hex = args + 4;
+      while (*hex == ' ') hex++;
+      int hexlen = strlen(hex);
+      if (hexlen < PUB_KEY_SIZE * 2) {
+        strcpy(reply, "Err - pubkey must be 64 hex chars"); return;
+      }
+      uint8_t pub_key[PUB_KEY_SIZE];
+      if (!mesh::Utils::fromHex(pub_key, PUB_KEY_SIZE, hex)) {
+        strcpy(reply, "Err - invalid hex pubkey"); return;
+      }
+      if (do_add) {
+        if (addNotifyTarget(room_idx, pub_key)) {
+          snprintf(reply, 160, "OK - notify target added to room[%d]", room_idx);
+        } else {
+          snprintf(reply, 160, "Err - target list full (max %d)", MAX_NOTIFY_TARGETS);
+        }
+      } else {
+        if (delNotifyTarget(room_idx, pub_key)) {
+          snprintf(reply, 160, "OK - notify target removed from room[%d]", room_idx);
+        } else {
+          strcpy(reply, "Err - target not found");
+        }
+      }
+      return;
+    }
+    strcpy(reply, "Err - usage: notify <room_idx> list|add <hex64>|del <hex64>");
+    return;
+  }
+
+  // ---- sync interval [<seconds>] — configurable anti-entropy pull period (JES-844) ----
+  if (memcmp(command, "sync interval", 13) == 0) {
+    const char* arg = command + 13;
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+      sprintf(reply, "sync interval=%lu s (range 10-3600)", (unsigned long)_sync_interval_s);
+    } else {
+      int sec = atoi(arg);
+      if (sec < 10 || sec > 3600) {
+        strcpy(reply, "Err: interval must be 10-3600 seconds");
+      } else {
+        setSyncIntervalSec((uint32_t)sec);
+        sprintf(reply, "OK - sync interval %lu s", (unsigned long)_sync_interval_s);
+      }
+    }
+    return;
+  }
+
   // ---- advert interval [<seconds>] — global local advert period ----
   if (memcmp(command, "advert interval", 15) == 0) {
     const char* arg = command + 15;
@@ -1576,8 +1765,8 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     int ridx = atoi(arg);
     while (*arg && *arg != ' ') arg++;
     while (*arg == ' ') arg++;
-    if (ridx < 0 || ridx >= MAX_ROOMS || !rooms[ridx].active) {
-      strcpy(reply, "Err: invalid room idx"); return;
+    if (ridx < 0 || ridx >= MAX_ROOMS || !rooms[ridx].active || ridx == 0) {
+      strcpy(reply, "Err: invalid room idx (use 1+, room 0 is identity-only)"); return;
     }
     if (*arg == 0) { strcpy(reply, "Err: missing text"); return; }
     addServerPost(ridx, arg);
@@ -1626,6 +1815,12 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  peer del <idx>                 Remove peer node [serial only]");
       Serial.println("  peer sync                      Trigger manual anti-entropy sync");
       Serial.println();
+      Serial.println("  NOTIFY");
+      Serial.println("  ------");
+      Serial.println("  notify <idx> list              List login-notification targets for room");
+      Serial.println("  notify <idx> add <hex64>       Add notification target pubkey");
+      Serial.println("  notify <idx> del <hex64>       Remove notification target pubkey");
+      Serial.println();
       Serial.println("  WIFI");
       Serial.println("  ----");
       Serial.println("  wifi mode ap|sta               Set WiFi mode");
@@ -1658,6 +1853,10 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  STATS");
       Serial.println("  -----");
       Serial.println("  get stats                      Show node statistics summary");
+      Serial.println("  stats                          Brief totals (rooms/posts/contacts/uptime)");
+      Serial.println("  stats rooms                    Per-room client counts + post totals");
+      Serial.println("  stats users                    Per-user role/hops/RSSI/msgs [all rooms]");
+      Serial.println("  stats hist                     24-hour message histogram");
       Serial.println("  stats-core                     Show core stats [serial only]");
       Serial.println("  stats-radio                    Show radio stats [serial only]");
       Serial.println("  neighbors                      List mesh neighbors");
@@ -1694,6 +1893,111 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
                (unsigned long)_sync_posts_recv,
                (unsigned long)_sync_posts_sent);
     }
+    return;
+  }
+
+  // ---- stats rooms / stats users / stats hist (JES-800) ----
+  if (memcmp(command, "stats", 5) == 0 && (command[5] == ' ' || command[5] == 0)) {
+    const char* sub = command + 5;
+    while (*sub == ' ') sub++;
+
+    if (strcmp(sub, "rooms") == 0) {
+      if (is_serial) {
+        Serial.printf("Rooms (%d active):\n", _num_active_rooms);
+        for (int i = 0; i < MAX_ROOMS; i++) {
+          if (!rooms[i].active) continue;
+          int nc = rooms[i].acl.getNumClients();
+          int admin_c = 0, rw_c = 0, ro_c = 0, guest_c = 0;
+          for (int j = 0; j < nc; j++) {
+            auto c = rooms[i].acl.getClientByIdx(j);
+            switch (c->permissions & PERM_ACL_ROLE_MASK) {
+              case PERM_ACL_ADMIN:      admin_c++; break;
+              case PERM_ACL_READ_WRITE: rw_c++;    break;
+              case PERM_ACL_READ_ONLY:  ro_c++;    break;
+              default:                  guest_c++; break;
+            }
+          }
+          Serial.printf("  [%d] '%s'  clients=%d (adm=%d rw=%d ro=%d g=%d)  posts=%d\n",
+                        i, rooms[i].name, nc,
+                        admin_c, rw_c, ro_c, guest_c,
+                        rooms[i].num_posted);
+        }
+      } else {
+        int pos = 0;
+        for (int i = 0; i < MAX_ROOMS && pos < 140; i++) {
+          if (!rooms[i].active) continue;
+          pos += snprintf(reply + pos, 160 - pos, "[%d]%s c=%d p=%d; ",
+                          i, rooms[i].name,
+                          rooms[i].acl.getNumClients(),
+                          rooms[i].num_posted);
+        }
+        if (pos == 0) strcpy(reply, "no rooms");
+      }
+      return;
+    }
+
+    if (strcmp(sub, "users") == 0) {
+      if (is_serial) {
+        for (int i = 0; i < MAX_ROOMS; i++) {
+          if (!rooms[i].active) continue;
+          int nc = rooms[i].acl.getNumClients();
+          Serial.printf("Room[%d] '%s':\n", i, rooms[i].name);
+          for (int j = 0; j < nc; j++) {
+            auto c = rooms[i].acl.getClientByIdx(j);
+            char hex[9]; mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+            const char* nm = resolveName(c->id.pub_key);
+            Serial.printf("  <%s> '%s' perm=%d hops=%s rssi=%d snr=%d msgs=%d\n",
+                          hex, nm,
+                          (c->permissions & PERM_ACL_ROLE_MASK),
+                          c->out_path_len == OUT_PATH_UNKNOWN ? "?" : String(c->out_path_len).c_str(),
+                          (int)c->last_rssi,
+                          (int)c->last_snr,
+                          (int)c->msg_count);
+          }
+        }
+      } else {
+        // Compact mesh-DM reply; admin-only enforced by caller
+        int pos = 0;
+        int scope = _active_slot;
+        int nc = rooms[scope].acl.getNumClients();
+        for (int j = 0; j < nc && pos < 140; j++) {
+          auto c = rooms[scope].acl.getClientByIdx(j);
+          char hex[9]; mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+          pos += snprintf(reply + pos, 160 - pos, "<%s> p=%d m=%d; ",
+                          hex,
+                          (c->permissions & PERM_ACL_ROLE_MASK),
+                          (int)c->msg_count);
+        }
+        if (pos == 0) strcpy(reply, "no users");
+      }
+      return;
+    }
+
+    if (strcmp(sub, "hist") == 0) {
+      histAdvance(getRTCClock()->getCurrentTime());
+      if (is_serial) {
+        Serial.println("Message histogram (last 24h, newest first):");
+        for (int b = 0; b < HIST_BUCKETS; b++) {
+          uint16_t cnt = getHistBucket(b);
+          Serial.printf("  -%2dh: %u\n", b, (unsigned)cnt);
+        }
+      } else {
+        // Compact: last 12 buckets
+        int pos = snprintf(reply, 160, "hist:");
+        for (int b = 0; b < 12 && pos < 150; b++) {
+          pos += snprintf(reply + pos, 160 - pos, "%u,", (unsigned)getHistBucket(b));
+        }
+        reply[pos > 0 ? pos - 1 : 0] = 0;  // trim trailing comma
+      }
+      return;
+    }
+
+    // "stats" with no sub-command: brief totals
+    snprintf(reply, 160, "rooms=%d posts=%lu contacts=%d uptime=%lus",
+             _num_active_rooms,
+             (unsigned long)getTotalPosts(),
+             (int)getTotalContacts(),
+             (unsigned long)(uptime_millis / 1000UL));
     return;
   }
 
@@ -2547,6 +2851,96 @@ void MultiRoomMesh::loadNameTable() {
   _name_lru_ctr = max_seq;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Notify target persistence + management (JES-834)                   */
+/* ------------------------------------------------------------------ */
+#define NOTIFY_CFG_PATH   "/notify_cfg"
+#define NOTIFY_MAGIC_0    0x4E  // 'N'
+#define NOTIFY_MAGIC_1    0x54  // 'T'
+#define NOTIFY_VERSION    0x01
+
+void MultiRoomMesh::saveNotifyTargets() {
+  if (!_fs) return;
+  File f = _fs->open(NOTIFY_CFG_PATH, "w");
+  if (!f) return;
+  uint8_t hdr[4] = { NOTIFY_MAGIC_0, NOTIFY_MAGIC_1, NOTIFY_VERSION, (uint8_t)MAX_ROOMS };
+  f.write(hdr, 4);
+  for (int r = 0; r < MAX_ROOMS; r++) {
+    f.write(&_notify_target_count[r], 1);
+    for (int i = 0; i < _notify_target_count[r]; i++) {
+      f.write(_notify_targets[r][i], PUB_KEY_SIZE);
+    }
+  }
+  f.close();
+}
+
+void MultiRoomMesh::loadNotifyTargets() {
+  if (!_fs || !_fs->exists(NOTIFY_CFG_PATH)) return;
+  File f = _fs->open(NOTIFY_CFG_PATH);
+  if (!f) return;
+  uint8_t hdr[4];
+  if (f.read(hdr, 4) != 4 ||
+      hdr[0] != NOTIFY_MAGIC_0 || hdr[1] != NOTIFY_MAGIC_1 ||
+      hdr[2] != NOTIFY_VERSION) {
+    f.close(); return;  // corrupt or version mismatch — start empty
+  }
+  uint8_t rooms_saved = hdr[3];
+  if (rooms_saved > MAX_ROOMS) rooms_saved = MAX_ROOMS;
+  for (int r = 0; r < rooms_saved; r++) {
+    uint8_t cnt = 0;
+    if (f.read(&cnt, 1) != 1) break;
+    if (cnt > MAX_NOTIFY_TARGETS) cnt = MAX_NOTIFY_TARGETS;
+    _notify_target_count[r] = 0;
+    for (int i = 0; i < cnt; i++) {
+      if (f.read(_notify_targets[r][i], PUB_KEY_SIZE) != PUB_KEY_SIZE) {
+        f.close(); return;
+      }
+      _notify_target_count[r]++;
+    }
+  }
+  f.close();
+}
+
+bool MultiRoomMesh::addNotifyTarget(int room_idx, const uint8_t* pub_key) {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return false;
+  // Duplicate check
+  for (int i = 0; i < _notify_target_count[room_idx]; i++) {
+    if (memcmp(_notify_targets[room_idx][i], pub_key, PUB_KEY_SIZE) == 0) return true;
+  }
+  if (_notify_target_count[room_idx] >= MAX_NOTIFY_TARGETS) return false;
+  memcpy(_notify_targets[room_idx][_notify_target_count[room_idx]], pub_key, PUB_KEY_SIZE);
+  _notify_target_count[room_idx]++;
+  saveNotifyTargets();
+  return true;
+}
+
+bool MultiRoomMesh::delNotifyTarget(int room_idx, const uint8_t* pub_key) {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return false;
+  for (int i = 0; i < _notify_target_count[room_idx]; i++) {
+    if (memcmp(_notify_targets[room_idx][i], pub_key, PUB_KEY_SIZE) == 0) {
+      // Shift remaining entries down
+      for (int j = i + 1; j < _notify_target_count[room_idx]; j++) {
+        memcpy(_notify_targets[room_idx][j - 1], _notify_targets[room_idx][j], PUB_KEY_SIZE);
+      }
+      _notify_target_count[room_idx]--;
+      saveNotifyTargets();
+      return true;
+    }
+  }
+  return false;
+}
+
+int MultiRoomMesh::getNotifyTargetCount(int room_idx) const {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return 0;
+  return _notify_target_count[room_idx];
+}
+
+const uint8_t* MultiRoomMesh::getNotifyTarget(int room_idx, int i) const {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return nullptr;
+  if (i < 0 || i >= _notify_target_count[room_idx]) return nullptr;
+  return _notify_targets[room_idx][i];
+}
+
 void MultiRoomMesh::onAdvertRecv(mesh::Packet* /*pkt*/, const mesh::Identity& id,
                                   uint32_t /*ts*/,
                                   const uint8_t* app_data, size_t app_data_len) {
@@ -2600,8 +2994,38 @@ const char* MultiRoomMesh::resolveName(const uint8_t* pubkey) {
   return hex_buf;
 }
 
+/**
+ * Store a name→pubkey-prefix mapping in the name table (JES-840).
+ * Used by handleSyncDat to learn author names from peer SYNCDAT frames.
+ * pub4 = first NAME_KEY_SIZE bytes of the author's pubkey.
+ */
+void MultiRoomMesh::storeName(const uint8_t* pub4, const char* name) {
+  if (!name || name[0] == '\0') return;
+  // Find existing entry or LRU victim
+  int victim = 0;
+  uint32_t min_seq = UINT32_MAX;
+  for (int i = 0; i < NAME_TABLE_SIZE; i++) {
+    if (_names[i].lru_seq == 0) {
+      victim = i;
+      min_seq = 0;
+      break;
+    }
+    if (memcmp(_names[i].pub_prefix, pub4, NAME_KEY_SIZE) == 0) {
+      StrHelper::strncpy(_names[i].name, name, sizeof(_names[i].name));
+      _names[i].lru_seq = ++_name_lru_ctr;
+      saveNameTable();
+      return;
+    }
+    if (_names[i].lru_seq < min_seq) { min_seq = _names[i].lru_seq; victim = i; }
+  }
+  memcpy(_names[victim].pub_prefix, pub4, NAME_KEY_SIZE);
+  StrHelper::strncpy(_names[victim].name, name, sizeof(_names[victim].name));
+  _names[victim].lru_seq = ++_name_lru_ctr;
+  saveNameTable();
+}
+
 void MultiRoomMesh::addServerPost(int room_idx, const char* text) {
-  if (room_idx < 0 || room_idx >= MAX_ROOMS || !rooms[room_idx].active) return;
+  if (room_idx < 0 || room_idx >= MAX_ROOMS || !rooms[room_idx].active || room_idx == 0) return;  // JES-846
   if (!text || text[0] == 0) return;
 
   // Build a transient ClientInfo whose identity = the room itself
@@ -3036,12 +3460,14 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
 
 /**
  * Push a single post to peer pi via SYNCDAT DM.
- * Wire format (JES-816 multi-room):
- *   [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][text]
+ * Wire format (JES-816 multi-room, JES-840):
+ *   [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len][name][text]
  * room_hash = first 4 bytes of the sending room's public key.
+ * name_len = 0..23; name = advertised author name for receiving node's name table.
  * All sync DMs are sent from rooms[0].id (node transport identity).
  */
 void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
+  if (post.room_idx == 0) return;  // JES-846: room 0 is identity-only, never sync its posts
   calcPeerSecret(pi);
 
   int len = 0;
@@ -3052,8 +3478,17 @@ void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
   memcpy(&reply_data[len], &post.post_timestamp, 4);        len += 4;
   memcpy(&reply_data[len], post.origin_id, 4);              len += 4;
   memcpy(&reply_data[len], post.author.pub_key, 4);         len += 4;
+  // Bug 2 (JES-840): embed author name so the receiving node can populate its name table
+  const char* aname = resolveName(post.author.pub_key);
+  uint8_t name_len = (uint8_t)strlen(aname);
+  if (name_len > 23) name_len = 23;
+  reply_data[len++] = name_len;
+  memcpy(&reply_data[len], aname, name_len);                len += name_len;
+  // clamp text to remaining space
+  int max_text = (int)sizeof(reply_data) - len;
+  if (max_text < 0) max_text = 0;
   int text_len = strlen(post.text);
-  if (text_len > MAX_POST_TEXT_LEN) text_len = MAX_POST_TEXT_LEN;
+  if (text_len > max_text) text_len = max_text;
   memcpy(&reply_data[len], post.text, text_len);            len += text_len;
 
   // Send from node transport identity (rooms[0])
@@ -3068,6 +3503,10 @@ void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
     sendFlood(pkt, (uint32_t)0, (uint8_t)(_prefs.path_hash_mode + 1));
     peers[pi].sync_posts_sent++;
     _sync_posts_sent++;
+  } else {
+    // Bug 1B (JES-840): log push failure so it is visible on serial
+    Serial.printf("[SYNC] pushPostToPeer: createDatagram FAILED for peer[%d] '%s' (secret_valid=%d)\n",
+                  pi, peers[pi].name, (int)peers[pi].secret_valid);
   }
 }
 
@@ -3090,7 +3529,7 @@ void MultiRoomMesh::sendSyncReq(int pi) {
   uint32_t stagger_ms = 0;
   int rooms_synced = 0;
 
-  for (int ri = 0; ri < MAX_ROOMS; ri++) {
+  for (int ri = 1; ri < MAX_ROOMS; ri++) {  // JES-846: start at 1, room 0 is identity-only
     if (!rooms[ri].active) continue;
     RoomSlot& slot = rooms[ri];
 
@@ -3141,18 +3580,18 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
   uint8_t num_vv = data[9];
   if ((size_t)(10 + (int)num_vv * 8) > len) return;
 
-  // Find local room matching hash (first 4 bytes of pub_key)
+  // Find local room matching hash (first 4 bytes of pub_key); skip room 0 (JES-846)
   int ri = -1;
-  for (int i = 0; i < MAX_ROOMS; i++) {
+  for (int i = 1; i < MAX_ROOMS; i++) {
     if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
       ri = i; break;
     }
   }
-  // Fallback: if no exact hash match, sync into first active room.
+  // Fallback: if no exact hash match, sync into first active room (skip room 0).
   // This allows cross-node sync when both nodes have different room keys (JES-723).
   // The SYNCDAT will echo back the requesting room_hash, so the peer can ingest correctly.
   if (ri < 0) {
-    for (int i = 0; i < MAX_ROOMS; i++) {
+    for (int i = 1; i < MAX_ROOMS; i++) {
       if (rooms[i].active) { ri = i; break; }
     }
   }
@@ -3197,8 +3636,17 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
     memcpy(&buf[dlen], &p.post_timestamp, 4);  dlen += 4;
     memcpy(&buf[dlen], p.origin_id, 4);        dlen += 4;
     memcpy(&buf[dlen], p.author.pub_key, 4);   dlen += 4;
+    // Bug 2 (JES-840): embed author name so receiving node can populate its name table
+    const char* pname = resolveName(p.author.pub_key);
+    uint8_t pname_len = (uint8_t)strlen(pname);
+    if (pname_len > 23) pname_len = 23;
+    buf[dlen++] = pname_len;
+    memcpy(&buf[dlen], pname, pname_len);      dlen += pname_len;
+    // clamp text to remaining space
+    int max_tlen = (int)sizeof(buf) - dlen;
+    if (max_tlen < 0) max_tlen = 0;
     int tlen = strlen(p.text);
-    if (tlen > MAX_POST_TEXT_LEN) tlen = MAX_POST_TEXT_LEN;
+    if (tlen > max_tlen) tlen = max_tlen;
     memcpy(&buf[dlen], p.text, tlen);          dlen += tlen;
 
     self_id = rooms[0].id;
@@ -3259,12 +3707,13 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
 }
 
 /**
- * Handle incoming SYNCDAT from peer pi — ingest one post (JES-816 multi-room).
- * Wire format: [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][text]
+ * Handle incoming SYNCDAT from peer pi — ingest one post (JES-816 multi-room, JES-840).
+ * Wire format: [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len][name][text]
+ * name_len=0 means no name embedded (hex fallback on display).
  * Routes the post to the local room matching room_hash.
  */
 void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
-  if (len < 21) return;  // [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub]
+  if (len < 22) return;  // [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len] min
   uint8_t  room_hash[4];
   uint32_t post_ts;
   uint8_t  origin_id[4], author_pub[4];
@@ -3272,12 +3721,22 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   memcpy(&post_ts,   &data[9],  4);
   memcpy(origin_id,  &data[13], 4);
   memcpy(author_pub, &data[17], 4);
+  // Bug 2 (JES-840): parse embedded author name and store in name table
+  uint8_t name_len = data[21];
+  if (name_len > 23) name_len = 23;  // clamp — reject oversized (no buffer overflow)
+  if ((size_t)(22 + name_len) > len) return;  // bounds guard for name + text
+  if (name_len > 0) {
+    char author_name[24];
+    memcpy(author_name, &data[22], name_len);
+    author_name[name_len] = '\0';
+    storeName(author_pub, author_name);
+  }
   data[len] = 0;   // NUL-terminate text
-  const char* text = (const char*)&data[21];
+  const char* text = (const char*)&data[22 + name_len];
 
-  // Find local room matching hash
+  // Find local room matching hash; skip room 0 (JES-846)
   int ri = -1;
-  for (int i = 0; i < MAX_ROOMS; i++) {
+  for (int i = 1; i < MAX_ROOMS; i++) {
     if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
       ri = i; break;
     }
@@ -3286,7 +3745,7 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   // Occurs when nodes have different room keys (normal case: each node has its own
   // random identity). Packet is already ECDH-verified by onPeerDataRecv. (JES-835)
   if (ri < 0) {
-    for (int i = 0; i < MAX_ROOMS; i++) {
+    for (int i = 1; i < MAX_ROOMS; i++) {
       if (rooms[i].active) { ri = i; break; }
     }
   }
@@ -3307,20 +3766,105 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
 /**
  * Handle incoming SYNCEND from peer pi (JES-816 multi-room).
  * Wire format: [4:ts][1:flags][4:room_hash][1:num_vv][N*8:VVEntry{origin[4],seq[4]}]
- * Informational only — our VV grows naturally as posts arrive via SYNCDAT.
+ *
+ * Bidirectionality (JES-841 fix): the SYNCEND carries the peer's VV.  We use
+ * that VV to immediately push back any local posts the peer is missing.  This
+ * completes a full two-way exchange in one round-trip WITHOUT resetting the
+ * periodic timer to 2 s (which caused a tight A→B pull loop that starved the
+ * independent B→A pull direction and exhausted LoRa duty-cycle).
+ *
+ * We do NOT send a reverse SYNCEND here to avoid an infinite ping-pong:
+ * the next periodic SYNCREQ from either side will carry the updated VV.
  */
 void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
   if (len < 10) return;  // [4:ts][1:flags][4:room_hash][1:num_vv]
-  // Find matching room (informational)
+
+  uint8_t room_hash[4];
+  memcpy(room_hash, &data[5], 4);
+  uint8_t num_vv = data[9];
+  if (num_vv > MAX_VV_ORIGINS) num_vv = MAX_VV_ORIGINS;
+  // Bounds-check: each VV entry is 8 bytes; truncate if frame is too short.
+  while (num_vv > 0 && (size_t)(10 + (int)num_vv * 8) > len) num_vv--;
+
+  // Find matching local room (fallback to first active room, same as handleSyncReq); skip room 0 (JES-846).
   int ri = -1;
-  for (int i = 0; i < MAX_ROOMS; i++) {
-    if (rooms[i].active && memcmp(rooms[i].id.pub_key, &data[5], 4) == 0) {
+  for (int i = 1; i < MAX_ROOMS; i++) {
+    if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
       ri = i; break;
     }
   }
-  (void)ri;  // informational only
+  if (ri < 0) {
+    for (int i = 1; i < MAX_ROOMS; i++) {
+      if (rooms[i].active) { ri = i; break; }
+    }
+  }
+
   peers[pi].last_syncend_ts = getRTCClock()->getCurrentTime();
   Serial.printf("[SYNC] SYNCEND from peer[%d] room[%d]\n", pi, ri);
+
+  if (ri < 0) return;  // no active room — nothing to push
+
+  // --- Reverse push: send peer any posts it doesn't have yet ---
+  // Parse peer's VV (embedded in SYNCEND payload).
+  struct { uint8_t orig[4]; uint32_t seq; } peer_vv[MAX_VV_ORIGINS];
+  for (int i = 0; i < num_vv; i++) {
+    memcpy(peer_vv[i].orig, &data[10 + i * 8],     4);
+    memcpy(&peer_vv[i].seq,  &data[10 + i * 8 + 4], 4);
+  }
+  auto peerKnows = [&](const uint8_t* orig) -> uint32_t {
+    for (int i = 0; i < num_vv; i++) {
+      if (memcmp(peer_vv[i].orig, orig, 4) == 0) return peer_vv[i].seq;
+    }
+    return 0;
+  };
+
+  calcPeerSecret(pi);
+  mesh::Identity peer_id;
+  memset(peer_id.pub_key, 0, PUB_KEY_SIZE);
+  memcpy(peer_id.pub_key, peers[pi].pub_key, PUB_KEY_SIZE);
+
+  int pushed = 0;
+  uint32_t delay_ms = 300;  // small initial delay — peer's in-flight frames land first
+  for (int k = 0; k < MAX_TOTAL_POSTS && pushed < MAX_SYNC_POSTS; k++) {
+    const PostInfo& p = _post_pool[k];
+    if (p.room_idx != (uint8_t)ri) continue;
+    uint32_t peer_knows = peerKnows(p.origin_id);
+    if (p.post_timestamp <= peer_knows) continue;
+    if (isTombstoned(p.origin_id, p.post_timestamp)) continue;
+
+    int dlen = 0;
+    uint8_t buf[MAX_PACKET_PAYLOAD];
+    uint32_t now = getRTCClock()->getCurrentTimeUnique();
+    memcpy(&buf[dlen], &now, 4);               dlen += 4;
+    buf[dlen++] = (TXT_TYPE_SYNCDAT << 2);
+    memcpy(&buf[dlen], room_hash, 4);          dlen += 4;
+    memcpy(&buf[dlen], &p.post_timestamp, 4);  dlen += 4;
+    memcpy(&buf[dlen], p.origin_id, 4);        dlen += 4;
+    memcpy(&buf[dlen], p.author.pub_key, 4);   dlen += 4;
+    const char* pname = resolveName(p.author.pub_key);
+    uint8_t pname_len = (uint8_t)strlen(pname);
+    if (pname_len > 23) pname_len = 23;
+    buf[dlen++] = pname_len;
+    memcpy(&buf[dlen], pname, pname_len);      dlen += pname_len;
+    int max_tlen = (int)sizeof(buf) - dlen;
+    if (max_tlen < 0) max_tlen = 0;
+    int tlen = strlen(p.text);
+    if (tlen > max_tlen) tlen = max_tlen;
+    memcpy(&buf[dlen], p.text, tlen);          dlen += tlen;
+
+    self_id = rooms[0].id;
+    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
+                               peers[pi].shared_secret, buf, dlen);
+    if (pkt) {
+      sendFlood(pkt, delay_ms, _prefs.path_hash_mode + 1);
+      delay_ms += 500;
+      pushed++;
+    }
+  }
+  Serial.printf("[SYNC] reverse push → peer[%d]: %d post(s) for room[%d]\n",
+                pi, pushed, ri);
+  // Periodic timer (next_sync_at) is intentionally left at its normal 45 s cadence.
+  // No SYNCEND is sent back: avoids infinite ping-pong; next SYNCREQ carries the VV.
 }
 
 /* ------------------------------------------------------------------ */
@@ -3635,6 +4179,14 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply, bool serial) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Notify target CLI (JES-834)                                         */
+/* ------------------------------------------------------------------ */
+// Handled in handleCommand() at the top-level dispatch.
+// "notify <room_idx> add <hex64>"   — add notification target (web+serial)
+// "notify <room_idx> del <hex64>"   — remove notification target (web+serial)
+// "notify <room_idx> list"          — list targets (web+serial)
+
+/* ------------------------------------------------------------------ */
 /*  Peer management — web UI API (JES-816)                              */
 /* ------------------------------------------------------------------ */
 
@@ -3684,9 +4236,11 @@ int MultiRoomMesh::addPeerFromWeb(const uint8_t* pub_key, const char* name) {
                          sizeof(peers[i].name));
       peers[i].last_contact = 0;
       peers[i].secret_valid = false;
-      peers[i].next_sync_at = futureMillis(PEER_SYNC_BOOT_DELAY_MS);
+      peers[i].next_sync_at     = futureMillis(PEER_SYNC_BOOT_DELAY_MS);
+      peers[i].next_roomsync_at = futureMillis(PEER_ROOMSYNC_INTERVAL_MS);  // immediate push below; next in 10 min
       _num_peers++;
       savePeerConfig();
+      sendRoomSync(i);  // JES-848: push all rooms to new peer immediately
       return i;
     }
   }
@@ -3715,6 +4269,160 @@ void MultiRoomMesh::triggerPeerSync(int idx) {
   } else {
     for (int i = 0; i < MAX_PEERS; i++) {
       if (peers[i].active) sendSyncReq(i);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Room-key propagation — JES-848                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Send all active rooms (slots 1+) to peer pi via ECDH-encrypted DM.
+ *
+ * Wire format per room:
+ *   [4:ts][1:flags=TXT_TYPE_ROOMSYNC<<2][1:room_idx][64:prv_key][32:pub_key][name\0]
+ * Total: 4+1+1+96+max24 = max 126 bytes — well within MAX_PACKET_PAYLOAD.
+ *
+ * Room 0 (node identity) is NEVER sent.
+ * SECURITY: private key bytes are in the encrypted payload only — never logged.
+ */
+void MultiRoomMesh::sendRoomSync(int pi) {
+  if (!peers[pi].active) return;
+  calcPeerSecret(pi);
+
+  mesh::Identity peer_id;
+  memset(peer_id.pub_key, 0, PUB_KEY_SIZE);
+  memcpy(peer_id.pub_key, peers[pi].pub_key, PUB_KEY_SIZE);
+
+  uint32_t stagger_ms = 0;
+  int rooms_sent = 0;
+
+  for (int ri = 1; ri < MAX_ROOMS; ri++) {  // room 0 always skipped
+    if (!rooms[ri].active) continue;
+
+    int len = 0;
+    uint32_t now = getRTCClock()->getCurrentTimeUnique();
+    memcpy(&reply_data[len], &now, 4);             len += 4;
+    reply_data[len++] = (TXT_TYPE_ROOMSYNC << 2);
+    reply_data[len++] = (uint8_t)ri;               // room_idx (informational)
+
+    // Write identity: prv_key[64] || pub_key[32] = 96 bytes
+    size_t id_written = rooms[ri].id.writeTo(reply_data + len, sizeof(reply_data) - len);
+    if (id_written != (PRV_KEY_SIZE + PUB_KEY_SIZE)) continue;  // buffer overflow guard
+    len += (int)id_written;
+
+    // Name: null-terminated, max 23 chars
+    uint8_t name_len = (uint8_t)strnlen(rooms[ri].name, 23);
+    memcpy(&reply_data[len], rooms[ri].name, name_len);  len += name_len;
+    reply_data[len++] = 0;  // null terminator
+
+    self_id = rooms[0].id;
+    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
+                               peers[pi].shared_secret, reply_data, len);
+    if (pkt) {
+      sendFlood(pkt, stagger_ms, (uint8_t)(_prefs.path_hash_mode + 1));
+      stagger_ms += 1000;
+      rooms_sent++;
+    }
+  }
+
+  // SECURITY: log only peer name + count — private keys never appear in logs
+  Serial.printf("[ROOMSYNC] sent %d room(s) → peer[%d] '%s'\n",
+                rooms_sent, pi, peers[pi].name);
+}
+
+/**
+ * Handle incoming ROOMSYNC frame from peer pi.
+ *
+ * Wire format: [4:ts][1:flags][1:room_idx][64:prv_key][32:pub_key][name\0]
+ * Minimum valid length: 4+1+1+64+32+1 = 103 bytes.
+ *
+ * Room 0 is NEVER accepted. Deduplicates by pub_key. Fills next free slot.
+ * SECURITY: private key bytes are never logged.
+ */
+void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
+  // Minimum: ts[4] + flags[1] + room_idx[1] + prv[64] + pub[32] + NUL[1] = 103
+  if (len < 103) {
+    Serial.printf("[ROOMSYNC] ignored — frame too short (%u < 103)\n", (unsigned)len);
+    return;
+  }
+
+  // Parse public key at offset 70 (4+1+1+64)
+  const uint8_t* recv_pub = &data[70];
+
+  // Room 0 guard: never accept room 0 identity
+  if (memcmp(recv_pub, rooms[0].id.pub_key, PUB_KEY_SIZE) == 0) {
+    Serial.printf("[ROOMSYNC] rejected — pub matches room0 identity\n");
+    return;
+  }
+
+  // Dedup: skip if we already have a room with this pub_key
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (rooms[i].active && memcmp(rooms[i].id.pub_key, recv_pub, PUB_KEY_SIZE) == 0) {
+      Serial.printf("[ROOMSYNC] skip — room already in slot %d\n", i);
+      return;
+    }
+  }
+
+  // Validate private key (basic format check)
+  const uint8_t* recv_prv = &data[6];
+  if (!mesh::LocalIdentity::validatePrivateKey(recv_prv)) {
+    Serial.printf("[ROOMSYNC] rejected — invalid private key format\n");
+    return;
+  }
+
+  // Find a free slot (slot 0 is node identity, never overwrite)
+  int free_slot = -1;
+  for (int i = 1; i < MAX_ROOMS; i++) {
+    if (!rooms[i].active) { free_slot = i; break; }
+  }
+  if (free_slot < 0) {
+    Serial.printf("[ROOMSYNC] ignored — no free room slots (MAX_ROOMS=%d full)\n", MAX_ROOMS);
+    return;
+  }
+
+  // Install identity: readFrom expects prv[64] || pub[32] = 96 bytes at offset 6
+  rooms[free_slot].id.readFrom(&data[6], PRV_KEY_SIZE + PUB_KEY_SIZE);
+  saveRoomIdentity(free_slot);
+
+  // Extract name (null-terminated at offset 102, max 23 chars)
+  rooms[free_slot].name[0] = 0;
+  if (len > 102) {
+    size_t avail = len - 102;
+    size_t name_len = strnlen((char*)&data[102], avail < 23 ? avail : 23);
+    memcpy(rooms[free_slot].name, &data[102], name_len);
+    rooms[free_slot].name[name_len] = 0;
+  }
+  if (rooms[free_slot].name[0] == 0) {
+    snprintf(rooms[free_slot].name, sizeof(rooms[free_slot].name), "Room%d", free_slot);
+  }
+
+  // Activate slot with safe defaults
+  rooms[free_slot].active          = true;
+  rooms[free_slot].stealth         = true;   // stealth by default (JES-772)
+  rooms[free_slot].guest_password[0] = 0;
+  StrHelper::strncpy(rooms[free_slot].password, _prefs.password,
+                     sizeof(rooms[free_slot].password));
+  _num_active_rooms++;
+  saveRoomConfig();
+
+  // SECURITY: log only 4-byte pub prefix + name — private key never logged
+  Serial.printf("[ROOMSYNC] room '%s' installed in slot %d (pub: %02X%02X%02X%02X) from peer[%d] '%s'\n",
+                rooms[free_slot].name, free_slot,
+                recv_pub[0], recv_pub[1], recv_pub[2], recv_pub[3],
+                pi, peers[pi].name);
+}
+
+/**
+ * Push all active rooms (1+) to one peer (idx >= 0) or all peers (idx == -1).
+ */
+void MultiRoomMesh::triggerRoomSync(int idx) {
+  if (idx >= 0) {
+    if (idx < MAX_PEERS && peers[idx].active) sendRoomSync(idx);
+  } else {
+    for (int i = 0; i < MAX_PEERS; i++) {
+      if (peers[i].active) sendRoomSync(i);
     }
   }
 }

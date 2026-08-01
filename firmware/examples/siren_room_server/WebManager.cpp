@@ -459,30 +459,82 @@ static String base64Encode(const uint8_t* data, size_t len) {
 // ---------------------------------------------------------------------------
 static const char HTML_HEAD_PRE[] PROGMEM =
   "<!DOCTYPE html><html><head>"
-  "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+  "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'>"
+  "<meta charset='utf-8'>"
   "<title>";
 
 static const char HTML_HEAD_POST[] PROGMEM =
   "</title>"
   "<style>"
-  "body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:12px;}"
-  "h2{color:#00d4ff;margin:0 0 8px}"
-  "table{border-collapse:collapse;width:100%;margin-bottom:12px}"
-  "th,td{border:1px solid #333;padding:4px 8px;text-align:left}"
-  "th{background:#2a2a4a;color:#00d4ff}"
-  "form{margin-top:8px}"
-  "input,select{background:#2a2a4a;border:1px solid #555;color:#e0e0e0;padding:4px;margin:2px}"
-  "button{background:#00d4ff;border:none;color:#000;padding:5px 12px;cursor:pointer;margin:2px}"
-  ".card{background:#16213e;border:1px solid #333;padding:10px;margin-bottom:10px;border-radius:4px}"
-  ".ok{color:#00ff88}.err{color:#ff4444}.warn{color:#ffcc00}"
+  /* === Reset & Base === */
+  "*{box-sizing:border-box}"
+  "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+       "background:#0f1117;color:#e0e0e0;margin:0;padding:0;font-size:16px;line-height:1.4}"
+  "h2{color:#00d4ff;font-size:1.1em;margin:0 0 10px;font-weight:600}"
+  "h3{color:#00d4ff;font-size:1em;margin:0 0 8px;font-weight:600}"
   "a{color:#00d4ff}"
+  "code{font-family:monospace;font-size:0.85em;background:#1e2235;padding:1px 4px;border-radius:3px}"
+  /* === Cards === */
+  ".card{background:#16213e;border:1px solid #2a3050;padding:14px;margin-bottom:12px;"
+        "border-radius:8px;overflow-x:auto}"
+  /* === Tables — scrollable on small screens === */
+  "table{border-collapse:collapse;width:100%;margin-bottom:8px;font-size:0.88em}"
+  "th,td{border:1px solid #2a3050;padding:6px 10px;text-align:left}"
+  "th{background:#1e2a4a;color:#00d4ff;white-space:nowrap}"
+  /* === Forms — full-width on mobile === */
+  "form{margin-top:10px}"
+  ".frow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}"
+  ".frow label{color:#aaa;font-size:0.88em;min-width:80px}"
+  "input,select{background:#1e2235;border:1px solid #3a4060;color:#e0e0e0;"
+               "padding:10px 12px;border-radius:6px;font-size:0.95em;"
+               "width:100%;max-width:400px;min-height:44px}"
+  "input[type=number]{max-width:110px}"
+  "input[type=file]{padding:8px;min-height:44px}"
+  "select{min-height:44px}"
+  /* === Buttons === */
+  "button,.btn{background:#00d4ff;border:none;color:#000;padding:10px 18px;"
+              "border-radius:6px;cursor:pointer;font-size:0.95em;font-weight:600;"
+              "min-height:44px;min-width:60px;white-space:nowrap;margin:2px 0}"
+  "button.sec{background:#2a3a4a;color:#e0e0e0;border:1px solid #3a4060}"
+  "button.del{background:#b22222;color:#fff}"
+  "button.warn-btn{background:#cc7700;color:#fff}"
+  /* === Status indicators === */
+  ".ok{color:#00ff88}.err{color:#ff4444}.warn{color:#ffcc00}"
+  /* === Top nav bar === */
+  "#topbar{background:#0d1020;border-bottom:1px solid #2a3050;"
+           "padding:10px 14px;display:flex;align-items:center;justify-content:space-between}"
+  "#topbar h1{font-size:1em;color:#00d4ff;margin:0;font-weight:600}"
+  "#topbar a{color:#aaa;font-size:0.85em;text-decoration:none}"
+  /* === Tab navigation === */
+  "#tabnav{display:flex;overflow-x:auto;background:#0d1020;border-bottom:1px solid #2a3050;"
+           "padding:0 6px;-webkit-overflow-scrolling:touch;scrollbar-width:none}"
+  "#tabnav::-webkit-scrollbar{display:none}"
+  ".tnb{flex:none;padding:12px 16px;color:#aaa;cursor:pointer;border:none;"
+        "background:transparent;font-size:0.9em;font-weight:500;border-bottom:2px solid transparent;"
+        "white-space:nowrap;min-height:44px}"
+  ".tnb.act{color:#00d4ff;border-bottom-color:#00d4ff}"
+  /* === Tab panels === */
+  ".tpanel{display:none;padding:12px 10px}"
+  ".tpanel.act{display:block}"
+  /* === Inline button groups in table cells === */
+  ".btngrp{display:flex;flex-wrap:wrap;gap:4px}"
+  ".btngrp form{margin:0}"
+  ".btngrp button{padding:7px 12px;min-height:36px;font-size:0.82em}"
+  /* === Mono hex display === */
+  ".hex{font-family:monospace;font-size:0.78em;word-break:break-all;color:#aaa}"
+  /* === Responsive overrides for wider screens === */
+  "@media(min-width:600px){"
+    "body{padding:0}"
+    ".tpanel{padding:16px 14px}"
+    "input,select{width:auto}"
+  "}"
   "</style></head><body>";
 
 // Build the HTML <head> with the node name in the <title>.
 static String buildHead(const char* node_name) {
   String h = FPSTR(HTML_HEAD_PRE);
   h += htmlEscape(node_name);
-  h += F(" Room Server");
+  h += F(" \u2014 SIREN");
   h += FPSTR(HTML_HEAD_POST);
   return h;
 }
@@ -492,22 +544,27 @@ static const char HTML_FOOT[] PROGMEM = "</body></html>";
 String WebManager::buildChatPage() {
   String page = buildHead(_mesh.getNodeName());
 
-  // Tab CSS (scoped to this page)
-  page += "<style>.tab{background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;"
-          "padding:5px 14px;cursor:pointer;border-radius:4px;margin:2px}"
-          ".tab.act{background:#00d4ff;color:#000}</style>";
+  // Tab CSS for chat room tabs (uses room-tab class to avoid conflict with top nav)
+  page += "<style>"
+          ".rtab{background:#1e2235;color:#aaa;border:1px solid #2a3050;"
+                "padding:9px 16px;cursor:pointer;border-radius:6px;margin:2px;"
+                "font-size:0.9em;min-height:40px;border:none}"
+          ".rtab.act{background:#00d4ff;color:#000;font-weight:600}"
+          "</style>";
 
-  // Nav back to management UI
-  page += "<div class='card'><h2>Rooms &mdash; ";
+  // Top bar with back link
+  page += "<div id='topbar'>"
+          "<h1>&#128172; Rooms &mdash; ";
   page += htmlEscape(_mesh.getNodeName());
-  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
+  page += "</h1>"
+          "<a href='/'>&#8592; Beheer</a></div>";
 
-  // Tab bar — one tab per active room; htmlEscape ensures XSS safety for labels
+  // Tab bar — one tab per active room (skip room 0: identity-only, JES-846)
   int _firstRoom = -1;
-  page += "<div style='display:flex;flex-wrap:wrap;gap:4px'>";
-  for (int i = 0; i < MAX_ROOMS; i++) {
+  page += "<div style='display:flex;flex-wrap:wrap;gap:6px;padding:10px 10px 0'>";
+  for (int i = 1; i < MAX_ROOMS; i++) {
     if (!_mesh.isRoomActive(i)) continue;
-    page += "<button class='tab";
+    page += "<button class='rtab";
     page += (_firstRoom < 0 ? " act" : "");
     page += "' onclick='selTab(this,";
     page += i;
@@ -516,41 +573,41 @@ String WebManager::buildChatPage() {
     page += "</button>";
     if (_firstRoom < 0) _firstRoom = i;
   }
-  page += "</div></div>";
-
-  // Chat pane: messages + nicklist
-  page += "<div style='display:flex;gap:10px;align-items:flex-start'>";
-
-  // Messages column
-  page += "<div class='card' style='flex:1;min-width:0'>";
-  page += "<div id='msgs' style='height:320px;overflow-y:auto;background:#0d0d1a;"
-          "border:1px solid #333;padding:6px;font-size:0.9em'></div>";
-  page += "<form id='post-form' onsubmit='postMsg(event)' style='margin-top:6px'>"
-          "<input id='post-txt' style='width:75%' maxlength='140' "
-          "placeholder='Bericht als operator (max 140 tekens)...'> "
-          "<button type='submit'>Post</button></form>";
   page += "</div>";
 
-  // Nicklist column — names are clickable to open DM
-  page += "<div class='card' style='min-width:120px;width:140px'>"
-          "<b style='color:#00d4ff'>Users</b>"
-          "<div id='nicks' style='font-size:0.85em;margin-top:6px'></div>"
-          "</div>";
+  // Messages box — full width on mobile
+  page += "<div style='padding:10px'>";
+  page += "<div id='msgs' style='height:50vh;min-height:200px;max-height:420px;"
+          "overflow-y:auto;background:#0d0d1a;border:1px solid #2a3050;"
+          "padding:8px;font-size:0.9em;border-radius:6px'></div>";
+  page += "<form id='post-form' onsubmit='postMsg(event)' style='margin-top:8px;display:flex;gap:6px'>"
+          "<input id='post-txt' style='flex:1;min-width:0' maxlength='140' "
+          "placeholder='Bericht als operator...'>"
+          "<button type='submit' style='flex:none'>Post</button></form>";
 
-  page += "</div>";  // flex pane
+  // Nicklist (collapsed by default on mobile, toggle button)
+  page += "<div style='margin-top:8px'>"
+          "<button class='sec' onclick='toggleNicks()' style='width:100%;text-align:left'>"
+          "&#128100; Users <span id='nick-count'></span> &#9660;</button>"
+          "<div id='nicks' style='display:none;background:#1e2235;border:1px solid #2a3050;"
+          "border-radius:0 0 6px 6px;padding:8px;font-size:0.9em'></div>"
+          "</div>";
 
   // DM pane (hidden until a user is clicked)
-  page += "<div id='dm-pane' class='card' style='display:none'>"
-          "<div style='display:flex;justify-content:space-between;align-items:center'>"
+  page += "<div id='dm-pane' style='display:none;margin-top:8px;background:#16213e;"
+          "border:1px solid #2a3050;border-radius:8px;padding:12px'>"
+          "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>"
           "<b id='dm-title' style='color:#ffcc00'>DM</b>"
-          "<button onclick='closeDm()' style='font-size:0.75em'>&#x2715; Sluiten</button>"
+          "<button class='sec' onclick='closeDm()' style='min-height:36px;padding:4px 12px'>&#x2715; Sluiten</button>"
           "</div>"
           "<div id='dm-msgs' style='height:200px;overflow-y:auto;background:#0d0d1a;"
-          "border:1px solid #333;padding:6px;font-size:0.9em;margin-top:6px'></div>"
-          "<form id='dm-form' onsubmit='sendDm(event)' style='margin-top:6px'>"
-          "<input id='dm-txt' style='width:75%' maxlength='140' placeholder='Privébericht...'> "
-          "<button type='submit'>Stuur</button></form>"
+          "border:1px solid #2a3050;padding:8px;font-size:0.9em;border-radius:6px'></div>"
+          "<form id='dm-form' onsubmit='sendDm(event)' style='margin-top:8px;display:flex;gap:6px'>"
+          "<input id='dm-txt' style='flex:1;min-width:0' maxlength='140' placeholder='Privébericht...'>"
+          "<button type='submit' style='flex:none'>Stuur</button></form>"
           "</div>";
+
+  page += "</div>";  // padding wrapper
 
   // Inline JS — uses textContent (not innerHTML) for safe display
   page += "<script>\n";
@@ -559,11 +616,15 @@ String WebManager::buildChatPage() {
   page += "function selTab(btn,idx){\n"
           "  room=idx;since=0;\n"
           "  document.getElementById('msgs').innerHTML='';\n"
-          "  var ts=document.querySelectorAll('.tab');\n"
+          "  var ts=document.querySelectorAll('.rtab');\n"
           "  for(var i=0;i<ts.length;i++)ts[i].classList.remove('act');\n"
           "  btn.classList.add('act');\n"
           "  clearTimeout(pollT);clearTimeout(nickT);\n"
           "  fetchMsgs();fetchNicks();\n"
+          "}\n"
+          "function toggleNicks(){\n"
+          "  var n=document.getElementById('nicks');\n"
+          "  n.style.display=(n.style.display==='none'?'block':'none');\n"
           "}\n"
           "function delPost(ridx,oid,pts,el){\n"
           "  if(!confirm('Verwijder dit bericht?'))return;\n"
@@ -610,9 +671,12 @@ String WebManager::buildChatPage() {
           "  .then(function(r){return r.json();})\n"
           "  .then(function(data){\n"
           "    var box=document.getElementById('nicks');\n"
+          "    var cnt=document.getElementById('nick-count');\n"
+          "    if(cnt)cnt.textContent='('+data.length+')';\n"
           "    box.innerHTML='';\n"
           "    data.forEach(function(n){\n"
           "      var d=document.createElement('div');\n"
+          "      d.style.padding='4px 0';\n"
           "      d.style.color=(n.role>=3?'#ffcc00':(n.role>=2?'#00ff88':'#aaa'));\n"
           "      d.style.cursor='pointer';\n"
           "      d.title='Klik om te DM\\'en';\n"
@@ -697,11 +761,12 @@ String WebManager::buildChatPage() {
 String WebManager::buildAclPage() {
   String page = buildHead(_mesh.getNodeName());
 
-  page += "<div class='card'><h2>ACL &mdash; ";
+  page += "<div id='topbar'><h1>&#128100; ACL &mdash; ";
   page += htmlEscape(_mesh.getNodeName());
-  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>"
-          "<p style='color:#aaa;font-size:0.85em'>Beheer wie in elke room mag schrijven. "
-          "Sla op om rechten direct te wijzigen (geen herstart nodig).</p></div>";
+  page += "</h1><a href='/'>&#8592; Beheer</a></div>"
+          "<div style='padding:10px'>"
+          "<p style='color:#aaa;font-size:0.88em;margin:0 0 10px'>Beheer wie in elke room mag schrijven. "
+          "Sla op om rechten direct te wijzigen (geen herstart nodig).</p>";
 
   // Role labels
   static const char* ROLE_NAMES[] = { "GUEST (geen toegang)", "Read-only", "Read-write", "ADMIN" };
@@ -767,6 +832,170 @@ String WebManager::buildAclPage() {
     page += "</div>";
   }
 
+  page += "</div>";  // padding wrapper
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
+
+/* ---- /api/stats JSON (JES-800) ----------------------------------------- */
+String WebManager::buildStatsJson() {
+  MultiRoomMesh& mesh = _mesh;
+  String j = "{";
+  // Totals
+  j += "\"uptime_s\":";      j += (unsigned long)(mesh.getUptimeMillis() / 1000UL);
+  j += ",\"total_posts\":";  j += (unsigned long)mesh.getTotalPosts();
+  j += ",\"total_contacts\":"; j += (int)mesh.getTotalContacts();
+  j += ",\"num_rooms\":";    j += mesh.getNumActiveRooms();
+
+  // Histogram (newest bucket = index 0)
+  j += ",\"hist\":[";
+  for (int b = 0; b < HIST_BUCKETS; b++) {
+    if (b) j += ",";
+    j += (unsigned)mesh.getHistBucket(b);
+  }
+  j += "]";
+
+  // Per-room array
+  j += ",\"rooms\":[";
+  bool first_room = true;
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!mesh.isRoomActive(i)) continue;
+    if (!first_room) j += ",";
+    first_room = false;
+    int nc = mesh.getRoomNumClients(i);
+    int adm = 0, rw = 0, ro = 0, guest = 0;
+    for (int k = 0; k < nc; k++) {
+      auto c = mesh.getRoomClient(i, k);
+      if (!c) continue;
+      switch (c->permissions & PERM_ACL_ROLE_MASK) {
+        case PERM_ACL_ADMIN:      adm++;   break;
+        case PERM_ACL_READ_WRITE: rw++;    break;
+        case PERM_ACL_READ_ONLY:  ro++;    break;
+        default:                  guest++; break;
+      }
+    }
+    j += "{\"idx\":"; j += i;
+    j += ",\"name\":\""; j += jsonEscape(mesh.getRoomName(i)); j += "\"";
+    j += ",\"posts\":"; j += mesh.getRoomPostCount(i);
+    j += ",\"clients\":"; j += nc;
+    j += ",\"admin\":"; j += adm;
+    j += ",\"rw\":"; j += rw;
+    j += ",\"ro\":"; j += ro;
+    j += ",\"guest\":"; j += guest;
+
+    // Per-client array (public info only — no private keys/passwords)
+    j += ",\"users\":[";
+    bool first_u = true;
+    for (int k = 0; k < nc; k++) {
+      auto c = mesh.getRoomClient(i, k);
+      if (!c) continue;
+      if (!first_u) j += ",";
+      first_u = false;
+      char hex[9];
+      mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+      const char* nm = mesh.resolveName(c->id.pub_key);
+      uint8_t role = c->permissions & PERM_ACL_ROLE_MASK;
+      j += "{\"pub\":\""; j += hex; j += "\"";
+      j += ",\"name\":\""; j += jsonEscape(nm); j += "\"";
+      j += ",\"role\":"; j += (int)role;
+      j += ",\"hops\":";
+      if (c->out_path_len == OUT_PATH_UNKNOWN) j += "-1";
+      else j += (int)c->out_path_len;
+      j += ",\"rssi\":"; j += (int)c->last_rssi;
+      j += ",\"snr\":";  j += (int)c->last_snr;
+      j += ",\"msgs\":"; j += (unsigned)c->msg_count;
+      j += "}";
+    }
+    j += "]}";
+  }
+  j += "]}";
+  return j;
+}
+
+/* ---- /stats HTML page (JES-800) ----------------------------------------- */
+String WebManager::buildStatsPage() {
+  MultiRoomMesh& mesh = _mesh;
+  String page = buildHead(mesh.getNodeName());
+
+  page += "<div id='topbar'><h1>&#128200; Statistieken &mdash; ";
+  page += htmlEscape(mesh.getNodeName());
+  page += "</h1><a href='/'>&#8592; Beheer</a></div>"
+          "<div style='padding:10px'>";
+
+  // Totals summary
+  unsigned long upSec = (unsigned long)(mesh.getUptimeMillis() / 1000UL);
+  unsigned long d = upSec / 86400, h = (upSec % 86400) / 3600;
+  unsigned long m = (upSec % 3600) / 60, s = upSec % 60;
+  page += "<table><tr><th>Uptime</th><td>";
+  char uptimeBuf[32];
+  snprintf(uptimeBuf, sizeof(uptimeBuf), "%lud %02lu:%02lu:%02lu", d, h, m, s);
+  page += uptimeBuf;
+  page += "</td></tr><tr><th>Actieve rooms</th><td>"; page += mesh.getNumActiveRooms();
+  page += "</td></tr><tr><th>Totaal berichten</th><td>"; page += (unsigned long)mesh.getTotalPosts();
+  page += "</td></tr><tr><th>Totaal contacts</th><td>"; page += (int)mesh.getTotalContacts();
+  page += "</td></tr></table></div>";
+
+  // Per-room tables
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!mesh.isRoomActive(i)) continue;
+    int nc = mesh.getRoomNumClients(i);
+    page += "<div class='card'><h3>Room ";
+    page += i; page += " &mdash; "; page += htmlEscape(mesh.getRoomName(i));
+    page += " (";  page += nc; page += " clients, ";
+    page += mesh.getRoomPostCount(i); page += " berichten)</h3>";
+    if (nc == 0) {
+      page += "<p style='color:#aaa'>Geen verbonden clients.</p>";
+    } else {
+      page += "<table><tr><th>Pubkey</th><th>Naam</th><th>Rol</th><th>Hops</th>"
+              "<th>RSSI</th><th>SNR</th><th>Berichten</th></tr>";
+      for (int k = 0; k < nc; k++) {
+        auto c = mesh.getRoomClient(i, k);
+        if (!c) continue;
+        char hex[9];
+        mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+        const char* nm = mesh.resolveName(c->id.pub_key);
+        uint8_t role = c->permissions & PERM_ACL_ROLE_MASK;
+        const char* role_s = (role == PERM_ACL_ADMIN) ? "admin"
+                           : (role == PERM_ACL_READ_WRITE) ? "rw"
+                           : (role == PERM_ACL_READ_ONLY)  ? "ro" : "guest";
+        page += "<tr><td><code>"; page += hex; page += "</code></td>";
+        page += "<td>"; page += htmlEscape(nm); page += "</td>";
+        page += "<td>"; page += role_s; page += "</td>";
+        page += "<td>";
+        if (c->out_path_len == OUT_PATH_UNKNOWN) page += "?";
+        else { page += (int)c->out_path_len; }
+        page += "</td><td>"; page += (int)c->last_rssi;
+        page += "</td><td>"; page += (int)c->last_snr;
+        page += "</td><td>"; page += (unsigned)c->msg_count;
+        page += "</td></tr>";
+      }
+      page += "</table>";
+    }
+    page += "</div>";
+  }
+
+  // 24-hour message histogram (CSS bar chart)
+  page += "<div class='card'><h3>Berichtenhistogram (24u)</h3>";
+  uint16_t maxVal = 1;
+  for (int b = 0; b < HIST_BUCKETS; b++) {
+    uint16_t v = mesh.getHistBucket(b);
+    if (v > maxVal) maxVal = v;
+  }
+  page += "<div style='display:flex;align-items:flex-end;gap:2px;height:80px;"
+          "background:#1a1a2e;padding:4px;border-radius:4px'>";
+  for (int b = HIST_BUCKETS - 1; b >= 0; b--) {
+    uint16_t v = mesh.getHistBucket(b);
+    int pct = (int)((uint32_t)v * 100 / maxVal);
+    page += "<div title='-"; page += b; page += "h: "; page += (unsigned)v;
+    page += "' style='flex:1;background:#00d4ff;height:";
+    page += pct; page += "%;min-height:2px'></div>";
+  }
+  page += "</div>";
+  page += "<p style='font-size:0.8em;color:#aaa'>"
+          "Elke balk = 1 uur. Links = 23 uur geleden, rechts = huidig uur.</p>";
+  page += "</div>";
+
+  page += "</div>";  // padding wrapper
   page += FPSTR(HTML_FOOT);
   return page;
 }
@@ -779,34 +1008,84 @@ String WebManager::buildStatusPage(const char* ip) {
 
   String page = buildHead(mesh.getNodeName());
 
-  // Node info
-  page += "<div class='card'><h2>";
+  // ---- Top bar ----
+  page += "<div id='topbar'><h1>";
   page += htmlEscape(mesh.getNodeName());
-  page += " Room Server</h2>";
+  page += " Room Server</h1></div>";
+
+  // ---- Tab nav bar ----
+  page += "<div id='tabnav'>"
+          "<button class='tnb act' onclick='showTab(0)'>Status</button>"
+          "<button class='tnb' onclick='showTab(1)'>Rooms</button>"
+          "<button class='tnb' onclick='showTab(2)'>Netwerk</button>"
+          "<button class='tnb' onclick='showTab(3)'>Systeem</button>"
+          "</div>"
+          "<script>"
+          "function showTab(n){"
+            "var ps=document.querySelectorAll('.tpanel');"
+            "var bs=document.querySelectorAll('.tnb');"
+            "for(var i=0;i<ps.length;i++){ps[i].classList.remove('act');bs[i].classList.remove('act');}"
+            "ps[n].classList.add('act');bs[n].classList.add('act');"
+          "}"
+          "function editRoom(i,n){"
+            "showTab(1);"
+            "document.getElementById('editIdx').value=i;"
+            "document.getElementById('editName').value=n;"
+            "document.getElementById('editClearPass').checked=false;"
+            "document.getElementById('editClearGuest').checked=false;"
+            "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
+          "}"
+          "</script>";
+
+  // ================================================================
+  // TAB 0: STATUS
+  // ================================================================
+  page += "<div class='tpanel act'>";
+
+  // Node summary card
+  page += "<div class='card'>";
   page += "<table>";
-  page += "<tr><th>Node</th><td>"; page += mesh.getNodeName(); page += "</td></tr>";
-  page += "<tr><th>WiFi Mode</th><td>"; page += (mode == MODE_AP ? "AP (hotspot)" : "STA (client)"); page += "</td></tr>";
-  page += "<tr><th>IP</th><td>"; page += ip; page += "</td></tr>";
-  page += "<tr><th>Firmware</th><td>" FIRMWARE_VERSION " (" FIRMWARE_BUILD_DATE ")</td></tr>";
-  page += "<tr><th>Active Rooms</th><td>"; page += mesh.getNumActiveRooms();
+  page += "<tr><th>Firmware</th><td>" FIRMWARE_VERSION "</td></tr>";
+  page += "<tr><th>Build</th><td>" FIRMWARE_BUILD_DATE "</td></tr>";
+  page += "<tr><th>WiFi</th><td>"; page += (mode == MODE_AP ? "AP (hotspot)" : "STA (client)");
+  page += "</td></tr><tr><th>IP</th><td>"; page += ip;
+  page += "</td></tr><tr><th>Rooms actief</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
   page += "</table>";
   // Server name edit form (JES-828)
-  page += "<form method='post' action='/api/node/name' style='margin:6px 0'>"
-          "Server naam: <input name=\"name\" value=\"";
+  page += "<form method='post' action='/api/node/name' style='margin-top:12px'>"
+          "<label style='display:block;color:#aaa;font-size:0.88em;margin-bottom:4px'>Server naam</label>"
+          "<div style='display:flex;gap:6px'>"
+          "<input name='name' value='";
   page += htmlEscape(mesh.getNodeName());
-  page += "\" maxlength='31' size='20'> "
-          "<button type='submit'>Opslaan</button></form>"
-          "<p style='font-size:0.85em;color:#aaa'>CLI: <code>set name &lt;naam&gt;</code></p>";
-  page += "<p><a href='/chat'><button>&#128172; Rooms</button></a>"
-          " &mdash; berichten per kanaal bekijken en posten als operator</p>"
-          "<p><a href='/acl'><button>&#128100; ACL beheer</button></a>"
-          " &mdash; rechten per gebruiker instellen (lees/schrijf/admin)</p>"
-          "</div>";
+  page += "' maxlength='31' style='flex:1;min-width:0'>"
+          "<button type='submit' style='flex:none'>Opslaan</button></div></form>";
+  page += "</div>";
 
-  // Rooms table
+  // Quick navigation cards
+  page += "<div class='card'>"
+          "<div style='display:flex;flex-direction:column;gap:8px'>"
+          "<a href='/chat' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128172; Rooms &mdash; berichten bekijken en posten</button>"
+          "</a>"
+          "<a href='/acl' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128100; ACL beheer &mdash; rechten per gebruiker</button>"
+          "</a>"
+          "<a href='/stats' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128200; Statistieken &mdash; RSSI/SNR, histogram</button>"
+          "</a>"
+          "</div></div>";
+
+  page += "</div>";  // end tab 0
+
+  // ================================================================
+  // TAB 1: ROOMS
+  // ================================================================
+  page += "<div class='tpanel'>";
+
+  // Rooms overview table
   page += "<div class='card'><h2>Rooms</h2>";
-  page += "<table><tr><th>#</th><th>Name</th><th>Stealth</th><th>Clients</th><th>Posts</th><th>Actions</th></tr>";
+  page += "<table><tr><th>#</th><th>Naam</th><th>Status</th><th>Clients</th><th>Posts</th><th>Acties</th></tr>";
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!mesh.isRoomActive(i)) continue;
     bool stealth_i = mesh.isRoomStealth(i);
@@ -816,27 +1095,31 @@ String WebManager::buildStatusPage(const char* ip) {
     page += stealth_i ? "<span class='warn'>STEALTH</span>" : "<span class='ok'>VISIBLE</span>";
     page += "</td><td>"; page += mesh.getRoomClientCount(i);
     page += "</td><td>"; page += mesh.getRoomPostCount(i);
-    page += "</td><td>";
-    // Per-room stealth toggle
-    page += "<form method='post' action='/api/room/stealth' style='display:inline'>"
+    page += "</td><td><div class='btngrp'>";
+    // Edit button — pre-fills the edit form below and scrolls to it
+    {
+      page += "<button type='button' data-idx='"; page += i;
+      page += "' data-name=\""; page += htmlEscape(mesh.getRoomName(i));
+      page += "\" onclick=\"editRoom(this.dataset.idx,this.dataset.name)\">Bewerken</button>";
+    }
+    // Stealth toggle
+    page += "<form method='post' action='/api/room/stealth'>"
             "<input type='hidden' name='idx' value='"; page += i;
     page += "'><input type='hidden' name='stealth' value='";
     page += stealth_i ? "off" : "on";
     page += "'><button type='submit'>";
-    page += stealth_i ? "Make Visible" : "Hide";
+    page += stealth_i ? "Zichtbaar" : "Verberg";
     page += "</button></form>";
-    // QR join code button
-    page += " <a href='/api/room/qr?idx="; page += i;
+    // QR join
+    page += "<a href='/api/room/qr?idx="; page += i;
     page += "' style='text-decoration:none'><button>QR</button></a>";
-    // Rekey button — double-confirm via JS prompt (type room name or REKEY for room 0).
-    // Room name stored in data-exp attribute (htmlEscape covers & < > "); JS reads via
-    // dataset to avoid JS-string-literal injection (single-quote breakout).
+    // Rekey — dataset avoids JS-string-literal injection
     {
       const char* exp_name = (i == 0) ? "REKEY" : mesh.getRoomName(i);
-      page += " <form method='post' action='/api/room/rekey' style='display:inline'>"
+      page += "<form method='post' action='/api/room/rekey'>"
               "<input type='hidden' name='idx' value='"; page += i;
       page += "'><input type='hidden' name='confirm' value=''>"
-              "<button type='button' data-exp=\""; page += htmlEscape(exp_name);
+              "<button type='button' class='warn-btn' data-exp=\""; page += htmlEscape(exp_name);
       page += "\" onclick=\""
               "var e=this.dataset.exp;"
               "var w="; page += (i == 0) ? "'Room 0 = node-identiteit. Alle peer-links verbreken!'" : "'Bestaande QR-codes en join-URIs worden ongeldig.'";
@@ -849,148 +1132,31 @@ String WebManager::buildStatusPage(const char* ip) {
               "\">Rekey</button></form>";
     }
     if (i > 0) {
-      page += " <form method='post' action='/api/room/del' style='display:inline'>"
+      page += "<form method='post' action='/api/room/del'>"
               "<input type='hidden' name='idx' value='"; page += i;
-      page += "'><button onclick=\"return confirm('Delete room "; page += i;
+      page += "'><button class='del' onclick=\"return confirm('Delete room "; page += i;
       page += "?')\">Del</button></form>";
     }
-    page += "</td></tr>";
+    page += "</div></td></tr>";
   }
   page += "</table>";
-  page += "<form method='post' action='/api/room/add'>"
-          "<button type='submit'>+ Add Room</button></form></div>";
-
-  // Peer-koppeling (JES-816)
-  {
-    // Own node pubkey (rooms[0]) — share this with the other node's operator
-    const uint8_t* own_pub = mesh.getRoomPubKey(0);
-    char own_hex[65] = {};
-    if (own_pub) {
-      for (int b = 0; b < PUB_KEY_SIZE; b++)
-        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
-    }
-    page += "<div class='card'><h2>Peer-koppeling (Multi-room Replicatie)</h2>";
-    page += "<p><b>Eigen node pubkey</b> &mdash; geef dit aan de operator van de andere node:<br>"
-            "<code style='word-break:break-all;font-size:0.85em'>";
-    page += own_hex;
-    page += "</code></p>";
-
-    // Peers table
-    int np = mesh.getNumPeers();
-    page += "<p>"; page += np; page += " / "; page += MAX_PEERS; page += " peers geconfigureerd</p>";
-    if (np > 0) {
-      page += "<table><tr><th>#</th><th>Naam</th><th>Pubkey prefix</th><th>Laatste contact</th><th>Acties</th></tr>";
-      for (int i = 0; i < MAX_PEERS; i++) {
-        const PeerInfo* peer = mesh.getPeer(i);
-        if (!peer || !peer->active) continue;
-        char pfx[9] = {};
-        for (int b = 0; b < 4; b++)
-          snprintf(pfx + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
-        page += "<tr><td>"; page += i;
-        page += "</td><td>"; page += htmlEscape(peer->name);
-        page += "</td><td><code>"; page += pfx; page += "...</code>";
-        page += "</td><td>";
-        page += (peer->last_contact > 0 ? String((unsigned long)peer->last_contact) : "nooit");
-        page += "</td><td>";
-        page += "<form method='post' action='/api/peer/sync' style='display:inline'>"
-                "<input type='hidden' name='idx' value='"; page += i;
-        page += "'><button type='submit'>Sync</button></form> ";
-        page += "<form method='post' action='/api/peer/del' style='display:inline'>"
-                "<input type='hidden' name='idx' value='"; page += i;
-        page += "'><button onclick=\"return confirm('Peer "; page += i;
-        page += " verwijderen?')\">Del</button></form>";
-        page += "</td></tr>";
-      }
-      page += "</table>";
-    }
-
-    // Add peer form
-    page += "<br><b>Peer toevoegen</b> (voer de volledige 64-char hex pubkey in van de andere node)<br>"
-            "<form method='post' action='/api/peer/add'>"
-            "Pubkey: <input name='pub' size='36' maxlength='64' placeholder='64 hex chars' required> "
-            "Naam: <input name='name' size='16' maxlength='23'> "
-            "<button type='submit'>Toevoegen</button></form>";
-
-    // Sync all button
-    page += "<form method='post' action='/api/peer/sync' style='margin-top:6px'>"
-            "<button type='submit'>Sync All Nu</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>CLI (serial): "
-            "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code> &nbsp; "
-            "<code>peer del &lt;idx&gt;</code> &nbsp; "
-            "<code>peer sync</code></p>"
-            "</div>";
-
-    // Sync diagnostics panel (JES-833) — fetches /api/sync/status every 10 s
-    page += "<div class='card'><h2>Sync Diagnostiek</h2>"
-            "<div id='sync-panel'><p>Laden...</p></div>"
-            "<p style='font-size:0.8em;color:#aaa'>Auto-refresh 10s &bull; RAM-counters (reset bij reboot) &bull; "
-            "<code>sync status</code> voor serial CLI</p></div>"
-            "<script>"
-            "function renderSync(d){"
-              "var el=document.getElementById('sync-panel');"
-              "if(!el)return;"
-              "while(el.firstChild)el.removeChild(el.firstChild);"
-              // Counters paragraph
-              "var cp=document.createElement('p');"
-              "cp.textContent='SYNCREQ: '+d.counters.sync_req_sent"
-                "+'  |  SYNCDAT: '+d.counters.sync_dat_recv"
-                "+'  |  Posts ontvangen: '+d.counters.sync_posts_recv"
-                "+'  |  Posts verzonden: '+d.counters.sync_posts_sent;"
-              "el.appendChild(cp);"
-              // Room hashes paragraph
-              "if(d.rooms&&d.rooms.length){"
-                "var rp=document.createElement('p');"
-                "var rb=document.createElement('b');rb.textContent='Room hashes: ';rp.appendChild(rb);"
-                "d.rooms.forEach(function(r){"
-                  "var s=document.createElement('span');"
-                  "s.textContent='['+r.idx+'] '+r.name+' ('+r.hash+'...)  ';"
-                  "rp.appendChild(s);"
-                "});"
-                "el.appendChild(rp);"
-              "}"
-              // Peers table
-              "if(!d.peers||!d.peers.length){"
-                "var np=document.createElement('p');np.textContent='Geen peers.';el.appendChild(np);return;"
-              "}"
-              "var tbl=document.createElement('table');"
-              "var hr=document.createElement('tr');"
-              "['#','Naam','Status','SYNCREQ ts','SYNCDAT ts','SYNCEND ts','Recv','Sent'].forEach(function(h){"
-                "var th=document.createElement('th');th.textContent=h;hr.appendChild(th);"
-              "});"
-              "tbl.appendChild(hr);"
-              "d.peers.forEach(function(p){"
-                "var tr=document.createElement('tr');"
-                "[p.idx,p.name,p.status,"
-                  "p.last_syncreq_ts||'-',p.last_syncdat_ts||'-',p.last_syncend_ts||'-',"
-                  "p.sync_posts_recv,p.sync_posts_sent"
-                "].forEach(function(v){"
-                  "var td=document.createElement('td');td.textContent=v;tr.appendChild(td);"
-                "});"
-                "tbl.appendChild(tr);"
-              "});"
-              "el.appendChild(tbl);"
-            "}"
-            "function loadSync(){"
-              "fetch('/api/sync/status')"
-                ".then(function(r){return r.json();})"
-                ".then(renderSync)"
-                ".catch(function(){"
-                  "var el=document.getElementById('sync-panel');"
-                  "if(el){var e=document.createElement('p');e.textContent='Fout bij ophalen.';el.appendChild(e);}"
-                "});"
-            "}"
-            "loadSync();setInterval(loadSync,10000);"
-            "</script>";
-  }
+  page += "<form method='post' action='/api/room/add' style='margin-top:8px'>"
+          "<button type='submit'>+ Room toevoegen</button></form></div>";
 
   // Edit room form
-  page += "<div class='card'><h2>Edit Room</h2>"
+  page += "<div class='card' id='editCard'><h2>Room bewerken</h2>"
           "<form method='post' action='/api/room/set'>"
-          "Idx: <input name='idx' size='3'> "
-          "Name: <input name='name' size='20'> "
-          "Pass: <input name='pass' size='16'> "
-          "Guest: <input name='guest' size='16'> "
-          "<button type='submit'>Save</button></form></div>";
+          "<div class='frow'><label>Idx</label><input id='editIdx' name='idx' type='number' min='0' max='15'></div>"
+          "<div class='frow'><label>Naam</label><input id='editName' name='name' maxlength='23'></div>"
+          "<div class='frow'><label>Wachtwoord</label>"
+          "<input name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
+          "<label style='font-size:0.85em;font-weight:normal'>"
+          "<input type='checkbox' id='editClearPass' name='clear_pass' value='1'> wissen</label></div>"
+          "<div class='frow'><label>Gast-ww</label>"
+          "<input name='guest' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
+          "<label style='font-size:0.85em;font-weight:normal'>"
+          "<input type='checkbox' id='editClearGuest' name='clear_guest' value='1'> wissen</label></div>"
+          "<button type='submit'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle
   {
@@ -1001,30 +1167,104 @@ String WebManager::buildStatusPage(const char* ip) {
       any_active = true;
       if (!mesh.isRoomStealth(i)) { all_stealth = false; break; }
     }
-    page += "<div class='card'><h2>Visibility</h2>";
+    page += "<div class='card'><h2>Zichtbaarheid</h2>";
     if (any_active && all_stealth) {
-      page += "<p>All rooms: <b class='warn'>STEALTH</b> — no adverts sent. "
-              "Rooms are joinable if you know the key (QR / out-of-band).</p>";
+      page += "<p>Alle rooms: <b class='warn'>STEALTH</b> &mdash; geen adverts verstuurd. "
+              "Rooms zijn joinbaar via QR/uri als je de sleutel kent.</p>";
     } else {
-      page += "<p>One or more rooms: <b class='ok'>VISIBLE</b> — adverts active.</p>";
+      page += "<p>Een of meer rooms: <b class='ok'>ZICHTBAAR</b> &mdash; adverts actief.</p>";
     }
-    page += "<form method='post' action='/api/stealth'>"
-            "<button name='stealth' value='off'>Make All Visible</button> "
-            "<button name='stealth' value='on' onclick=\"return confirm('Hide all rooms? They stop broadcasting adverts.')\">Hide All (Stealth)</button>"
-            "</form>"
-            "<p style='font-size:0.85em;color:#aaa'>Per-room: use the toggle buttons in the Rooms table above, "
-            "or CLI: <code>room stealth &lt;idx&gt; on|off</code></p>";
+    page += "<div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px'>"
+            "<form method='post' action='/api/stealth'>"
+            "<button name='stealth' value='off'>Alles zichtbaar</button></form>"
+            "<form method='post' action='/api/stealth'>"
+            "<button class='warn-btn' name='stealth' value='on' "
+            "onclick=\"return confirm('Alle rooms verbergen? Adverts stoppen.')\">Alles verbergen</button></form>"
+            "</div>";
     char adv_sec_str[8];
     snprintf(adv_sec_str, sizeof(adv_sec_str), "%d", (int)mesh.getAdvertIntervalSec());
-    page += "<form method='post' action='/api/advert/interval' style='margin-top:0.5em'>"
-            "Advert interval (when visible): <input name='seconds' type='number' min='10' max='3600' value='";
+    page += "<form method='post' action='/api/advert/interval'>"
+            "<div class='frow'><label>Advert interval</label>"
+            "<input name='seconds' type='number' min='10' max='3600' value='";
     page += adv_sec_str;
-    page += "' size='6'> s "
-            "<button type='submit'>Save</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>Range 10&ndash;3600 s, default 120 s. "
-            "CLI: <code>advert interval &lt;seconds&gt;</code></p>"
+    page += "'> s</div>"
+            "<button type='submit'>Opslaan</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "10&ndash;3600 s, standaard 120 s. CLI: <code>advert interval &lt;s&gt;</code></p>"
             "</div>";
   }
+
+  // Login notification targets (JES-834)
+  {
+    page += "<div class='card'><h2>Login Notificaties</h2>"
+            "<p style='font-size:0.85em;color:#aaa'>"
+            "Stuur een DM naar deze pubkeys bij elke inlogpoging. Max ";
+    page += MAX_NOTIFY_TARGETS;
+    page += " per room.</p>";
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (!mesh.isRoomActive(i)) continue;
+      int cnt = mesh.getNotifyTargetCount(i);
+      page += "<p><b>Room "; page += i; page += " &mdash; ";
+      page += htmlEscape(mesh.getRoomName(i));
+      page += "</b> ("; page += cnt; page += "/"; page += MAX_NOTIFY_TARGETS; page += ")";
+      if (cnt > 0) {
+        page += "<br>";
+        for (int t = 0; t < cnt; t++) {
+          const uint8_t* k = mesh.getNotifyTarget(i, t);
+          char hex[65] = {};
+          for (int b = 0; b < PUB_KEY_SIZE; b++) snprintf(hex + b * 2, 3, "%02x", k[b]);
+          page += "<code>"; page += String(hex).substring(0, 8); page += "&hellip;</code> ";
+          page += "<form method='post' action='/api/room/notify/del' style='display:inline'>"
+                  "<input type='hidden' name='idx' value='"; page += i; page += "'>"
+                  "<input type='hidden' name='pubkey' value='"; page += hex; page += "'>"
+                  "<button type='submit' style='min-height:32px;padding:2px 10px'>&#x2715;</button>"
+                  "</form> ";
+        }
+      }
+      if (cnt < MAX_NOTIFY_TARGETS) {
+        page += "<form method='post' action='/api/room/notify/add' style='margin-top:6px'>"
+                "<input type='hidden' name='idx' value='"; page += i; page += "'>"
+                "<input name='pubkey' maxlength='64' placeholder='64-hex pubkey van companion'>"
+                "<button type='submit' style='margin-top:6px'>Toevoegen</button>"
+                "</form>";
+      }
+      page += "</p>";
+    }
+    page += "</div>";
+  }
+
+  page += "</div>";  // end tab 1
+
+  // ================================================================
+  // TAB 2: NETWERK
+  // ================================================================
+  page += "<div class='tpanel'>";
+
+  // WiFi config
+  page += "<div class='card'><h2>WiFi</h2>";
+  page += "<form method='post' action='/api/wifi/mode'>"
+          "<div class='frow'><label>Mode</label><select name='mode'>"
+          "<option value='ap'"; page += (mode == MODE_AP ? " selected" : ""); page += ">AP (eigen hotspot)</option>"
+          "<option value='sta'"; page += (mode == MODE_STA ? " selected" : ""); page += ">STA (verbinden met netwerk)</option>"
+          "</select></div>"
+          "<button type='submit'>Wissel modus</button></form>";
+
+  page += "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>AP instellingen</h3>"
+          "<form method='post' action='/api/wifi/ap'>"
+          "<div class='frow'><label>SSID</label><input name='ssid' value='"; page += ap_ssid;
+  page += "' maxlength='32'></div>"
+          "<div class='frow'><label>Wachtwoord</label><input name='pass' type='password' maxlength='63' placeholder='leeg = open'></div>"
+          "<button type='submit'>AP opslaan</button></form>";
+
+  page += "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>STA instellingen</h3>"
+          "<form method='post' action='/api/wifi/sta'>"
+          "<div class='frow'><label>SSID</label><input name='ssid' value='"; page += sta_ssid;
+  page += "' maxlength='32'></div>"
+          "<div class='frow'><label>Wachtwoord</label><input name='pass' type='password' maxlength='63'></div>"
+          "<button type='submit'>STA opslaan &amp; verbinden</button></form>"
+          "<p style='margin-top:8px'>Huidig IP: <b>"; page += ip; page += "</b></p></div>";
 
   // LoRa radio settings
   {
@@ -1045,11 +1285,9 @@ String WebManager::buildStatusPage(const char* ip) {
     page += "</td></tr><tr><th>TX Power</th><td>"; page += tx_str;
     page += " dBm</td></tr></table>";
 
-    page += "<form method='post' action='/api/lora'>"
-            "Freq (MHz): <input name='freq' value='"; page += freq_str;
-    page += "' size='10'> "
-            "BW (kHz): <select name='bw'>";
-
+    page += "<form method='post' action='/api/lora' style='margin-top:10px'>";
+    page += "<div class='frow'><label>Freq (MHz)</label><input name='freq' value='"; page += freq_str; page += "'></div>";
+    page += "<div class='frow'><label>BW (kHz)</label><select name='bw'>";
     static const float BW_OPTS[]   = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f};
     static const char* BW_LABELS[] = {"7.80","10.40","15.60","20.80","31.25","41.70","62.50","125.00","250.00","500.00"};
     for (int i = 0; i < 10; i++) {
@@ -1057,59 +1295,177 @@ String WebManager::buildStatusPage(const char* ip) {
       if (fabsf(BW_OPTS[i] - p->bw) < 0.5f) page += "' selected='selected";
       page += "'>"; page += BW_LABELS[i]; page += "</option>";
     }
-    page += "</select> "
-            "SF: <select name='sf'>";
+    page += "</select></div>";
+    page += "<div class='frow'><label>SF</label><select name='sf'>";
     for (int sf = 5; sf <= 12; sf++) {
       page += "<option value='"; page += sf;
       if (sf == (int)p->sf) page += "' selected='selected";
       page += "'>SF"; page += sf; page += "</option>";
     }
-    page += "</select> "
-            "CR: <select name='cr'>";
+    page += "</select></div>";
+    page += "<div class='frow'><label>CR</label><select name='cr'>";
     for (int cr = 5; cr <= 8; cr++) {
       page += "<option value='"; page += cr;
       if (cr == (int)p->cr) page += "' selected='selected";
       page += "'>4/"; page += cr; page += "</option>";
     }
-    page += "</select> "
-            "TX (dBm): <input name='txpower' value='"; page += tx_str;
-    page += "' size='4' type='number' min='2' max='22'> "
-            "<button type='submit'>Save LoRa</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>Freq/BW/SF/CR changes require reboot to apply. TX power is live.</p>"
-            "</div>";
+    page += "</select></div>";
+    page += "<div class='frow'><label>TX (dBm)</label><input name='txpower' value='"; page += tx_str;
+    page += "' type='number' min='2' max='22'></div>";
+    page += "<button type='submit'>LoRa opslaan</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "Freq/BW/SF/CR vereisen herstart. TX power is live.</p></div>";
   }
 
-  // WiFi config
-  page += "<div class='card'><h2>WiFi</h2>";
-  page += "<form method='post' action='/api/wifi/mode'>"
-          "Mode: <select name='mode'>"
-          "<option value='ap'"; page += (mode == MODE_AP ? " selected" : ""); page += ">AP (own hotspot)</option>"
-          "<option value='sta'"; page += (mode == MODE_STA ? " selected" : ""); page += ">STA (connect to network)</option>"
-          "</select> <button type='submit'>Switch Mode</button></form>";
+  // Peer-koppeling (JES-816)
+  {
+    const uint8_t* own_pub = mesh.getRoomPubKey(0);
+    char own_hex[65] = {};
+    if (own_pub) {
+      for (int b = 0; b < PUB_KEY_SIZE; b++)
+        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    }
+    page += "<div class='card'><h2>Peer-koppeling</h2>";
+    page += "<p style='font-size:0.88em;color:#aaa'>Eigen node pubkey &mdash; geef dit aan de operator van de andere node:</p>"
+            "<p class='hex'>"; page += own_hex; page += "</p>";
 
-  page += "<br><b>AP Settings</b>"
-          "<form method='post' action='/api/wifi/ap'>"
-          "SSID: <input name='ssid' value='"; page += ap_ssid;
-  page += "' size='24'> "
-          "Password: <input name='pass' type='password' size='24' placeholder='empty=open'> "
-          "<button type='submit'>Save AP</button></form>";
+    int np = mesh.getNumPeers();
+    page += "<p style='margin:6px 0'>"; page += np; page += " / "; page += MAX_PEERS; page += " peers</p>";
+    if (np > 0) {
+      page += "<table><tr><th>#</th><th>Naam</th><th>Pubkey</th><th>Contact</th><th>Acties</th></tr>";
+      for (int i = 0; i < MAX_PEERS; i++) {
+        const PeerInfo* peer = mesh.getPeer(i);
+        if (!peer || !peer->active) continue;
+        char pfx[9] = {};
+        for (int b = 0; b < 4; b++)
+          snprintf(pfx + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
+        page += "<tr><td>"; page += i;
+        page += "</td><td>"; page += htmlEscape(peer->name);
+        page += "</td><td><code>"; page += pfx; page += "&hellip;</code>";
+        page += "</td><td>";
+        page += (peer->last_contact > 0 ? String((unsigned long)peer->last_contact) : "nooit");
+        page += "</td><td><div class='btngrp'>";
+        page += "<form method='post' action='/api/peer/sync'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button type='submit'>Sync</button></form>";
+        page += "<form method='post' action='/api/peer/roomsync'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button type='submit'>Rooms</button></form>";
+        page += "<form method='post' action='/api/peer/del'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button class='del' onclick=\"return confirm('Peer "; page += i;
+        page += " verwijderen?')\">Del</button></form>";
+        page += "</div></td></tr>";
+      }
+      page += "</table>";
+    }
+    page += "<h3 style='margin-top:12px'>Peer toevoegen</h3>"
+            "<form method='post' action='/api/peer/add'>"
+            "<div class='frow'><label>Pubkey</label><input name='pub' maxlength='64' placeholder='64 hex chars' required></div>"
+            "<div class='frow'><label>Naam</label><input name='name' maxlength='23'></div>"
+            "<button type='submit'>Toevoegen</button></form>";
+    page += "<form method='post' action='/api/peer/sync' style='margin-top:8px'>"
+            "<button type='submit'>Sync All Nu</button></form>"
+            "<form method='post' action='/api/peer/roomsync' style='margin-top:4px'>"
+            "<button type='submit'>Rooms Sync (stuur rooms naar peers)</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>CLI: "
+            "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code></p></div>";
 
-  page += "<br><b>STA Settings</b>"
-          "<form method='post' action='/api/wifi/sta'>"
-          "SSID: <input name='ssid' value='"; page += sta_ssid;
-  page += "' size='24'> "
-          "Password: <input name='pass' type='password' size='24'> "
-          "<button type='submit'>Save STA &amp; Connect</button></form>"
-          "<p>Current IP: <b>"; page += ip;
-  page += "</b></p></div>";
+    // Sync interval (JES-844)
+    {
+      char sync_sec_str[8];
+      snprintf(sync_sec_str, sizeof(sync_sec_str), "%lu", (unsigned long)mesh.getSyncIntervalSec());
+      page += "<div class='card'><h2>Sync Interval</h2>"
+              "<form method='post' action='/api/sync/interval'>"
+              "<div class='frow'><label>Anti-entropy interval</label>"
+              "<input name='seconds' type='number' min='10' max='3600' value='";
+      page += sync_sec_str;
+      page += "'> s</div>"
+              "<button type='submit'>Opslaan</button></form>"
+              "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+              "10&ndash;3600 s, standaard 180 s. CLI: <code>sync interval &lt;s&gt;</code><br>"
+              "Nieuwe berichten worden instant gepusht; dit interval is de periodieke controle.</p>"
+              "</div>";
+    }
+
+    // Sync diagnostics panel (JES-833)
+    page += "<div class='card'><h2>Sync Diagnostiek</h2>"
+            "<div id='sync-panel'><p style='color:#aaa'>Laden...</p></div>"
+            "<p style='font-size:0.8em;color:#aaa'>Auto-refresh 10s &bull; RAM-counters (reset bij reboot)</p></div>"
+            "<script>"
+            "function renderSync(d){"
+              "var el=document.getElementById('sync-panel');"
+              "if(!el)return;"
+              "while(el.firstChild)el.removeChild(el.firstChild);"
+              "var cp=document.createElement('p');"
+              "cp.style.fontSize='0.85em';"
+              "cp.textContent='REQ: '+d.counters.sync_req_sent"
+                "+'  DAT: '+d.counters.sync_dat_recv"
+                "+'  Recv: '+d.counters.sync_posts_recv"
+                "+'  Sent: '+d.counters.sync_posts_sent;"
+              "el.appendChild(cp);"
+              "if(d.rooms&&d.rooms.length){"
+                "var rp=document.createElement('p');"
+                "rp.style.fontSize='0.82em';"
+                "var rb=document.createElement('b');rb.textContent='Room hashes: ';rp.appendChild(rb);"
+                "d.rooms.forEach(function(r){"
+                  "var s=document.createElement('span');"
+                  "s.textContent='['+r.idx+'] '+r.name+' ('+r.hash+'...)  ';"
+                  "rp.appendChild(s);"
+                "});"
+                "el.appendChild(rp);"
+              "}"
+              "if(!d.peers||!d.peers.length){"
+                "var np=document.createElement('p');np.textContent='Geen peers.';el.appendChild(np);return;"
+              "}"
+              "var tbl=document.createElement('table');"
+              "var hr=document.createElement('tr');"
+              "['#','Naam','Status','Recv','Sent'].forEach(function(h){"
+                "var th=document.createElement('th');th.textContent=h;hr.appendChild(th);"
+              "});"
+              "tbl.appendChild(hr);"
+              "d.peers.forEach(function(p){"
+                "var tr=document.createElement('tr');"
+                "[p.idx,p.name,p.status,p.sync_posts_recv,p.sync_posts_sent"
+                "].forEach(function(v){"
+                  "var td=document.createElement('td');td.textContent=v;tr.appendChild(td);"
+                "});"
+                "tbl.appendChild(tr);"
+              "});"
+              "el.appendChild(tbl);"
+            "}"
+            "function loadSync(){"
+              "fetch('/api/sync/status')"
+                ".then(function(r){return r.json();})"
+                ".then(renderSync)"
+                ".catch(function(){"
+                  "var el=document.getElementById('sync-panel');"
+                  "if(el){var e=document.createElement('p');e.textContent='Fout.';el.appendChild(e);}"
+                "});"
+            "}"
+            "loadSync();setInterval(loadSync,10000);"
+            "</script>";
+  }
+
+  page += "</div>";  // end tab 2
+
+  // ================================================================
+  // TAB 3: SYSTEEM
+  // ================================================================
+  page += "<div class='tpanel'>";
 
   // Backup / Restore
   page += "<div class='card'><h2>Backup &amp; Restore</h2>";
-  page += "<p><a href='/api/backup'><button>Download Backup</button></a> "
-          "— exports all settings + private keys as JSON</p>";
+  page += "<a href='/api/backup' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px;margin-bottom:8px'>"
+          "&#8681; Download backup</button></a>"
+          "<p style='font-size:0.82em;color:#aaa;margin-bottom:10px'>"
+          "Exporteert alle instellingen + private keys als JSON.</p>";
   page += "<form method='post' action='/api/restore' enctype='multipart/form-data'>"
-          "Restore: <input type='file' name='backup' accept='.json'> "
-          "<button type='submit' onclick=\"return confirm('Restore will overwrite all settings and reboot. Continue?')\">Restore &amp; Reboot</button>"
+          "<label style='display:block;color:#aaa;font-size:0.88em;margin-bottom:6px'>Backup bestand</label>"
+          "<input type='file' name='backup' accept='.json' style='margin-bottom:8px'>"
+          "<button type='submit' class='del' style='width:100%' "
+          "onclick=\"return confirm('Restore overschrijft alle instellingen en herstart. Doorgaan?')\">&#8679; Restore &amp; Herstart</button>"
           "</form></div>";
 
   // Varia — screensaver / OLED settings
@@ -1117,41 +1473,26 @@ String WebManager::buildStatusPage(const char* ip) {
     bool    ss_on    = _ui_task->isSsEnabled();
     bool    keep_on  = _ui_task->isSsKeepOn();
     uint8_t page_sec = _ui_task->getSsPageSec();
-    page += "<div class='card'><h2>Varia</h2>";
-    page += "<p><b>Screensaver (OLED)</b> &mdash; cycles stats on screen to prevent burn-in "
-            "and keeps the display alive on units with glued buttons.</p>";
-    page += "<form method='post' action='/api/screensaver'>"
-            "Screensaver: <select name='ss'>"
-            "<option value='on'";
-    page += ss_on ? " selected" : "";
-    page += ">ON (aanbevolen)</option>"
-            "<option value='off'";
-    page += !ss_on ? " selected" : "";
-    page += ">OFF</option>"
-            "</select> "
-            "Keep screen on (when SS off): <select name='keep'>"
-            "<option value='off'";
-    page += !keep_on ? " selected" : "";
-    page += ">Uit na 60s</option>"
-            "<option value='on'";
-    page += keep_on ? " selected" : "";
-    page += ">Altijd aan</option>"
-            "</select>"
-            " &nbsp; Wisseltijd: <select name='interval'>";
-    // Selectable page-dwell times in seconds
+    page += "<div class='card'><h2>Scherm (OLED)</h2>";
+    page += "<p style='font-size:0.85em;color:#aaa'>Screensaver beschermt het OLED-scherm tegen inbranding.</p>";
+    page += "<form method='post' action='/api/screensaver'>";
+    page += "<div class='frow'><label>Screensaver</label><select name='ss'>"
+            "<option value='on'"; page += ss_on ? " selected" : ""; page += ">Aan (aanbevolen)</option>"
+            "<option value='off'"; page += !ss_on ? " selected" : ""; page += ">Uit</option>"
+            "</select></div>";
+    page += "<div class='frow'><label>Scherm aan</label><select name='keep'>"
+            "<option value='off'"; page += !keep_on ? " selected" : ""; page += ">Uit na 60s</option>"
+            "<option value='on'"; page += keep_on ? " selected" : ""; page += ">Altijd aan</option>"
+            "</select></div>";
+    page += "<div class='frow'><label>Wisseltijd</label><select name='interval'>";
     const uint8_t opts[] = {1, 2, 3, 5, 10, 15, 20, 30, 60};
     for (int i = 0; i < (int)(sizeof(opts)/sizeof(opts[0])); i++) {
       page += String("<option value='") + opts[i] + "'";
       if (opts[i] == page_sec) page += " selected";
       page += String(">") + opts[i] + "s</option>";
     }
-    page += "</select> "
-            "<button type='submit'>Opslaan</button></form>"
-            "<p style='font-size:0.85em;color:#aaa'>CLI: "
-            "<code>screensaver on|off</code> &nbsp; "
-            "<code>screensaver keep-on on|off</code> &nbsp; "
-            "<code>screensaver interval &lt;1-60&gt;</code></p>"
-            "</div>";
+    page += "</select></div>";
+    page += "<button type='submit'>Opslaan</button></form></div>";
   }
 
   // MQTT section (JES-792)
@@ -1159,8 +1500,14 @@ String WebManager::buildStatusPage(const char* ip) {
     page += _mqtt_mgr->buildWebSection();
   }
 
-  // OTA link
-  page += "<div class='card'><a href='/update'>OTA Firmware Update</a></div>";
+  // GitHub self-update (JES-774)
+  page += _ota_mgr.buildWebSection();
+
+  // Legacy ElegantOTA serial-upload link (fallback)
+  page += "<div class='card'><p style='font-size:0.85em'>"
+          "<a href='/update'>Handmatige OTA upload (ElegantOTA)</a></p></div>";
+
+  page += "</div>";  // end tab 3
 
   page += FPSTR(HTML_FOOT);
   return page;
@@ -1172,10 +1519,13 @@ String WebManager::buildStatusPage(const char* ip) {
 static String buildQrPage(MultiRoomMesh& mesh, int idx) {
   String page = buildHead(mesh.getNodeName());
 
+  page += "<div id='topbar'><h1>QR Join</h1><a href='/'>&#8592; Beheer</a></div>"
+          "<div style='padding:10px'>";
+
   if (idx < 0 || idx >= MAX_ROOMS || !mesh.isRoomActive(idx)) {
     page += "<div class='card'><p class='err'>Room ";
     page += idx;
-    page += " is not active.</p><p><a href='/'>&#8592; Back</a></p></div>";
+    page += " is niet actief.</p><p><a href='/'>&#8592; Terug</a></p></div>";
     page += FPSTR(HTML_FOOT);
     return page;
   }
@@ -1285,7 +1635,8 @@ static String buildQrPage(MultiRoomMesh& mesh, int idx) {
             "This QR is the only out-of-band join path.</p>";
   }
 
-  page += "<p><a href='/'>&#8592; Back</a></p></div>";
+  page += "<p><a href='/'>&#8592; Terug</a></p></div>"
+          "</div>";  // padding wrapper
   page += FPSTR(HTML_FOOT);
   return page;
 }
@@ -1304,7 +1655,7 @@ void WebManager::setupRoutes() {
     String ip = (_mode == MODE_AP)
       ? WiFi.softAPIP().toString()
       : WiFi.localIP().toString();
-    req->send(200, "text/html", buildStatusPage(ip.c_str()));
+    req->send(200, "text/html; charset=utf-8", buildStatusPage(ip.c_str()));
   });
 
   // API: set server (node) name (JES-828)
@@ -1327,6 +1678,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/add", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       char reply[160] = {};
       _mesh.handleCommand(0, (char*)"room add", reply);
       req->redirect("/");
@@ -1374,6 +1726,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/set", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
       const String& idx = req->getParam("idx", true)->value();
       char cmd[160], reply[160];
@@ -1383,12 +1736,18 @@ void WebManager::setupRoutes() {
                  req->getParam("name", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      if (req->hasParam("pass", true) && req->getParam("pass", true)->value().length()) {
+      if (req->hasParam("clear_pass", true) && req->getParam("clear_pass", true)->value() == "1") {
+        snprintf(cmd, sizeof(cmd), "room set %s pass ", idx.c_str());
+        _mesh.handleCommand(0, cmd, reply);
+      } else if (req->hasParam("pass", true) && req->getParam("pass", true)->value().length()) {
         snprintf(cmd, sizeof(cmd), "room set %s pass %s", idx.c_str(),
                  req->getParam("pass", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      if (req->hasParam("guest", true) && req->getParam("guest", true)->value().length()) {
+      if (req->hasParam("clear_guest", true) && req->getParam("clear_guest", true)->value() == "1") {
+        snprintf(cmd, sizeof(cmd), "room set %s guest ", idx.c_str());
+        _mesh.handleCommand(0, cmd, reply);
+      } else if (req->hasParam("guest", true) && req->getParam("guest", true)->value().length()) {
         snprintf(cmd, sizeof(cmd), "room set %s guest %s", idx.c_str(),
                  req->getParam("guest", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
@@ -1410,6 +1769,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/stealth", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true) || !req->hasParam("stealth", true)) {
         req->send(400, "text/plain", "missing idx or stealth"); return;
       }
@@ -1427,6 +1787,17 @@ void WebManager::setupRoutes() {
       int sec = req->getParam("seconds", true)->value().toInt();
       if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
       _mesh.setAdvertIntervalSec((uint16_t)sec);
+      req->redirect("/");
+    });
+
+  // API: set anti-entropy sync interval (seconds) — JES-844
+  _server.on("/api/sync/interval", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("seconds", true)) { req->send(400, "text/plain", "missing seconds"); return; }
+      int sec = req->getParam("seconds", true)->value().toInt();
+      if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
+      _mesh.setSyncIntervalSec((uint32_t)sec);
       req->redirect("/");
     });
 
@@ -1454,7 +1825,7 @@ void WebManager::setupRoutes() {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       if (!req->hasParam("idx")) { req->send(400, "text/plain", "missing idx"); return; }
       int idx = req->getParam("idx")->value().toInt();
-      req->send(200, "text/html", buildQrPage(_mesh, idx));
+      req->send(200, "text/html; charset=utf-8", buildQrPage(_mesh, idx));
     });
 
   // API: switch WiFi mode
@@ -1550,7 +1921,7 @@ void WebManager::setupRoutes() {
               "<p class='ok'>Settings applied. Rebooting in 2 seconds...</p>"
               "<p><a href='/'>Back</a></p></div>";
         pg += FPSTR(HTML_FOOT);
-        req->send(200, "text/html", pg);
+        req->send(200, "text/html; charset=utf-8", pg);
         delay(2000);
         ESP.restart();
       } else {
@@ -1559,7 +1930,7 @@ void WebManager::setupRoutes() {
               "<p class='err'>Invalid or incompatible backup file (version mismatch?).</p>"
               "<p><a href='/'>Back</a></p></div>";
         pg += FPSTR(HTML_FOOT);
-        req->send(400, "text/html", pg);
+        req->send(400, "text/html; charset=utf-8", pg);
       }
     },
     // onUpload — accumulate file chunks into _restore_buf
@@ -1681,18 +2052,18 @@ void WebManager::setupRoutes() {
   // GET /chat — IRC-style channel/messages/nicklist page
   _server.on("/chat", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
-    req->send(200, "text/html", buildChatPage());
+    req->send(200, "text/html; charset=utf-8", buildChatPage());
   });
 
   // GET /api/chat/messages?room=<idx>&since=<ts>
   _server.on("/api/chat/messages", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
 
-    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 1;
     uint32_t since_ts = req->hasParam("since") ? (uint32_t)req->getParam("since")->value().toInt() : 0;
 
-    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
-      req->send(400, "application/json", "[]"); return;
+    if (room_idx <= 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;  // JES-846: room 0 rejected
     }
 
     const PostInfo* pool = _mesh.getPostPool();
@@ -1743,9 +2114,9 @@ void WebManager::setupRoutes() {
   _server.on("/api/chat/nicks", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
 
-    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
-    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
-      req->send(400, "application/json", "[]"); return;
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 1;
+    if (room_idx <= 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;  // JES-846: room 0 rejected
     }
 
     String json = _mesh.buildNickJson(room_idx);
@@ -1763,8 +2134,8 @@ void WebManager::setupRoutes() {
     }
     int room_idx = req->getParam("room", true)->value().toInt();
     const String& text = req->getParam("text", true)->value();
-    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
-      req->send(400, "text/plain", "invalid room"); return;
+    if (room_idx <= 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room (use 1+, room 0 is identity-only)\"}"); return;  // JES-846
     }
     if (text.length() == 0) { req->send(400, "text/plain", "empty text"); return; }
     // Length clamp happens inside addServerPost -> addPost
@@ -1815,7 +2186,7 @@ void WebManager::setupRoutes() {
 
   _server.on("/acl", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
-    req->send(200, "text/html", buildAclPage());
+    req->send(200, "text/html; charset=utf-8", buildAclPage());
   });
 
   // GET /api/acl?room=<idx>  — JSON array of clients for that room
@@ -1898,6 +2269,7 @@ void WebManager::setupRoutes() {
   // POST /api/peer/add (body: pub=<64hex>&name=<name>)
   _server.on("/api/peer/add", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
     if (!req->hasParam("pub", true)) { req->send(400, "text/plain", "missing pub"); return; }
     const String& pub_str = req->getParam("pub", true)->value();
     // Validate: must be exactly 64 hex characters
@@ -1931,6 +2303,7 @@ void WebManager::setupRoutes() {
   // POST /api/peer/del (body: idx=<n>)
   _server.on("/api/peer/del", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
     if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
     int idx = req->getParam("idx", true)->value().toInt();
     bool ok = _mesh.delPeerFromWeb(idx);
@@ -1941,6 +2314,7 @@ void WebManager::setupRoutes() {
   // POST /api/room/delpost (body: room_idx=N&origin_id=XXXXXXXX&post_ts=T) — admin only (JES-824)
   _server.on("/api/room/delpost", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
     if (!req->hasParam("room_idx", true) || !req->hasParam("origin_id", true) ||
         !req->hasParam("post_ts", true)) {
       req->send(400, "application/json", "{\"error\":\"missing params\"}"); return;
@@ -1976,6 +2350,84 @@ void WebManager::setupRoutes() {
     }
   });
 
+  // GET /api/room/notify?idx=N — list login-notification targets for a room (JES-834)
+  _server.on("/api/room/notify", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("idx")) { req->send(400, "application/json", "{\"error\":\"missing idx\"}"); return; }
+    int idx = req->getParam("idx")->value().toInt();
+    if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    String j = "{\"idx\":";
+    j += idx;
+    j += ",\"targets\":[";
+    int cnt = _mesh.getNotifyTargetCount(idx);
+    for (int i = 0; i < cnt; i++) {
+      const uint8_t* k = _mesh.getNotifyTarget(idx, i);
+      char hex[65] = {};
+      for (int b = 0; b < PUB_KEY_SIZE; b++) {
+        snprintf(hex + b * 2, 3, "%02x", k[b]);
+      }
+      if (i > 0) j += ",";
+      j += "{\"pub_key\":\"";
+      j += hex;
+      j += "\",\"pub_prefix\":\"";
+      j += String(hex).substring(0, 8);
+      j += "\"}";
+    }
+    j += "]}";
+    req->send(200, "application/json", j);
+  });
+
+  // POST /api/room/notify/add (body: idx=N&pubkey=<64hex>) — add notification target (JES-834)
+  _server.on("/api/room/notify/add", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+    if (!req->hasParam("idx", true) || !req->hasParam("pubkey", true)) {
+      req->send(400, "application/json", "{\"error\":\"missing idx or pubkey\"}"); return;
+    }
+    int idx = req->getParam("idx", true)->value().toInt();
+    if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    const String& pub_str = req->getParam("pubkey", true)->value();
+    if ((int)pub_str.length() != PUB_KEY_SIZE * 2) {
+      req->send(400, "application/json", "{\"error\":\"pubkey must be 64 hex chars\"}"); return;
+    }
+    uint8_t key[PUB_KEY_SIZE];
+    if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, pub_str.c_str())) {
+      req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
+    }
+    if (_mesh.addNotifyTarget(idx, key)) {
+      req->redirect("/");
+    } else {
+      req->send(400, "application/json", "{\"error\":\"target list full\"}");
+    }
+  });
+
+  // POST /api/room/notify/del (body: idx=N&pubkey=<64hex>) — remove notification target (JES-834)
+  _server.on("/api/room/notify/del", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+    if (!req->hasParam("idx", true) || !req->hasParam("pubkey", true)) {
+      req->send(400, "application/json", "{\"error\":\"missing idx or pubkey\"}"); return;
+    }
+    int idx = req->getParam("idx", true)->value().toInt();
+    if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    const String& pub_str = req->getParam("pubkey", true)->value();
+    if ((int)pub_str.length() != PUB_KEY_SIZE * 2) {
+      req->send(400, "application/json", "{\"error\":\"pubkey must be 64 hex chars\"}"); return;
+    }
+    uint8_t key[PUB_KEY_SIZE];
+    if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, pub_str.c_str())) {
+      req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
+    }
+    _mesh.delNotifyTarget(idx, key);
+    req->redirect("/");
+  });
+
   // POST /api/peer/sync (body: idx=<n> optional — omit for all peers)
   _server.on("/api/peer/sync", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
@@ -1984,6 +2436,17 @@ void WebManager::setupRoutes() {
       idx = req->getParam("idx", true)->value().toInt();
     }
     _mesh.triggerPeerSync(idx);
+    req->redirect("/");
+  });
+
+  // POST /api/peer/roomsync — push all local rooms to one or all peers (JES-848)
+  _server.on("/api/peer/roomsync", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    int idx = -1;  // -1 = all peers
+    if (req->hasParam("idx", true) && req->getParam("idx", true)->value().length() > 0) {
+      idx = req->getParam("idx", true)->value().toInt();
+    }
+    _mesh.triggerRoomSync(idx);
     req->redirect("/");
   });
 
@@ -2046,6 +2509,67 @@ void WebManager::setupRoutes() {
     req->send(200, "application/json", j);
   });
 
+  // GET /stats — statistics page (JES-800)
+  _server.on("/stats", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    req->send(200, "text/html; charset=utf-8", buildStatsPage());
+  });
+
+  // GET /api/stats — statistics JSON (JES-800)
+  _server.on("/api/stats", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", buildStatsJson());
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // ---------------------------------------------------------------------------
+  // OTA self-update (JES-774)
+  // ---------------------------------------------------------------------------
+
+  // POST /api/ota/check — trigger async version-manifest check
+  _server.on("/api/ota/check", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      _ota_mgr.startCheck();
+      req->redirect("/");
+    });
+
+  // POST /api/ota/update — trigger async OTA download+flash
+  // Only effective when an update is available (OtaManager enforces this).
+  _server.on("/api/ota/update", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      if (!_ota_mgr.startUpdate()) {
+        req->send(400, "text/plain",
+          "Geen update beschikbaar — voer eerst 'Controleer op update' uit");
+        return;
+      }
+      req->redirect("/");
+    });
+
+  // GET /api/ota/status — JSON status (progress, state, versions)
+  _server.on("/api/ota/status", HTTP_GET,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      String j = "{\"current_version\":\"" FIRMWARE_VERSION "\""
+                 ",\"hw_target\":\"" SIREN_HARDWARE_TARGET "\"";
+      j += ",\"available_version\":\"";
+      j += jsonEscape(_ota_mgr.getAvailableVersion());
+      j += "\",\"state\":";
+      j += (int)_ota_mgr.getState();
+      j += ",\"progress\":";
+      j += _ota_mgr.getProgress();
+      j += ",\"error\":\"";
+      j += jsonEscape(_ota_mgr.getErrorMsg());
+      j += "\"}";
+      AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", j);
+      resp->addHeader("Cache-Control", "no-store");
+      req->send(resp);
+    });
+
   // ---------------------------------------------------------------------------
   // Captive portal detection — respond to OS probes so device opens the UI
   // automatically. Android expects 204 on /generate_204; Apple/Windows want
@@ -2094,6 +2618,21 @@ void WebManager::setupRoutes() {
 // ---------------------------------------------------------------------------
 void WebManager::begin() {
   loadConfig();
+
+#if defined(SIREN_DEFAULT_STA_SSID)
+  // Provisioning: if no STA credentials configured yet, apply build-time defaults.
+  if (_sta_ssid[0] == 0) {
+    strncpy(_sta_ssid, SIREN_DEFAULT_STA_SSID, sizeof(_sta_ssid) - 1);
+    _sta_ssid[sizeof(_sta_ssid) - 1] = 0;
+#if defined(SIREN_DEFAULT_STA_PASS)
+    strncpy(_sta_pass, SIREN_DEFAULT_STA_PASS, sizeof(_sta_pass) - 1);
+    _sta_pass[sizeof(_sta_pass) - 1] = 0;
+#endif
+    _mode = MODE_STA;
+    saveConfig();
+    Serial.printf("[WiFi] Provisioned STA from build defaults: '%s'\n", _sta_ssid);
+  }
+#endif
 
   // Ensure AP SSID is set (use node name if default/empty after config load)
   if (_ap_ssid[0] == 0) {

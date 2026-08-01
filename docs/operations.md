@@ -97,15 +97,6 @@ MeshCore uses ESP-IDF OTA with two app partitions. If the new firmware fails to 
 
 **Warning**: Full re-flash erases all configuration (room identities, member lists, radio settings, WiFi credentials). Have a backup before doing this if you care about the existing room identities.
 
-### Recovery: No USB, OTA-only device (Unit B)
-
-If a device has no working USB and a bad OTA image is installed:
-1. The device may still create its WiFi AP if the boot gets far enough
-2. Attempt to access `http://192.168.4.1` and use the OTA update page
-3. If the device cannot start its WiFi stack, it is unrecoverable without USB access
-
-**This is why we test on Unit A (USB available) before sending any OTA to Unit B.**
-
 ---
 
 ## Radio Verification
@@ -126,18 +117,64 @@ If the OLED is unreadable or unavailable, verify radio settings via:
 
 ---
 
+## GitHub Self-Update (JES-774)
+
+When the device is in **STA mode** (connected to the internet via WiFi), it can
+download and flash its own firmware directly from the GitHub repository.
+
+### Via Web UI
+
+1. Open the web management page → **Firmware Update** card (near the bottom).
+2. Click **Controleer op update** — the device fetches
+   `dist/version.json` from GitHub and shows whether an update is available.
+3. If a newer version is listed, click **Nu bijwerken**.
+4. A progress bar shows download progress.  The page auto-refreshes.
+5. The device reboots automatically after a successful flash.
+
+### Via CLI (serial or mesh)
+
+```
+ota check          # fetch manifest, report available version
+ota update         # download + flash (only works after 'ota check')
+ota status         # show current state / progress
+```
+
+### How it works
+
+| Step | Detail |
+|------|--------|
+| Manifest | Fetches `https://raw.githubusercontent.com/DinXke/SIREN/multiroom/dist/version.json` over HTTPS |
+| Version check | Compares manifest `version` field to compiled-in `FIRMWARE_VERSION` |
+| Download | Streams `dist/heltec_v3/SIREN_v3_room_server.bin` (or v4 on V4 hardware) |
+| Integrity | SHA-256 of downloaded bytes verified against manifest before any partition change |
+| Flash | Written to inactive OTA partition via `esp_ota_*` API |
+| Rollback | `esp_ota_mark_app_valid_cancel_rollback()` called in `setup()` — bad images auto-rollback |
+| Settings | SPIFFS and NVS are never touched — all channels/keys/prefs survive |
+
+### Failure modes
+
+| Error | Cause | Resolution |
+|-------|-------|------------|
+| `manifest HTTP 0` / DNS error | Device not in STA mode or no internet | Enable STA + connect WiFi |
+| `manifest HTTP 404` | Branch / path changed on GitHub | Check `dist/version.json` is on `multiroom` branch |
+| `SHA-256 mismatch` | Download corrupted or wrong file | Retry; check manifest matches committed binary |
+| `no inactive OTA partition` | Partition table has no second app slot | Should not occur with `partitions_siren.csv`; re-flash full image |
+| `esp_ota_write: 0x102` | Image too large for partition | Firmware grew beyond 3.1 MB — rebuild with size reduction |
+
+---
+
 ## OTA Update Checklist
 
-Before sending an OTA update to any device, especially Unit B (no USB):
+Before sending an OTA update to any device:
 
-- [ ] New firmware has been built with `pio run -e SIREN_v3_room_server`
-- [ ] Build succeeded with no errors; RAM ≤ 95%, Flash ≤ 95%
-- [ ] New firmware tested on Unit A (USB available) — device boots cleanly
+- [ ] New firmware has been built for **both** targets: `bash scripts/build-dist.sh`
+- [ ] Both builds succeeded with no errors; RAM ≤ 95%, Flash ≤ 95%
+- [ ] Firmware tested via serial — device boots cleanly
 - [ ] Serial console confirms correct radio settings after boot
 - [ ] Web UI accessible after boot
 - [ ] At least one room is active and joinable
-- [ ] Backup of Unit B's settings downloaded before updating
-- [ ] OTA image is `SIREN_v3_room_server.bin` (NOT the full-flash binary)
+- [ ] Backup of the device's settings downloaded before updating
+- [ ] OTA image matches hardware: `SIREN_v3_room_server.bin` for V3, `SIREN_v4_room_server.bin` for V4 (NOT the full-flash binary)
 
 ---
 

@@ -9,6 +9,7 @@
 #include <SPIFFS.h>
 #include "MyMesh.h"
 #include "UITask.h"
+#include "OtaManager.h"
 
 class MqttManager;  // forward declaration to avoid circular include
 
@@ -44,6 +45,7 @@ private:
   MultiRoomMesh&   _mesh;
   UITask*          _ui_task;
   MqttManager*     _mqtt_mgr;
+  OtaManager       _ota_mgr;
   bool             _started;
   bool             _dns_started;
 
@@ -73,6 +75,8 @@ private:
   String buildStatusPage(const char* ip);
   String buildChatPage();
   String buildAclPage();
+  String buildStatsPage();
+  String buildStatsJson();
 
   String buildBackupJson();
   bool   applyRestore(const String& json);
@@ -108,6 +112,14 @@ public:
    * Returns true if the command was consumed.
    */
   bool handleWifiCommand(const char* args, char* reply);
+
+  /**
+   * Handle "ota ..." CLI commands (check / update / status).
+   * Returns true if the command was consumed.
+   */
+  bool handleOtaCommand(const char* args, char* reply) {
+    return _ota_mgr.handleCommand(args, reply);
+  }
 };
 
 #endif // ESP32
