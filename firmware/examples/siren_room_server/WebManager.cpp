@@ -544,6 +544,8 @@ static const char HTML_HEAD_POST[] PROGMEM =
   ".btngrp button{padding:7px 12px;min-height:36px;font-size:0.82em}"
   /* === Mono hex display === */
   ".hex{font-family:monospace;font-size:0.78em;word-break:break-all;color:#aaa}"
+  /* === Anchor nav links === */
+  "a.tnb{display:flex;align-items:center;text-decoration:none}"
   /* === Responsive overrides for wider screens === */
   "@media(min-width:600px){"
     "body{padding:0}"
@@ -1056,7 +1058,32 @@ String WebManager::buildDebugLogJson() {
 
 // Stream the main status page directly to an AsyncResponseStream.
 // Uses PrintSink so the existing page += ... code works without a large
-// contiguous heap allocation — AsyncResponseStream chains 1460-byte chunks. (JES-854)
+// ---------------------------------------------------------------------------
+//  Page navigation bar — links to all main pages (JES-854 split)
+// ---------------------------------------------------------------------------
+static void writePageNav(PrintSink& page, const char* active) {
+  struct NavItem { const char* href; const char* label; const char* id; };
+  static const NavItem items[] = {
+    {"/",        "Status",    "status"},
+    {"/rooms",   "Rooms",     "rooms"},
+    {"/network", "Netwerk",   "network"},
+    {"/system",  "Systeem",   "system"},
+    {"/chat",    "Berichten", "chat"},
+    {"/acl",     "ACL",       "acl"},
+    {"/stats",   "Stats",     "stats"},
+  };
+  page += "<div id='tabnav'>";
+  for (int i = 0; i < 7; i++) {
+    bool act = strcmp(active, items[i].id) == 0;
+    page += "<a href='"; page += items[i].href;
+    page += act ? "' class='tnb act'>" : "' class='tnb'>";
+    page += items[i].label;
+    page += "</a>";
+  }
+  page += "</div>";
+}
+
+// Uses AsyncResponseStream (JES-854) — chunked, avoids large contiguous heap alloc.
 void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
@@ -1071,34 +1098,13 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
   page += htmlEscape(mesh.getNodeName());
   page += " Room Server</h1></div>";
 
-  // ---- Tab nav bar ----
-  page += "<div id='tabnav'>"
-          "<button class='tnb act' onclick='showTab(0)'>Status</button>"
-          "<button class='tnb' onclick='showTab(1)'>Rooms</button>"
-          "<button class='tnb' onclick='showTab(2)'>Netwerk</button>"
-          "<button class='tnb' onclick='showTab(3)'>Systeem</button>"
-          "</div>"
-          "<script>"
-          "function showTab(n){"
-            "var ps=document.querySelectorAll('.tpanel');"
-            "var bs=document.querySelectorAll('.tnb');"
-            "for(var i=0;i<ps.length;i++){ps[i].classList.remove('act');bs[i].classList.remove('act');}"
-            "ps[n].classList.add('act');bs[n].classList.add('act');"
-          "}"
-          "function editRoom(i,n){"
-            "showTab(1);"
-            "document.getElementById('editIdx').value=i;"
-            "document.getElementById('editName').value=n;"
-            "document.getElementById('editClearPass').checked=false;"
-            "document.getElementById('editClearGuest').checked=false;"
-            "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
-          "}"
-          "</script>";
+  // ---- Page nav bar ----
+  writePageNav(page, "status");
 
   // ================================================================
-  // TAB 0: STATUS
+  // STATUS PAGE CONTENT
   // ================================================================
-  page += "<div class='tpanel act'>";
+  page += "<div style='padding:12px 10px'>";
 
   // Node summary card
   page += "<div class='card'>";
@@ -1136,8 +1142,17 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
   // Quick navigation cards
   page += "<div class='card'>"
           "<div style='display:flex;flex-direction:column;gap:8px'>"
+          "<a href='/rooms' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#127979; Rooms &mdash; rooms, zichtbaarheid, notificaties</button>"
+          "</a>"
+          "<a href='/network' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128246; Netwerk &mdash; WiFi, LoRa, peers, sync</button>"
+          "</a>"
+          "<a href='/system' style='text-decoration:none'>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#9881; Systeem &mdash; backup, OLED, MQTT, OTA, debug</button>"
+          "</a>"
           "<a href='/chat' style='text-decoration:none'>"
-          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128172; Rooms &mdash; berichten bekijken en posten</button>"
+          "<button style='width:100%;text-align:left;padding:12px 16px'>&#128172; Berichten &mdash; berichten bekijken en posten</button>"
           "</a>"
           "<a href='/acl' style='text-decoration:none'>"
           "<button style='width:100%;text-align:left;padding:12px 16px'>&#128100; ACL beheer &mdash; rechten per gebruiker</button>"
@@ -1147,12 +1162,34 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
           "</a>"
           "</div></div>";
 
-  page += "</div>";  // end tab 0
+  page += "</div>";  // end status content wrapper
 
-  // ================================================================
-  // TAB 1: ROOMS
-  // ================================================================
-  page += "<div class='tpanel'>";
+  page += FPSTR(HTML_FOOT);
+  // (void return — PrintSink wrote directly to the AsyncResponseStream)
+}
+
+// ---------------------------------------------------------------------------
+//  /rooms — Room management page (JES-854 split)
+// ---------------------------------------------------------------------------
+void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
+  MultiRoomMesh& mesh = _mesh;
+  PrintSink page(out);
+  page += buildHead(mesh.getNodeName());
+  page += "<div id='topbar'><h1>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " &mdash; Rooms</h1></div>";
+  writePageNav(page, "rooms");
+  page += "<div style='padding:12px 10px'>";
+  // editRoom helper — pre-fills the edit form and scrolls to it
+  page += "<script>"
+          "function editRoom(i,n){"
+            "document.getElementById('editIdx').value=i;"
+            "document.getElementById('editName').value=n;"
+            "document.getElementById('editClearPass').checked=false;"
+            "document.getElementById('editClearGuest').checked=false;"
+            "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
+          "}"
+          "</script>";
 
   // Rooms overview table
   page += "<div class='card'><h2>Rooms</h2>";
@@ -1331,12 +1368,25 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
     page += "</div>";
   }
 
-  page += "</div>";  // end tab 1
+  page += "</div>";  // end content wrapper
+  page += FPSTR(HTML_FOOT);
+}
 
-  // ================================================================
-  // TAB 2: NETWERK
-  // ================================================================
-  page += "<div class='tpanel'>";
+// ---------------------------------------------------------------------------
+//  /network — Network settings page (JES-854 split)
+// ---------------------------------------------------------------------------
+void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip) {
+  MultiRoomMesh& mesh = _mesh;
+  WifiMode mode        = _mode;
+  const char* ap_ssid  = _ap_ssid;
+  const char* sta_ssid = _sta_ssid;
+  PrintSink page(out);
+  page += buildHead(mesh.getNodeName());
+  page += "<div id='topbar'><h1>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " &mdash; Netwerk</h1></div>";
+  writePageNav(page, "network");
+  page += "<div style='padding:12px 10px'>";
 
   // WiFi config
   page += "<div class='card'><h2>WiFi</h2>";
@@ -1631,13 +1681,22 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
             "</script>";
   }
 
-  page += "</div>";  // end tab 2
+  page += "</div>";  // end content wrapper
+  page += FPSTR(HTML_FOOT);
+}
 
-  // ================================================================
-  // TAB 3: SYSTEEM
-  // ================================================================
-  page += "<div class='tpanel'>";
-
+// ---------------------------------------------------------------------------
+//  /system — System settings page (JES-854 split)
+// ---------------------------------------------------------------------------
+void WebManager::buildSystemPageStream(AsyncResponseStream& out) {
+  MultiRoomMesh& mesh = _mesh;
+  PrintSink page(out);
+  page += buildHead(mesh.getNodeName());
+  page += "<div id='topbar'><h1>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " &mdash; Systeem</h1></div>";
+  writePageNav(page, "system");
+  page += "<div style='padding:12px 10px'>";
   // Backup / Restore
   page += "<div class='card'><h2>Backup &amp; Restore</h2>";
   page += "<a href='/api/backup' style='text-decoration:none'>"
@@ -1742,10 +1801,8 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
     page += "</div>";
   }
 
-  page += "</div>";  // end tab 3
-
+  page += "</div>";  // end content wrapper
   page += FPSTR(HTML_FOOT);
-  // (void return — PrintSink wrote directly to the AsyncResponseStream)
 }
 
 // ---------------------------------------------------------------------------
@@ -1931,7 +1988,7 @@ void WebManager::setupRoutes() {
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       char reply[160] = {};
       _mesh.handleCommand(0, (char*)"room add", reply);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: delete room
@@ -1945,7 +2002,7 @@ void WebManager::setupRoutes() {
                req->getParam("idx", true)->value().c_str());
       char reply[160] = {};
       _mesh.handleCommand(0, cmd, reply);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: rekey room — generate new private key; double-confirm required
@@ -1969,7 +2026,7 @@ void WebManager::setupRoutes() {
         return;
       }
       _mesh.rekeyRoom(idx);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: set room fields
@@ -2002,7 +2059,7 @@ void WebManager::setupRoutes() {
                  req->getParam("guest", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: global stealth toggle (all rooms)
@@ -2012,7 +2069,7 @@ void WebManager::setupRoutes() {
       if (!req->hasParam("stealth", true)) { req->send(400, "text/plain", "missing stealth"); return; }
       bool s = (req->getParam("stealth", true)->value() == "on");
       _mesh.setRoomStealth(-1, s);  // -1 = all rooms
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: repeater toggle (JES-855) — independent of stealth
@@ -2024,7 +2081,7 @@ void WebManager::setupRoutes() {
       bool on = (req->getParam("repeater", true)->value() == "on");
       snprintf(cmd, sizeof(cmd), "set fwd %s", on ? "on" : "off");
       _mesh.handleCommand(0, cmd, reply);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: per-room stealth toggle
@@ -2038,7 +2095,7 @@ void WebManager::setupRoutes() {
       int idx = req->getParam("idx", true)->value().toInt();
       bool s  = (req->getParam("stealth", true)->value() == "on");
       _mesh.setRoomStealth(idx, s);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: set global advert interval (seconds)
@@ -2049,7 +2106,7 @@ void WebManager::setupRoutes() {
       int sec = req->getParam("seconds", true)->value().toInt();
       if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
       _mesh.setAdvertIntervalSec((uint16_t)sec);
-      req->redirect("/");
+      req->redirect("/rooms");
     });
 
   // API: set anti-entropy sync interval (seconds) — JES-844
@@ -2060,14 +2117,14 @@ void WebManager::setupRoutes() {
       int sec = req->getParam("seconds", true)->value().toInt();
       if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
       _mesh.setSyncIntervalSec((uint32_t)sec);
-      req->redirect("/");
+      req->redirect("/network");
     });
 
   // API: screensaver / Varia settings
   _server.on("/api/screensaver", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
-      if (!_ui_task) { req->redirect("/"); return; }
+      if (!_ui_task) { req->redirect("/system"); return; }
       if (req->hasParam("ss", true)) {
         _ui_task->setSsEnabled(req->getParam("ss", true)->value() == "on");
       }
@@ -2078,7 +2135,7 @@ void WebManager::setupRoutes() {
         int sec = req->getParam("interval", true)->value().toInt();
         if (sec >= 1 && sec <= 60) _ui_task->setSsPageSec((uint8_t)sec);
       }
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // API: QR code page for a room
@@ -2098,7 +2155,7 @@ void WebManager::setupRoutes() {
         const String& m = req->getParam("mode", true)->value();
         _mode = (m == "sta") ? MODE_STA : MODE_AP;
         saveConfig();
-        req->redirect("/");
+        req->redirect("/network");
         // Apply new mode after redirect is sent
         WiFi.disconnect(true);
         _connecting = false;
@@ -2126,7 +2183,7 @@ void WebManager::setupRoutes() {
         _ap_pass[sizeof(_ap_pass) - 1] = 0;
       }
       saveConfig();
-      req->redirect("/");
+      req->redirect("/network");
       if (_mode == MODE_AP) {
         WiFi.softAPdisconnect(false);
         startAP();
@@ -2146,7 +2203,7 @@ void WebManager::setupRoutes() {
         _sta_pass[sizeof(_sta_pass) - 1] = 0;
       }
       saveConfig();
-      req->redirect("/");
+      req->redirect("/network");
       if (_mode == MODE_STA) {
         WiFi.disconnect(false);
         _connecting = false;
@@ -2244,7 +2301,7 @@ void WebManager::setupRoutes() {
                  req->getParam("txpower", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      req->redirect("/");
+      req->redirect("/network");
     });
 
   // -------------------------------------------------------------------------
@@ -2266,7 +2323,7 @@ void WebManager::setupRoutes() {
         bool on = (req->getParam("on", true)->value() == "1");
         _mesh.enableDebugLog(on);
       }
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // POST /api/debuglog/clear — discard all log entries
@@ -2274,7 +2331,7 @@ void WebManager::setupRoutes() {
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       _mesh.clearDebugLog();
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // -------------------------------------------------------------------------
@@ -2316,7 +2373,7 @@ void WebManager::setupRoutes() {
         snprintf(cmd, sizeof(cmd), "set path_hash %s", phm);
         _mesh.handleCommand(0, cmd, reply);
       }
-      req->redirect("/");
+      req->redirect("/network");
     });
 
   // POST /api/meshcore/region — set default scope region
@@ -2344,19 +2401,19 @@ void WebManager::setupRoutes() {
           }
         }
       }
-      req->redirect("/");
+      req->redirect("/network");
     });
 
   // API: MQTT enable/disable toggle (JES-792)
   _server.on("/api/mqtt/toggle", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
-      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      if (!_mqtt_mgr) { req->redirect("/system"); return; }
       if (!req->hasParam("enable", true)) { req->send(400, "text/plain", "missing enable"); return; }
       char reply[160] = {};
       bool en = (req->getParam("enable", true)->value() == "on");
       _mqtt_mgr->handleMqttCommand(en ? "enable" : "disable", reply);
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // API: MQTT config form save (JES-792)
@@ -2364,7 +2421,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/mqtt/set", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
-      if (!_mqtt_mgr) { req->redirect("/"); return; }
+      if (!_mqtt_mgr) { req->redirect("/system"); return; }
       char reply[160] = {};
       char cmd[200];
 
@@ -2423,7 +2480,7 @@ void WebManager::setupRoutes() {
         snprintf(cmd, sizeof(cmd), "set interval %s", intv);
         _mqtt_mgr->handleMqttCommand(cmd, reply);
       }
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // ---------------------------------------------------------------------------
@@ -2678,7 +2735,7 @@ void WebManager::setupRoutes() {
     if (idx < 0) {
       req->send(409, "text/plain", "peer list full or duplicate"); return;
     }
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // POST /api/peer/del (body: idx=<n>)
@@ -2689,7 +2746,7 @@ void WebManager::setupRoutes() {
     int idx = req->getParam("idx", true)->value().toInt();
     bool ok = _mesh.delPeerFromWeb(idx);
     if (!ok) { req->send(400, "text/plain", "invalid idx"); return; }
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // POST /api/room/delpost (body: room_idx=N&origin_id=XXXXXXXX&post_ts=T) — admin only (JES-824)
@@ -2780,7 +2837,7 @@ void WebManager::setupRoutes() {
       req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
     }
     if (_mesh.addNotifyTarget(idx, key)) {
-      req->redirect("/");
+      req->redirect("/rooms");
     } else {
       req->send(400, "application/json", "{\"error\":\"target list full\"}");
     }
@@ -2806,7 +2863,7 @@ void WebManager::setupRoutes() {
       req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
     }
     _mesh.delNotifyTarget(idx, key);
-    req->redirect("/");
+    req->redirect("/rooms");
   });
 
   // POST /api/peer/sync (body: idx=<n> optional — omit for all peers)
@@ -2817,7 +2874,7 @@ void WebManager::setupRoutes() {
       idx = req->getParam("idx", true)->value().toInt();
     }
     _mesh.triggerPeerSync(idx);
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // POST /api/peer/roomsync — push all local rooms to one or all peers (JES-848)
@@ -2828,7 +2885,7 @@ void WebManager::setupRoutes() {
       idx = req->getParam("idx", true)->value().toInt();
     }
     _mesh.triggerRoomSync(idx);
-    req->redirect("/");
+    req->redirect("/network");
   });
 
   // GET /api/sync/status — sync diagnostics (JES-833, admin-auth required)
@@ -2896,6 +2953,34 @@ void WebManager::setupRoutes() {
     req->send(200, "text/html; charset=utf-8", buildStatsPage());
   });
 
+  // GET /rooms — Room management page (JES-854 split)
+  _server.on("/rooms", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncResponseStream* stream = req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) { req->send(503, "text/plain", "OOM"); return; }
+    buildRoomsPageStream(*stream);
+    req->send(stream);
+  });
+
+  // GET /network — Network settings page (JES-854 split)
+  _server.on("/network", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    String ip = (_mode == MODE_AP) ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+    AsyncResponseStream* stream = req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) { req->send(503, "text/plain", "OOM"); return; }
+    buildNetworkPageStream(*stream, ip.c_str());
+    req->send(stream);
+  });
+
+  // GET /system — System settings page (JES-854 split)
+  _server.on("/system", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncResponseStream* stream = req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) { req->send(503, "text/plain", "OOM"); return; }
+    buildSystemPageStream(*stream);
+    req->send(stream);
+  });
+
   // GET /api/stats — statistics JSON (JES-800)
   _server.on("/api/stats", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
@@ -2914,7 +2999,7 @@ void WebManager::setupRoutes() {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       _ota_mgr.startCheck();
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // POST /api/ota/update — trigger async OTA download+flash
@@ -2928,7 +3013,7 @@ void WebManager::setupRoutes() {
           "Geen update beschikbaar — voer eerst 'Controleer op update' uit");
         return;
       }
-      req->redirect("/");
+      req->redirect("/system");
     });
 
   // GET /api/ota/status — JSON status (progress, state, versions)
