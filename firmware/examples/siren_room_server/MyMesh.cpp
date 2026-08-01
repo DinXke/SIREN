@@ -131,6 +131,13 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   mesh::Mesh::begin();
   _fs = fs;
 
+#ifdef ESP32
+  // Create mutex that guards rooms[] against concurrent access from the
+  // AsyncTCP web-handler task (Core 0) and the main-loop LoRa task (Core 1).
+  // Must be done before loadRoomConfig() so any early accessor calls are safe.  (JES-865)
+  _rooms_mutex = xSemaphoreCreateMutex();
+#endif
+
   _cli.loadPrefs(_fs);
 
   // JES-842: room server must always forward flood packets. Older firmware had
@@ -4547,32 +4554,42 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
                     i, rooms[i].name, (unsigned)recv_ts, (unsigned)rooms[i].config_ts);
       return;
     }
-    bool changed = false;
+
+    // Parse new values into local buffers BEFORE taking mutex (pure read of data[]).
+    char new_name[24] = {};
+    char new_gp[16]   = {};
+    size_t nl         = 0;
+    size_t gp_offset  = 0;
     if (len > 102) {
-      char new_name[24] = {};
-      size_t nl = parseNulStr(102, new_name, 23);
-      if (nl > 0 && strncmp(rooms[i].name, new_name, sizeof(rooms[i].name)) != 0) {
-        StrHelper::strncpy(rooms[i].name, new_name, sizeof(rooms[i].name));
-        changed = true;
-      }
-      // F2: guest_password starts after name + NUL; only update when gp field is present in frame.
-      size_t gp_offset = 102 + nl + 1;
-      if (gp_offset < len) {
-        char new_gp[16] = {};
-        parseNulStr(gp_offset, new_gp, 15);
-        if (strncmp(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password)) != 0) {
-          StrHelper::strncpy(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password));
-          changed = true;
-        }
-      }
+      nl        = parseNulStr(102, new_name, 23);
+      gp_offset = 102 + nl + 1;
+      if (gp_offset < len) parseNulStr(gp_offset, new_gp, 15);
     }
-    if (changed) {
-      rooms[i].config_ts = recv_ts;  // F1: advance stored ts so older frames are rejected
-      saveRoomConfig();
+
+    // Lock rooms[] for the write — protect against AsyncTCP web-handler reads (JES-865).
+    if (!lockRooms(100)) {
+      Serial.printf("[ROOMSYNC] skipped update room[%d] — mutex timeout\n", i);
+      return;
     }
+    bool changed = false;
+    if (nl > 0 && strncmp(rooms[i].name, new_name, sizeof(rooms[i].name)) != 0) {
+      StrHelper::strncpy(rooms[i].name, new_name, sizeof(rooms[i].name));
+      changed = true;
+    }
+    // F2: only update guest_password when the gp field was present in the frame.
+    if (gp_offset < len && strncmp(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password)) != 0) {
+      StrHelper::strncpy(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password));
+      changed = true;
+    }
+    if (changed) rooms[i].config_ts = recv_ts;  // F1: advance stored ts
+    char log_name[24];  // copy for logging after mutex release
+    StrHelper::strncpy(log_name, rooms[i].name, sizeof(log_name));
+    unlockRooms();  // release BEFORE slow SPIFFS write
+
+    if (changed) saveRoomConfig();
     // SECURITY: log only slot + name — passwords never logged
     Serial.printf("[ROOMSYNC] updated room[%d] '%s' from peer[%d] '%s'\n",
-                  i, rooms[i].name, pi, peers[pi].name);
+                  i, log_name, pi, peers[pi].name);
     return;
   }
 
@@ -4597,36 +4614,37 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
     return;
   }
 
-  // Install identity: readFrom expects prv[64] || pub[32] = 96 bytes at offset 6
-  rooms[free_slot].id.readFrom(&data[6], PRV_KEY_SIZE + PUB_KEY_SIZE);
-  saveRoomIdentity(free_slot);
-
-  // Extract name (null-terminated at offset 102, max 23 chars)
-  rooms[free_slot].name[0] = 0;
-  size_t name_len = 0;
+  // Parse name and guest_password from frame into local buffers (no mutex needed yet).
+  char inst_name[24] = {};
+  char inst_gp[16]   = {};
+  size_t inst_name_len = 0;
   if (len > 102) {
-    name_len = parseNulStr(102, rooms[free_slot].name, 23);
+    inst_name_len = parseNulStr(102, inst_name, 23);
+    size_t gp_off = 102 + inst_name_len + 1;
+    if (gp_off < len) parseNulStr(gp_off, inst_gp, 15);
   }
-  if (rooms[free_slot].name[0] == 0) {
-    snprintf(rooms[free_slot].name, sizeof(rooms[free_slot].name), "Room%d", free_slot);
-  }
-
-  // Extract guest_password (after name + NUL, max 15 chars; JES-856)
-  rooms[free_slot].guest_password[0] = 0;
-  size_t gp_offset = 102 + name_len + 1;
-  if (gp_offset < len) {
-    parseNulStr(gp_offset, rooms[free_slot].guest_password, 15);
+  if (inst_name[0] == 0) {
+    snprintf(inst_name, sizeof(inst_name), "Room%d", free_slot);
   }
 
-  // Seed config_ts from the received frame so future updates apply last-writer-wins (JES-860, F1).
-  rooms[free_slot].config_ts = recv_ts;
-
-  // Activate slot with safe defaults
-  rooms[free_slot].active  = true;
-  rooms[free_slot].stealth = true;   // stealth by default (JES-772)
+  // Lock rooms[] for the install write — protect against AsyncTCP reads (JES-865).
+  if (!lockRooms(100)) {
+    Serial.printf("[ROOMSYNC] ignored install — mutex timeout\n");
+    return;
+  }
+  // Install identity (prv[64] || pub[32] = 96 bytes at offset 6).
+  rooms[free_slot].id.readFrom(&data[6], PRV_KEY_SIZE + PUB_KEY_SIZE);
+  StrHelper::strncpy(rooms[free_slot].name, inst_name, sizeof(rooms[free_slot].name));
+  StrHelper::strncpy(rooms[free_slot].guest_password, inst_gp, sizeof(rooms[free_slot].guest_password));
+  rooms[free_slot].config_ts = recv_ts;  // seed LWW timestamp (JES-860, F1)
+  rooms[free_slot].active    = true;
+  rooms[free_slot].stealth   = true;     // stealth by default (JES-772)
   StrHelper::strncpy(rooms[free_slot].password, _prefs.password,
                      sizeof(rooms[free_slot].password));
   _num_active_rooms++;
+  unlockRooms();  // release BEFORE slow SPIFFS writes
+
+  saveRoomIdentity(free_slot);
   saveRoomConfig();
 
   // SECURITY: log only 4-byte pub prefix + name — private key and passwords never logged
