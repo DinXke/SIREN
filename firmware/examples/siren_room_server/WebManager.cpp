@@ -436,19 +436,30 @@ static const char HTML_FOOT[] PROGMEM = "</body></html>";
 String WebManager::buildChatPage() {
   String page = FPSTR(HTML_HEAD);
 
+  // Tab CSS (scoped to this page)
+  page += "<style>.tab{background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;"
+          "padding:5px 14px;cursor:pointer;border-radius:4px;margin:2px}"
+          ".tab.act{background:#00d4ff;color:#000}</style>";
+
   // Nav back to management UI
-  page += "<div class='card'><h2>SIREN IRC &mdash; "
+  page += "<div class='card'><h2>Rooms &mdash; "
           "<a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
 
-  // Room selector
-  page += "<label><b>Kanaal:</b> <select id='room-sel' onchange='roomChanged()'>";
+  // Tab bar — one tab per active room; htmlEscape ensures XSS safety for labels
+  int _firstRoom = -1;
+  page += "<div style='display:flex;flex-wrap:wrap;gap:4px'>";
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!_mesh.isRoomActive(i)) continue;
-    page += "<option value='"; page += i; page += "'>";
+    page += "<button class='tab";
+    page += (_firstRoom < 0 ? " act" : "");
+    page += "' onclick='selTab(this,";
+    page += i;
+    page += ")'>";
     page += htmlEscape(_mesh.getRoomName(i));
-    page += "</option>";
+    page += "</button>";
+    if (_firstRoom < 0) _firstRoom = i;
   }
-  page += "</select></label></div>";
+  page += "</div></div>";
 
   // Chat pane: messages + nicklist
   page += "<div style='display:flex;gap:10px;align-items:flex-start'>";
@@ -472,12 +483,14 @@ String WebManager::buildChatPage() {
   page += "</div>";  // flex pane
 
   // Inline JS — uses textContent (not innerHTML) for safe display
-  page += "<script>\n"
-          "var room=0,since=0,pollT=null,nickT=null;\n"
-          "function roomChanged(){\n"
-          "  room=parseInt(document.getElementById('room-sel').value);\n"
-          "  since=0;\n"
+  page += "<script>\n";
+  page += "var room="; page += (_firstRoom >= 0 ? _firstRoom : 0); page += ",since=0,pollT=null,nickT=null;\n";
+  page += "function selTab(btn,idx){\n"
+          "  room=idx;since=0;\n"
           "  document.getElementById('msgs').innerHTML='';\n"
+          "  var ts=document.querySelectorAll('.tab');\n"
+          "  for(var i=0;i<ts.length;i++)ts[i].classList.remove('act');\n"
+          "  btn.classList.add('act');\n"
           "  clearTimeout(pollT);clearTimeout(nickT);\n"
           "  fetchMsgs();fetchNicks();\n"
           "}\n"
@@ -530,7 +543,7 @@ String WebManager::buildChatPage() {
           "    body:'room='+encodeURIComponent(room)+'&text='+encodeURIComponent(txt)})\n"
           "  .then(function(r){if(r.ok)document.getElementById('post-txt').value='';});\n"
           "}\n"
-          "roomChanged();\n"
+          "fetchMsgs();fetchNicks();\n"
           "</script>\n";
 
   page += FPSTR(HTML_FOOT);
@@ -555,7 +568,7 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "<tr><th>Active Rooms</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
   page += "</table>";
-  page += "<p><a href='/chat'><button>&#128172; IRC Chat</button></a>"
+  page += "<p><a href='/chat'><button>&#128172; Rooms</button></a>"
           " &mdash; berichten per kanaal bekijken en posten als operator</p>"
           "</div>";
 
