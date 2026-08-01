@@ -275,6 +275,9 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t  _sync_posts_recv;  // total posts ingested via sync
   uint32_t  _sync_posts_sent;  // total posts pushed to peers
 
+  /* ---- Login notification rate-limit (JES-834) ---- */
+  uint32_t  _last_login_notify_ms[MAX_ROOMS];  // millis() of last DM sent per room
+
   void saveTombstones();
   void loadTombstones();
   bool isTombstoned(const uint8_t* origin_id, uint32_t post_ts);
@@ -337,6 +340,9 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Post pool persistence (JES-787) ---- */
   void          savePostPool();
   void          loadPostPool();
+
+  /* ---- Login-attempt admin notification (JES-834) ---- */
+  void          _notifyAdminsLoginAttempt(int slot_idx, const uint8_t* caller_pubkey, bool success);
 
   /* ---- CLI helpers ---- */
   void          handleRoomCommand(char* args, char* reply, bool serial);

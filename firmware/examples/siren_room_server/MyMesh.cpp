@@ -95,6 +95,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
     peers[i].next_sync_at = 0;
   }
   _sync_req_sent = _sync_dat_recv = _sync_posts_recv = _sync_posts_sent = 0;
+  memset(_last_login_notify_ms, 0, sizeof(_last_login_notify_ms));
   _advert_interval_sec = 120;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
@@ -537,6 +538,50 @@ void MultiRoomMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  _notifyAdminsLoginAttempt — DM to online admins on login (JES-834) */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::_notifyAdminsLoginAttempt(
+    int slot_idx, const uint8_t* caller_pubkey, bool success) {
+
+  uint32_t now_ms = millis();
+  if ((now_ms - _last_login_notify_ms[slot_idx]) < 30000) return;  // rate limit
+  _last_login_notify_ms[slot_idx] = now_ms;
+
+  char pub_hex[9];
+  snprintf(pub_hex, sizeof(pub_hex), "%02x%02x%02x%02x",
+           caller_pubkey[0], caller_pubkey[1],
+           caller_pubkey[2], caller_pubkey[3]);
+
+  char msg[80];
+  snprintf(msg, sizeof(msg), "Login %s op '%s': <%s>",
+           success ? "OK" : "poging",
+           rooms[slot_idx].name, pub_hex);
+  int msg_len = strlen(msg);
+
+  uint32_t now_rtc = getRTCClock()->getCurrentTimeUnique();
+  RoomSlot& slot = rooms[slot_idx];
+
+  for (int i = 0; i < slot.acl.getNumClients(); i++) {
+    ClientInfo* admin = slot.acl.getClientByIdx(i);
+    if (!admin || !admin->isAdmin()) continue;
+    // Skip admins whose shared_secret is all-zero (never completed ECDH)
+    if (admin->shared_secret[0] == 0 && admin->shared_secret[1] == 0 &&
+        admin->shared_secret[2] == 0 && admin->shared_secret[3] == 0) continue;
+
+    uint8_t buf[5 + 80];
+    memcpy(buf, &now_rtc, 4);
+    buf[4] = (TXT_TYPE_PLAIN << 2);
+    memcpy(&buf[5], msg, msg_len);
+
+    self_id = slot.id;
+    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, admin->id, admin->shared_secret,
+                              buf, 5 + msg_len);
+    if (pkt) sendFloodScoped(default_scope, pkt, 500, _prefs.path_hash_mode + 1);
+  }
+  // self_id stays as slot.id — onAnonDataRecv already had it set to rooms[_active_slot].id
+}
+
+/* ------------------------------------------------------------------ */
 /*  onAnonDataRecv — handles login (ANON_REQ)                          */
 /* ------------------------------------------------------------------ */
 void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
@@ -572,6 +617,7 @@ void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
       perm = PERM_ACL_GUEST;
     } else {
       MESH_DEBUG_PRINTLN("room[%d] incorrect password", (uint32_t)_active_slot);
+      _notifyAdminsLoginAttempt(_active_slot, sender.pub_key, false);
       return;
     }
 
@@ -591,6 +637,7 @@ void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
     memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
 
     slot.dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+    _notifyAdminsLoginAttempt(_active_slot, sender.pub_key, true);
   }
 
   if (packet->isRouteFlood()) {
