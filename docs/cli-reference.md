@@ -83,6 +83,24 @@ Change the guest password for room `<idx>`. An empty guest password means the ro
   -> OK
 ```
 
+### `room set <idx> lat <value>` / `room set <idx> lon <value>`
+
+Set the advertised location (latitude/longitude, decimal degrees) for room `<idx>`.
+The coordinates are included in the room's advertisement so clients and mapping
+tools can show where the room server is located. Latitude range is `-90..90`,
+longitude range is `-180..180`. A value of `0` disables the location field in the
+advert (the default — no location is broadcast).
+
+```
+> room set 0 lat 50.9307
+  -> OK - room[0] lat=50.930700
+> room set 0 lon 5.3378
+  -> OK - room[0] lon=5.337800
+```
+
+The location can also be set from the web management UI on the **Rooms** page:
+click **Bewerken** for a room and fill in the **Locatie** fields.
+
 ### `room stealth <idx> on|off`
 
 Enable or disable stealth mode for room `<idx>`.

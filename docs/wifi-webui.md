@@ -88,7 +88,9 @@ Shows a table of all active room slots with:
 
 **Adding a room**: Click "Add Room". A new room slot is created with a default name (`Room<N>`) and the default admin password.
 
-**Editing a room**: Click the Edit icon next to a room to change its name, admin password, and guest password.
+**Editing a room**: Click the Edit icon next to a room to change its name, admin password, guest password, and advertised location (latitude/longitude).
+
+**Location**: The **Locatie** fields (latitude `-90..90`, longitude `-180..180`, decimal degrees) set the coordinates broadcast in the room's advertisement, so clients/maps can show where the room server is. Leave both at `0` to omit the location from the advert. Equivalent serial CLI: `room set <idx> lat <val>` / `room set <idx> lon <val>`.
 
 **QR Code**: Click the QR icon to display a QR code that MeshCore companion apps can scan to join the room directly (out-of-band join — works even with stealth mode on).
 

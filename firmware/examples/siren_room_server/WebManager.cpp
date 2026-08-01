@@ -1272,9 +1272,11 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
   page += "<div style='padding:12px 10px'>";
   // editRoom helper — pre-fills the edit form and scrolls to it
   page += "<script>"
-          "function editRoom(i,n){"
+          "function editRoom(i,n,lat,lon){"
             "document.getElementById('editIdx').value=i;"
             "document.getElementById('editName').value=n;"
+            "document.getElementById('editLat').value=lat;"
+            "document.getElementById('editLon').value=lon;"
             "document.getElementById('editClearPass').checked=false;"
             "document.getElementById('editClearGuest').checked=false;"
             "document.getElementById('editConfirmName').value='';"
@@ -1316,7 +1318,9 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
     {
       page += "<button type='button' data-idx='"; page += i;
       page += "' data-name=\""; page += htmlEscape(mesh.getRoomName(i));
-      page += "\" onclick=\"editRoom(this.dataset.idx,this.dataset.name)\">Bewerken</button>";
+      page += "\" data-lat='"; page += String(mesh.getRoomLat(i), 6);
+      page += "' data-lon='"; page += String(mesh.getRoomLon(i), 6);
+      page += "' onclick=\"editRoom(this.dataset.idx,this.dataset.name,this.dataset.lat,this.dataset.lon)\">Bewerken</button>";
     }
     // Stealth toggle
     page += "<form method='post' action='/api/room/stealth'>"
@@ -1387,6 +1391,11 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
           "<input name='guest' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
           "<label style='font-size:0.85em;font-weight:normal'>"
           "<input type='checkbox' id='editClearGuest' name='clear_guest' value='1'> wissen</label></div>"
+          "<div class='frow'><label>Locatie</label>"
+          "<input id='editLat' name='lat' type='number' step='any' min='-90' max='90' placeholder='breedtegraad'> "
+          "<input id='editLon' name='lon' type='number' step='any' min='-180' max='180' placeholder='lengtegraad'></div>"
+          "<div class='frow'><label></label><span style='font-size:0.85em;color:#888'>"
+          "0 = geen locatie in advert</span></div>"
           "<button type='button' onclick='submitEditRoom()'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle
@@ -2196,6 +2205,23 @@ void WebManager::setupRoutes() {
         snprintf(cmd, sizeof(cmd), "room set %s guest %s", idx.c_str(),
                  req->getParam("guest", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
+      }
+      // JES-867: advertised location (latitude/longitude). Range-validated in CLI handler.
+      if (req->hasParam("lat", true) && req->getParam("lat", true)->value().length()) {
+        float v = req->getParam("lat", true)->value().toFloat();
+        if (v >= -90.0f && v <= 90.0f) {
+          snprintf(cmd, sizeof(cmd), "room set %s lat %s", idx.c_str(),
+                   req->getParam("lat", true)->value().c_str());
+          _mesh.handleCommand(0, cmd, reply);
+        }
+      }
+      if (req->hasParam("lon", true) && req->getParam("lon", true)->value().length()) {
+        float v = req->getParam("lon", true)->value().toFloat();
+        if (v >= -180.0f && v <= 180.0f) {
+          snprintf(cmd, sizeof(cmd), "room set %s lon %s", idx.c_str(),
+                   req->getParam("lon", true)->value().c_str());
+          _mesh.handleCommand(0, cmd, reply);
+        }
       }
       req->redirect("/rooms");
     });

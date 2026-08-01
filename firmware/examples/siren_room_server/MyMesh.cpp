@@ -1903,6 +1903,8 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  room set <idx> pass <val>      Show password-change warning (step 1)");
       Serial.println("  room set <idx> pass <val> confirm  Set room password (2-step confirm)");
       Serial.println("  room set <idx> guest <val>     Set guest access password");
+      Serial.println("  room set <idx> lat <val>       Set advertised latitude (-90..90, 0=uit)");
+      Serial.println("  room set <idx> lon <val>       Set advertised longitude (-180..180, 0=uit)");
       Serial.println("  room stealth <idx> on|off      Toggle room visibility");
       Serial.println("  room qr <idx>                  Print join URI");
       Serial.println("  room read <idx|name> [n]       Show last N messages (def 20)");
@@ -2195,8 +2197,22 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
       saveRoomConfig();
       triggerRoomSync(-1);  // JES-856: propagate guest_password change to all peers
       strcpy(reply, "OK");
+    } else if (memcmp(p, "lat ", 4) == 0) {
+      // JES-867: set room advertised latitude (-90..90). 0 = unset/hidden.
+      float v = atof(p + 4);
+      if (v < -90.0f || v > 90.0f) { strcpy(reply, "Err - lat must be -90..90"); return; }
+      rooms[idx].lat = v;
+      saveRoomConfig();
+      sprintf(reply, "OK - room[%d] lat=%s", idx, StrHelper::ftoa(rooms[idx].lat));
+    } else if (memcmp(p, "lon ", 4) == 0) {
+      // JES-867: set room advertised longitude (-180..180). 0 = unset/hidden.
+      float v = atof(p + 4);
+      if (v < -180.0f || v > 180.0f) { strcpy(reply, "Err - lon must be -180..180"); return; }
+      rooms[idx].lon = v;
+      saveRoomConfig();
+      sprintf(reply, "OK - room[%d] lon=%s", idx, StrHelper::ftoa(rooms[idx].lon));
     } else {
-      strcpy(reply, "Err - unknown field (use name|pass|guest)");
+      strcpy(reply, "Err - unknown field (use name|pass|guest|lat|lon)");
     }
     return;
   }
