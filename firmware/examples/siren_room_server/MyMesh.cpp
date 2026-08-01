@@ -2056,22 +2056,26 @@ void MultiRoomMesh::loadPeerConfig() {
 /*  File header (6 bytes):                                              */
 /*    [4: magic 'POST'][1: version=2][1: num_slots=MAX_TOTAL_POSTS]    */
 /* ------------------------------------------------------------------ */
-#define POST_LOG_PATH "/post_log"
+#define POST_LOG_PATH    "/post_log"
+#define POST_LOG_TMP     "/post_log.tmp"
 #define POST_LOG_MAGIC_0 0x50   // 'P'
 #define POST_LOG_MAGIC_1 0x4F   // 'O'
 #define POST_LOG_MAGIC_2 0x53   // 'S'
 #define POST_LOG_MAGIC_3 0x54   // 'T'
 #define POST_LOG_VERSION 2      // bumped: added origin_id[4] per slot
+// v1 slot = 32+4+152+1 = 189 bytes (no origin_id); v2 slot = 193 bytes
+#define POST_LOG_V1_SLOT_SIZE  (PUB_KEY_SIZE + 4 + (MAX_POST_TEXT_LEN + 1) + 1)
 
 void MultiRoomMesh::savePostPool() {
   if (!_fs) return;
+  // Write to .tmp first; rename atomically so a power-cut never corrupts the live file.
 #if defined(RP2040_PLATFORM)
-  File f = _fs->open(POST_LOG_PATH, "w");
+  File f = _fs->open(POST_LOG_TMP, "w");
 #elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  _fs->remove(POST_LOG_PATH);
-  File f = _fs->open(POST_LOG_PATH, FILE_O_WRITE);
+  _fs->remove(POST_LOG_TMP);
+  File f = _fs->open(POST_LOG_TMP, FILE_O_WRITE);
 #else
-  File f = _fs->open(POST_LOG_PATH, "w", true);
+  File f = _fs->open(POST_LOG_TMP, "w", true);
 #endif
   if (!f) return;
 
@@ -2091,10 +2095,19 @@ void MultiRoomMesh::savePostPool() {
     f.write(p.origin_id, 4);   // Phase 5
   }
   f.close();
+
+  // Atomic commit: remove old file then rename tmp into place.
+  // SPIFFS has no true rename; remove+rename is the closest atomic-ish operation.
+  _fs->remove(POST_LOG_PATH);
+  _fs->rename(POST_LOG_TMP, POST_LOG_PATH);
 }
 
 void MultiRoomMesh::loadPostPool() {
   if (!_fs) return;
+
+  // Remove any leftover .tmp from a prior interrupted write (power-cut recovery).
+  if (_fs->exists(POST_LOG_TMP)) _fs->remove(POST_LOG_TMP);
+
 #if defined(RP2040_PLATFORM)
   if (!_fs->exists(POST_LOG_PATH)) return;
   File f = _fs->open(POST_LOG_PATH, "r");
@@ -2104,31 +2117,61 @@ void MultiRoomMesh::loadPostPool() {
 #endif
   if (!f) return;
 
-  // Validate header
+  // Validate magic
   uint8_t hdr[6];
   if (f.read(hdr, 6) != 6) { f.close(); return; }
   if (hdr[0] != POST_LOG_MAGIC_0 || hdr[1] != POST_LOG_MAGIC_1 ||
-      hdr[2] != POST_LOG_MAGIC_2 || hdr[3] != POST_LOG_MAGIC_3 ||
-      hdr[4] != POST_LOG_VERSION || hdr[5] != (uint8_t)MAX_TOTAL_POSTS) {
+      hdr[2] != POST_LOG_MAGIC_2 || hdr[3] != POST_LOG_MAGIC_3) {
     f.close();
-    return;   // format mismatch (or old v1); start fresh — posts are transient
+    return;   // unrecognised file — start empty (fail-safe, no crash)
   }
 
-  // Read all slots
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    PostInfo& p = _post_pool[i];
-    if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
-    if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
-    if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != MAX_POST_TEXT_LEN + 1) break;
-    if (f.read(&p.room_idx, 1) != 1) break;
-    if (f.read(p.origin_id, 4) != 4) break;  // Phase 5
+  uint8_t file_ver   = hdr[4];
+  int     stored_cnt = (int)(uint8_t)hdr[5];  // slots written to disk
+  bool    need_resave = false;
 
-    // Prune posts for rooms that are no longer active
-    if (p.room_idx != 0xFF &&
-        (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
-      memset(&p, 0, sizeof(PostInfo));
-      p.room_idx = 0xFF;
+  if (file_ver == 1) {
+    // v1 layout: no origin_id field — 189 bytes per slot instead of 193.
+    // Migrate: read v1 slots, zero-fill origin_id, resave as v2 afterwards.
+    int load_cnt = (stored_cnt < MAX_TOTAL_POSTS) ? stored_cnt : MAX_TOTAL_POSTS;
+    for (int i = 0; i < load_cnt; i++) {
+      PostInfo& p = _post_pool[i];
+      if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+      if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
+      if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) break;
+      if (f.read(&p.room_idx, 1) != 1) break;
+      memset(p.origin_id, 0, 4);  // unknown origin — zero is safe default
+      // Prune posts for rooms that are no longer active
+      if (p.room_idx != 0xFF &&
+          (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
+        memset(&p, 0, sizeof(PostInfo));
+        p.room_idx = 0xFF;
+      }
     }
+    need_resave = true;  // write back as v2 so next boot skips migration
+  } else if (file_ver == POST_LOG_VERSION) {
+    // Current v2 layout — load min(stored, MAX_TOTAL_POSTS) so a smaller
+    // MAX_TOTAL_POSTS build doesn't crash; excess slots are silently dropped.
+    int load_cnt = (stored_cnt < MAX_TOTAL_POSTS) ? stored_cnt : MAX_TOTAL_POSTS;
+    for (int i = 0; i < load_cnt; i++) {
+      PostInfo& p = _post_pool[i];
+      if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+      if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
+      if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) break;
+      if (f.read(&p.room_idx, 1) != 1) break;
+      if (f.read(p.origin_id, 4) != 4) break;  // Phase 5
+      // Prune posts for rooms that are no longer active
+      if (p.room_idx != 0xFF &&
+          (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
+        memset(&p, 0, sizeof(PostInfo));
+        p.room_idx = 0xFF;
+      }
+    }
+    if (stored_cnt != MAX_TOTAL_POSTS) need_resave = true;  // normalise slot count
+  } else {
+    // Unknown/future version — fail-safe: start empty, no crash.
+    f.close();
+    return;
   }
   f.close();
 
@@ -2145,6 +2188,9 @@ void MultiRoomMesh::loadPostPool() {
     }
     rooms[i].num_posted = cnt;
   }
+
+  // Write migrated/normalised data back immediately so next boot needs no migration.
+  if (need_resave) savePostPool();
 }
 
 /* ------------------------------------------------------------------ */

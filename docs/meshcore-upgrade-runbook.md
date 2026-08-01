@@ -135,6 +135,37 @@ As of v1.16: `Mesh.h:179  LocalIdentity self_id;`
 
 **Fix:** These are no-op virtual methods in v1.16. Safe to ignore or add empty overrides.
 
+### 4b. Partition table — NEVER shift the SPIFFS offset
+
+> **WARNING — data loss risk**: The SIREN firmware stores all persistent data (channels,
+> crypto keys, messages, Wi-Fi config) in SPIFFS at a **fixed offset of 0x670000** on the
+> 8 MB flash of the Heltec LoRa32 V3.
+>
+> If an OTA image is built with a different partition table that places SPIFFS at a
+> different offset, SPIFFS will be treated as empty or corrupt on next boot and **all
+> persisted data will be wiped**.
+>
+> The authoritative partition layout is in:
+>
+> ```
+> firmware/examples/siren_room_server/partitions_siren.csv
+> ```
+>
+> It is referenced in `firmware/variants/heltec_v3/platformio.ini` via
+> `board_build.partitions` for the `SIREN_v3_room_server` environment.
+>
+> **Rules:**
+> - Never change `spiffs` offset (0x670000) or size (0x190000) in an OTA image.
+> - If the partition layout must change (e.g. larger app slots), do a **full erase +
+>   serial flash** — not an OTA update.
+> - After any partition layout change, update `partitions_siren.csv` and increment this
+>   section with the reason and date.
+>
+> **What the upgrade script does:** The script (`scripts/vendor-meshcore.sh`) restores
+> `firmware/examples/siren_room_server/` including `partitions_siren.csv` and re-appends
+> the SIREN platformio.ini section, so the partition reference is automatically preserved
+> across upstream upgrades.
+
 ### 5. Verify the build (Phase 0 gate)
 
 ```bash
