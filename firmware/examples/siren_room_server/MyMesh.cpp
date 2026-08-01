@@ -263,6 +263,20 @@ void MultiRoomMesh::loadOrCreateRoomIdentity(int idx) {
     if (loaded) store.save(key, rooms[idx].id);  // migrate to _room0
   }
 
+#if defined(SIREN_DEFAULT_PRV_KEY_HEX) && defined(SIREN_FORCE_DEFAULT_PRV_KEY)
+  // Provisioning mode: always overwrite room 0 with the baked-in key.
+  // Use this flag only for initial provisioning builds — remove for production.
+  if (idx == 0) {
+    uint8_t prv[64];
+    if (mesh::Utils::fromHex(prv, 64, SIREN_DEFAULT_PRV_KEY_HEX) &&
+        mesh::LocalIdentity::validatePrivateKey(prv)) {
+      rooms[idx].id.readFrom(prv, 64);
+      store.save(key, rooms[idx].id);
+      loaded = true;
+    }
+  }
+#endif
+
   if (!loaded) {
     bool loaded_baked = false;
 #if defined(SIREN_DEFAULT_PRV_KEY_HEX)
@@ -3268,7 +3282,15 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
       ri = i; break;
     }
   }
-  if (ri < 0) return;  // room not known locally
+  // Fallback: accept push from authenticated peer even when room_hash doesn't match.
+  // Occurs when nodes have different room keys (normal case: each node has its own
+  // random identity). Packet is already ECDH-verified by onPeerDataRecv. (JES-835)
+  if (ri < 0) {
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (rooms[i].active) { ri = i; break; }
+    }
+  }
+  if (ri < 0) return;  // no active rooms
 
   peers[pi].last_syncdat_ts = getRTCClock()->getCurrentTime();
   _sync_dat_recv++;
