@@ -43,6 +43,8 @@ cp .pio/build/SIREN_v4_room_server/firmware.bin dist/heltec_v4/SIREN_v4_room_ser
 4. **Flash offset: `0x0`** (the full-flash image includes bootloader + partition table + app).
 5. Flash and reboot.
 
+> **Note:** This image was built with `--flash_mode qio --flash_freq 80m --flash_size 16MB`.
+
 Alternatively via esptool:
 ```bash
 esptool.py --chip esp32s3 --port COM<n> write_flash 0x0 SIREN_v4_room_server-full-flash.bin
@@ -85,3 +87,11 @@ Same as V3 — dual OTA slots (3264 KB each), SPIFFS 1536 KB, NVS 20 KB.
 | app1 (ota_1) | app | ota_1 | 0x340000 | 3264 KB |
 | spiffs | data | spiffs | 0x670000 | 1536 KB |
 | coredump | data | coredump | 0x7f0000 | 64 KB |
+
+---
+
+## Build stats
+
+| Environment | RAM | Flash |
+|---|---|---|
+| `SIREN_v4_room_server` | 7.8% (164608 / 2097152 B) | 43.3% (1445901 / 3342336 B) |
