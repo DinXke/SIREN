@@ -954,6 +954,7 @@ void MultiRoomMesh::onAckRecv(mesh::Packet* packet, uint32_t ack_crc) {
 /* ------------------------------------------------------------------ */
 void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text) {
   uint8_t ridx = (uint8_t)(&slot - rooms);
+  if (ridx == 0) return;  // JES-846: room 0 is identity-only, no posts allowed
   int quota = MAX_TOTAL_POSTS / (_num_active_rooms > 0 ? _num_active_rooms : 1);
 
   // Find a free slot; also track oldest post owned by this room
@@ -1747,8 +1748,8 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     int ridx = atoi(arg);
     while (*arg && *arg != ' ') arg++;
     while (*arg == ' ') arg++;
-    if (ridx < 0 || ridx >= MAX_ROOMS || !rooms[ridx].active) {
-      strcpy(reply, "Err: invalid room idx"); return;
+    if (ridx < 0 || ridx >= MAX_ROOMS || !rooms[ridx].active || ridx == 0) {
+      strcpy(reply, "Err: invalid room idx (use 1+, room 0 is identity-only)"); return;
     }
     if (*arg == 0) { strcpy(reply, "Err: missing text"); return; }
     addServerPost(ridx, arg);
@@ -3007,7 +3008,7 @@ void MultiRoomMesh::storeName(const uint8_t* pub4, const char* name) {
 }
 
 void MultiRoomMesh::addServerPost(int room_idx, const char* text) {
-  if (room_idx < 0 || room_idx >= MAX_ROOMS || !rooms[room_idx].active) return;
+  if (room_idx < 0 || room_idx >= MAX_ROOMS || !rooms[room_idx].active || room_idx == 0) return;  // JES-846
   if (!text || text[0] == 0) return;
 
   // Build a transient ClientInfo whose identity = the room itself
@@ -3449,6 +3450,7 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
  * All sync DMs are sent from rooms[0].id (node transport identity).
  */
 void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
+  if (post.room_idx == 0) return;  // JES-846: room 0 is identity-only, never sync its posts
   calcPeerSecret(pi);
 
   int len = 0;
@@ -3510,7 +3512,7 @@ void MultiRoomMesh::sendSyncReq(int pi) {
   uint32_t stagger_ms = 0;
   int rooms_synced = 0;
 
-  for (int ri = 0; ri < MAX_ROOMS; ri++) {
+  for (int ri = 1; ri < MAX_ROOMS; ri++) {  // JES-846: start at 1, room 0 is identity-only
     if (!rooms[ri].active) continue;
     RoomSlot& slot = rooms[ri];
 
@@ -3561,18 +3563,18 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
   uint8_t num_vv = data[9];
   if ((size_t)(10 + (int)num_vv * 8) > len) return;
 
-  // Find local room matching hash (first 4 bytes of pub_key)
+  // Find local room matching hash (first 4 bytes of pub_key); skip room 0 (JES-846)
   int ri = -1;
-  for (int i = 0; i < MAX_ROOMS; i++) {
+  for (int i = 1; i < MAX_ROOMS; i++) {
     if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
       ri = i; break;
     }
   }
-  // Fallback: if no exact hash match, sync into first active room.
+  // Fallback: if no exact hash match, sync into first active room (skip room 0).
   // This allows cross-node sync when both nodes have different room keys (JES-723).
   // The SYNCDAT will echo back the requesting room_hash, so the peer can ingest correctly.
   if (ri < 0) {
-    for (int i = 0; i < MAX_ROOMS; i++) {
+    for (int i = 1; i < MAX_ROOMS; i++) {
       if (rooms[i].active) { ri = i; break; }
     }
   }
@@ -3715,9 +3717,9 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   data[len] = 0;   // NUL-terminate text
   const char* text = (const char*)&data[22 + name_len];
 
-  // Find local room matching hash
+  // Find local room matching hash; skip room 0 (JES-846)
   int ri = -1;
-  for (int i = 0; i < MAX_ROOMS; i++) {
+  for (int i = 1; i < MAX_ROOMS; i++) {
     if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
       ri = i; break;
     }
@@ -3726,7 +3728,7 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   // Occurs when nodes have different room keys (normal case: each node has its own
   // random identity). Packet is already ECDH-verified by onPeerDataRecv. (JES-835)
   if (ri < 0) {
-    for (int i = 0; i < MAX_ROOMS; i++) {
+    for (int i = 1; i < MAX_ROOMS; i++) {
       if (rooms[i].active) { ri = i; break; }
     }
   }
@@ -3767,15 +3769,15 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
   // Bounds-check: each VV entry is 8 bytes; truncate if frame is too short.
   while (num_vv > 0 && (size_t)(10 + (int)num_vv * 8) > len) num_vv--;
 
-  // Find matching local room (fallback to first active room, same as handleSyncReq).
+  // Find matching local room (fallback to first active room, same as handleSyncReq); skip room 0 (JES-846).
   int ri = -1;
-  for (int i = 0; i < MAX_ROOMS; i++) {
+  for (int i = 1; i < MAX_ROOMS; i++) {
     if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
       ri = i; break;
     }
   }
   if (ri < 0) {
-    for (int i = 0; i < MAX_ROOMS; i++) {
+    for (int i = 1; i < MAX_ROOMS; i++) {
       if (rooms[i].active) { ri = i; break; }
     }
   }
