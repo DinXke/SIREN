@@ -3255,7 +3255,11 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply, bool serial) {
     int byte_len = hex_chars / 2;
     if (byte_len > PUB_KEY_SIZE) byte_len = PUB_KEY_SIZE;
     uint8_t key[PUB_KEY_SIZE] = {};
-    if (!mesh::Utils::fromHex(key, byte_len, p)) {
+    char saved = p[hex_chars];
+    p[hex_chars] = '\0';
+    bool hex_ok = mesh::Utils::fromHex(key, byte_len, p);
+    p[hex_chars] = saved;
+    if (!hex_ok) {
       strcpy(reply, "Err - bad hex pubkey");
       return;
     }
