@@ -1281,8 +1281,46 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
             "document.getElementById('editClearGuest').checked=false;"
             "document.getElementById('editConfirmName').value='';"
             "document.getElementById('editCard').dataset.roomName=n;"
+            "syncPinFromFields();"
             "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
           "}"
+          // JES-867: interactive map pin picker (Leaflet, loaded from CDN by the
+          // browser — the device only serves this small snippet, tiles/library
+          // are fetched by the admin's browser). Falls back to the lat/lon
+          // number inputs when the browser has no internet (map stays blank).
+          "var _roomMap=null,_roomMarker=null;"
+          "function _pinMarker(lat,lon){"
+            "if(!_roomMap)return;"
+            "if(!_roomMarker){"
+              "_roomMarker=L.marker([lat,lon],{draggable:true}).addTo(_roomMap);"
+              "_roomMarker.on('dragend',function(ev){var p=ev.target.getLatLng();"
+                "document.getElementById('editLat').value=p.lat.toFixed(6);"
+                "document.getElementById('editLon').value=p.lng.toFixed(6);});"
+            "}else{_roomMarker.setLatLng([lat,lon]);}"
+          "}"
+          "function setRoomPin(lat,lon){"
+            "document.getElementById('editLat').value=lat.toFixed(6);"
+            "document.getElementById('editLon').value=lon.toFixed(6);"
+            "_pinMarker(lat,lon);"
+          "}"
+          "function syncPinFromFields(){"
+            "var la=parseFloat(document.getElementById('editLat').value);"
+            "var lo=parseFloat(document.getElementById('editLon').value);"
+            "if(isFinite(la)&&isFinite(lo)&&(la!==0||lo!==0)){"
+              "if(_roomMap){_roomMap.setView([la,lo],15);}"
+              "_pinMarker(la,lo);"
+            "}"
+          "}"
+          "function initRoomMap(){"
+            "if(typeof L==='undefined'){return;}"  // Leaflet not loaded (offline)
+            "var el=document.getElementById('roomMap');if(!el)return;"
+            "_roomMap=L.map('roomMap').setView([50.9297,5.3325],13);"  // Jessa Hasselt default
+            "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',"
+              "{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(_roomMap);"
+            "_roomMap.on('click',function(e){setRoomPin(e.latlng.lat,e.latlng.lng);});"
+            "syncPinFromFields();"
+          "}"
+          "window.addEventListener('load',initRoomMap);"
           "function submitEditRoom(){"
             "var card=document.getElementById('editCard');"
             "var passEl=document.getElementById('editPass');"
@@ -1378,6 +1416,11 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
           "<button type='submit'>+ Room toevoegen</button></form></div>";
 
   // Edit room form
+  // JES-867: Leaflet map assets (SRI-pinned, loaded from CDN by the browser).
+  page += "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css' "
+          "integrity='sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=' crossorigin=''/>"
+          "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js' "
+          "integrity='sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=' crossorigin=''></script>";
   page += "<div class='card' id='editCard'><h2>Room bewerken</h2>"
           "<form method='post' action='/api/room/set'>"
           "<input type='hidden' id='editConfirmName' name='confirm_name'>"
@@ -1392,10 +1435,14 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
           "<label style='font-size:0.85em;font-weight:normal'>"
           "<input type='checkbox' id='editClearGuest' name='clear_guest' value='1'> wissen</label></div>"
           "<div class='frow'><label>Locatie</label>"
-          "<input id='editLat' name='lat' type='number' step='any' min='-90' max='90' placeholder='breedtegraad'> "
-          "<input id='editLon' name='lon' type='number' step='any' min='-180' max='180' placeholder='lengtegraad'></div>"
+          "<input id='editLat' name='lat' type='number' step='any' min='-90' max='90' placeholder='breedtegraad' onchange='syncPinFromFields()'> "
+          "<input id='editLon' name='lon' type='number' step='any' min='-180' max='180' placeholder='lengtegraad' onchange='syncPinFromFields()'></div>"
+          "<div class='frow'><label>Kaart</label>"
+          "<div id='roomMap' style='height:260px;width:100%;max-width:520px;border-radius:6px'></div></div>"
           "<div class='frow'><label></label><span style='font-size:0.85em;color:#888'>"
-          "0 = geen locatie in advert</span></div>"
+          "Klik op de kaart of versleep de pin om de locatie te kiezen. "
+          "0 = geen locatie in advert. Kaart leeg? Dan heeft dit toestel geen internet &mdash; "
+          "vul de co&ouml;rdinaten handmatig in.</span></div>"
           "<button type='button' onclick='submitEditRoom()'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle

@@ -92,6 +92,8 @@ Shows a table of all active room slots with:
 
 **Location**: The **Locatie** fields (latitude `-90..90`, longitude `-180..180`, decimal degrees) set the coordinates broadcast in the room's advertisement, so clients/maps can show where the room server is. Leave both at `0` to omit the location from the advert. Equivalent serial CLI: `room set <idx> lat <val>` / `room set <idx> lon <val>`.
 
+**Map pin picker**: Below the Locatie fields the edit form shows an interactive **Kaart** (map). Click anywhere on the map, or drag the pin, to set the coordinates — the latitude/longitude fields update automatically (and vice-versa: typing coordinates re-centers the pin). The map (Leaflet + OpenStreetMap) is loaded from a CDN **by your browser**, not by the device, so no tiles are stored on the ESP32. If the room server's admin page is opened from a browser without internet access the map stays blank; in that case simply type the coordinates into the Locatie fields manually — everything still works. Third-party assets are loaded with Subresource Integrity (SRI) pinning.
+
 **QR Code**: Click the QR icon to display a QR code that MeshCore companion apps can scan to join the room directly (out-of-band join — works even with stealth mode on).
 
 ### LoRa Settings
