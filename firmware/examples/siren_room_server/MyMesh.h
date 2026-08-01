@@ -91,8 +91,8 @@
 /* Phase 5: version-vector replication constants. */
 #define MAX_VV_ORIGINS  8    // per-room VV entries (one per known origin server)
 #define MAX_SYNC_POSTS  8    // SYNCDAT frames per SYNCREQ response (airtime guard)
-/* Periodic anti-entropy pull interval. 3 min (JES-723 board verzoek); boot delay 60 s. */
-#define PEER_SYNC_INTERVAL_MS   (180UL * 1000)
+/* Periodic anti-entropy pull interval — runtime-configurable (JES-844).
+   Default 180 s; boot delay 60 s.  Range 10–3600 s; persisted to /sync_cfg. */
 #define PEER_SYNC_BOOT_DELAY_MS 60000UL
 
 /* Server-to-server sync TXT sub-types (data[4] >> 2).
@@ -247,6 +247,7 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool          _logging;
   bool          region_load_active;
   uint16_t      _advert_interval_sec;  // local advert period in seconds (10-3600, default 120)
+  uint32_t      _sync_interval_s;      // anti-entropy pull interval in seconds (10-3600, default 180, JES-844)
 
   NodePrefs         _prefs;         // radio / mesh settings (shared)
   TransportKeyStore key_store;
@@ -339,6 +340,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Peer persistence (Phase 5 replication) ---- */
   void          savePeerConfig();
   void          loadPeerConfig();
+
+  /* ---- Sync-interval persistence (JES-844) ---- */
+  void          saveSyncConfig();
+  void          loadSyncConfig();
 
   /* ---- Phase 5 anti-entropy helpers ---- */
   void          calcPeerSecret(int pi);
@@ -482,6 +487,10 @@ public:
   /** Get/set local advert interval in seconds (10-3600). Persisted to SPIFFS. */
   uint16_t getAdvertIntervalSec() const { return _advert_interval_sec; }
   void     setAdvertIntervalSec(uint16_t sec);
+
+  /** Get/set anti-entropy sync interval in seconds (10-3600). Persisted to /sync_cfg (JES-844). */
+  uint32_t getSyncIntervalSec() const { return _sync_interval_s; }
+  void     setSyncIntervalSec(uint32_t sec);
 
   /** Return pointer to room i's 32-byte Ed25519 public key (PUB_KEY_SIZE bytes). */
   const uint8_t* getRoomPubKey(int i) const {

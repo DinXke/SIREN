@@ -1346,6 +1346,23 @@ String WebManager::buildStatusPage(const char* ip) {
             "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>CLI: "
             "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code></p></div>";
 
+    // Sync interval (JES-844)
+    {
+      char sync_sec_str[8];
+      snprintf(sync_sec_str, sizeof(sync_sec_str), "%lu", (unsigned long)mesh.getSyncIntervalSec());
+      page += "<div class='card'><h2>Sync Interval</h2>"
+              "<form method='post' action='/api/sync/interval'>"
+              "<div class='frow'><label>Anti-entropy interval</label>"
+              "<input name='seconds' type='number' min='10' max='3600' value='";
+      page += sync_sec_str;
+      page += "'> s</div>"
+              "<button type='submit'>Opslaan</button></form>"
+              "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+              "10&ndash;3600 s, standaard 180 s. CLI: <code>sync interval &lt;s&gt;</code><br>"
+              "Nieuwe berichten worden instant gepusht; dit interval is de periodieke controle.</p>"
+              "</div>";
+    }
+
     // Sync diagnostics panel (JES-833)
     page += "<div class='card'><h2>Sync Diagnostiek</h2>"
             "<div id='sync-panel'><p style='color:#aaa'>Laden...</p></div>"
@@ -1739,6 +1756,17 @@ void WebManager::setupRoutes() {
       int sec = req->getParam("seconds", true)->value().toInt();
       if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
       _mesh.setAdvertIntervalSec((uint16_t)sec);
+      req->redirect("/");
+    });
+
+  // API: set anti-entropy sync interval (seconds) — JES-844
+  _server.on("/api/sync/interval", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("seconds", true)) { req->send(400, "text/plain", "missing seconds"); return; }
+      int sec = req->getParam("seconds", true)->value().toInt();
+      if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
+      _mesh.setSyncIntervalSec((uint32_t)sec);
       req->redirect("/");
     });
 

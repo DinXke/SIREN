@@ -102,6 +102,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _hist_head      = 0;
   _hist_bucket_ts = 0;
   _advert_interval_sec = 120;
+  _sync_interval_s     = 180;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
     rooms[i].active          = false;
@@ -194,6 +195,7 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
   }
 
   loadPeerConfig();
+  loadSyncConfig();    // restore configurable anti-entropy interval (JES-844)
   // Schedule staggered initial sync for each configured peer (Phase 5)
   for (int i = 0; i < MAX_PEERS; i++) {
     if (peers[i].active) {
@@ -481,6 +483,49 @@ void MultiRoomMesh::setAdvertIntervalSec(uint16_t sec) {
     rooms[i].next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + offset_ms);
   }
   saveRoomConfig();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Sync interval: configurable anti-entropy pull period (JES-844)     */
+/* ------------------------------------------------------------------ */
+#define SYNC_CFG_PATH "/sync_cfg"
+
+void MultiRoomMesh::setSyncIntervalSec(uint32_t sec) {
+  if (sec < 10)   sec = 10;
+  if (sec > 3600) sec = 3600;
+  _sync_interval_s = sec;
+  // Reschedule pending peer sync timers to respect new interval immediately
+  for (int i = 0; i < MAX_PEERS; i++) {
+    if (!peers[i].active) continue;
+    peers[i].next_sync_at = futureMillis((uint32_t)_sync_interval_s * 1000);
+  }
+  saveSyncConfig();
+}
+
+void MultiRoomMesh::saveSyncConfig() {
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(SYNC_CFG_PATH, "w");
+#else
+  File f = _fs->open(SYNC_CFG_PATH, "w");
+#endif
+  if (!f) return;
+  f.write((uint8_t*)&_sync_interval_s, 4);
+  f.close();
+}
+
+void MultiRoomMesh::loadSyncConfig() {
+  if (!_fs->exists(SYNC_CFG_PATH)) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(SYNC_CFG_PATH, "r");
+#else
+  File f = _fs->open(SYNC_CFG_PATH);
+#endif
+  if (!f) return;
+  uint32_t sec = 180;
+  f.read((uint8_t*)&sec, 4);
+  f.close();
+  if (sec < 10 || sec > 3600) sec = 180;
+  _sync_interval_s = sec;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1318,7 +1363,7 @@ void MultiRoomMesh::loop() {
     if (!peers[pi].active) continue;
     if (peers[pi].next_sync_at && millisHasNowPassed(peers[pi].next_sync_at)) {
       sendSyncReq(pi);
-      peers[pi].next_sync_at = futureMillis(PEER_SYNC_INTERVAL_MS);
+      peers[pi].next_sync_at = futureMillis((uint32_t)_sync_interval_s * 1000);
     }
   }
 
@@ -1534,6 +1579,24 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       return;
     }
     strcpy(reply, "Err - usage: notify <room_idx> list|add <hex64>|del <hex64>");
+    return;
+  }
+
+  // ---- sync interval [<seconds>] — configurable anti-entropy pull period (JES-844) ----
+  if (memcmp(command, "sync interval", 13) == 0) {
+    const char* arg = command + 13;
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+      sprintf(reply, "sync interval=%lu s (range 10-3600)", (unsigned long)_sync_interval_s);
+    } else {
+      int sec = atoi(arg);
+      if (sec < 10 || sec > 3600) {
+        strcpy(reply, "Err: interval must be 10-3600 seconds");
+      } else {
+        setSyncIntervalSec((uint32_t)sec);
+        sprintf(reply, "OK - sync interval %lu s", (unsigned long)_sync_interval_s);
+      }
+    }
     return;
   }
 
