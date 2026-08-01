@@ -128,6 +128,15 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
 
   _cli.loadPrefs(_fs);
 
+  // JES-842: room server must always forward flood packets. Older firmware had
+  // disable_fwd=1 hardcoded and that value gets saved to /com_prefs. Force it
+  // back to 0 and re-save so OTA upgrades from old firmware self-heal on first boot.
+  if (_prefs.disable_fwd != 0) {
+    _prefs.disable_fwd = 0;
+    _cli.savePrefs(_fs);
+    Serial.printf("[SIREN] JES-842: flood forwarding was disabled — re-enabled and saved\n");
+  }
+
   // SEC-001: ensure admin password is never the well-known default "password".
   // On first boot _prefs.password is empty (constructor) or may have been
   // set to the legacy "password" by a build flag.  Both cases trigger a random
