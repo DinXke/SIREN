@@ -2546,6 +2546,12 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
 
   // Update VV
   vvUpdate(slot, origin_id, ts);
+
+  // Notify MQTT transport (same as addPost) — publish replicated posts too
+  if (_mqtt_post_cb) {
+    _mqtt_post_cb((int)ridx, ts, author_pub, text, _mqtt_post_ctx);
+  }
+
   return true;
 }
 
