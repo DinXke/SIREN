@@ -691,6 +691,86 @@ String WebManager::buildChatPage() {
   return page;
 }
 
+// ---------------------------------------------------------------------------
+//  ACL management page (JES-720) — admin-only, no serial required
+// ---------------------------------------------------------------------------
+String WebManager::buildAclPage() {
+  String page = buildHead(_mesh.getNodeName());
+
+  page += "<div class='card'><h2>ACL &mdash; ";
+  page += htmlEscape(_mesh.getNodeName());
+  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>"
+          "<p style='color:#aaa;font-size:0.85em'>Beheer wie in elke room mag schrijven. "
+          "Sla op om rechten direct te wijzigen (geen herstart nodig).</p></div>";
+
+  // Role labels
+  static const char* ROLE_NAMES[] = { "GUEST (geen toegang)", "Read-only", "Read-write", "ADMIN" };
+
+  for (int r = 0; r < MAX_ROOMS; r++) {
+    if (!_mesh.isRoomActive(r)) continue;
+    int nc = _mesh.getRoomNumClients(r);
+
+    page += "<div class='card'><h3>";
+    page += htmlEscape(_mesh.getRoomName(r));
+    page += " &mdash; ";
+    page += nc;
+    page += " client(s)</h3>";
+
+    if (nc == 0) {
+      page += "<p style='color:#aaa'>Geen ingelogde clients.</p>";
+    } else {
+      page += "<table style='width:100%;border-collapse:collapse'>"
+              "<tr><th style='text-align:left;padding:4px 8px'>Naam</th>"
+              "<th style='text-align:left;padding:4px 8px'>PubKey (8 hex)</th>"
+              "<th style='text-align:left;padding:4px 8px'>Rol</th>"
+              "<th style='padding:4px 8px'>Actie</th></tr>";
+
+      for (int c = 0; c < nc; c++) {
+        const ClientInfo* ci = _mesh.getRoomClient(r, c);
+        if (!ci) continue;
+
+        // Build 8-char hex prefix of pub_key
+        char pub8[9] = {};
+        for (int b = 0; b < 4; b++)
+          snprintf(pub8 + b * 2, 3, "%02x", (unsigned int)ci->id.pub_key[b]);
+
+        uint8_t perm = ci->permissions & 3;
+        const char* name = _mesh.resolveName(ci->id.pub_key);
+
+        page += "<tr style='border-top:1px solid #333'>";
+        page += "<td style='padding:4px 8px'>";
+        page += htmlEscape(name);
+        page += "</td><td style='padding:4px 8px;font-family:monospace'>";
+        page += pub8;
+        page += "</td><td style='padding:4px 8px'>";
+        page += ROLE_NAMES[perm];
+        page += "</td><td style='padding:4px 8px'>"
+                "<form method='POST' action='/api/acl/set' style='display:inline'>"
+                "<input type='hidden' name='room' value='";
+        page += r;
+        page += "'><input type='hidden' name='pub' value='";
+        page += pub8;
+        page += "'><select name='perm'>";
+        for (int p = 0; p <= 3; p++) {
+          page += "<option value='";
+          page += p;
+          page += "'";
+          if (p == perm) page += " selected";
+          page += ">";
+          page += ROLE_NAMES[p];
+          page += "</option>";
+        }
+        page += "</select> <button type='submit'>Opslaan</button></form></td></tr>";
+      }
+      page += "</table>";
+    }
+    page += "</div>";
+  }
+
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
+
 String WebManager::buildStatusPage(const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
@@ -720,6 +800,8 @@ String WebManager::buildStatusPage(const char* ip) {
           "<p style='font-size:0.85em;color:#aaa'>CLI: <code>set name &lt;naam&gt;</code></p>";
   page += "<p><a href='/chat'><button>&#128172; Rooms</button></a>"
           " &mdash; berichten per kanaal bekijken en posten als operator</p>"
+          "<p><a href='/acl'><button>&#128100; ACL beheer</button></a>"
+          " &mdash; rechten per gebruiker instellen (lees/schrijf/admin)</p>"
           "</div>";
 
   // Rooms table
@@ -1665,6 +1747,57 @@ void WebManager::setupRoutes() {
     if (text.length() == 0) { req->send(400, "text/plain", "empty text");  return; }
     bool ok = _mesh.dmSend(pub.c_str(), text.c_str());
     req->send(ok ? 200 : 404, "text/plain", ok ? "OK" : "contact not found");
+  });
+
+  // ---- ACL management (JES-720) — all routes behind admin basic-auth ----
+
+  _server.on("/acl", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    req->send(200, "text/html", buildAclPage());
+  });
+
+  // GET /api/acl?room=<idx>  — JSON array of clients for that room
+  _server.on("/api/acl", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room")) { req->send(400, "application/json", "{\"error\":\"missing room\"}"); return; }
+    int ridx = req->getParam("room")->value().toInt();
+    if (ridx < 0 || ridx >= MAX_ROOMS || !_mesh.isRoomActive(ridx)) {
+      req->send(404, "application/json", "{\"error\":\"room not found\"}"); return;
+    }
+    int nc = _mesh.getRoomNumClients(ridx);
+    String j = "[";
+    for (int c = 0; c < nc; c++) {
+      const ClientInfo* ci = _mesh.getRoomClient(ridx, c);
+      if (!ci) continue;
+      char pub8[9] = {};
+      for (int b = 0; b < 4; b++)
+        snprintf(pub8 + b * 2, 3, "%02x", (unsigned int)ci->id.pub_key[b]);
+      if (j.length() > 1) j += ",";
+      j += "{\"pub\":\"";
+      j += pub8;
+      j += "\",\"name\":\"";
+      j += jsonEscape(_mesh.resolveName(ci->id.pub_key));
+      j += "\",\"perm\":";
+      j += (ci->permissions & 3);
+      j += "}";
+    }
+    j += "]";
+    req->send(200, "application/json", j);
+  });
+
+  // POST /api/acl/set  — change permissions for a client
+  _server.on("/api/acl/set", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room", true) || !req->hasParam("pub", true) || !req->hasParam("perm", true)) {
+      req->send(400, "text/plain", "missing params"); return;
+    }
+    int room = req->getParam("room", true)->value().toInt();
+    String pub  = req->getParam("pub",  true)->value();
+    int perm    = req->getParam("perm", true)->value().toInt();
+    if (perm < 0 || perm > 3) { req->send(400, "text/plain", "invalid perm"); return; }
+    bool ok = _mesh.setRoomClientPerm(room, pub.c_str(), (uint8_t)perm);
+    if (ok) req->redirect("/acl");
+    else    req->send(404, "text/plain", "client not found");
   });
 
   // ---- Peer management (JES-816) — all routes behind admin basic-auth ----

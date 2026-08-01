@@ -3355,6 +3355,31 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply, bool serial) {
  * pub_key must be PUB_KEY_SIZE (32) bytes.
  * Returns peer index on success, -1 on failure (full or duplicate).
  */
+
+// ---------------------------------------------------------------------------
+// ACL management (JES-720) — web UI set permissions
+// ---------------------------------------------------------------------------
+bool MultiRoomMesh::setRoomClientPerm(int room, const char* pub_hex8, uint8_t perms) {
+  if (room < 0 || room >= MAX_ROOMS || !rooms[room].active) return false;
+  if (!pub_hex8 || strlen(pub_hex8) < 2) return false;
+  int hex_len = (int)strlen(pub_hex8);
+  if (hex_len > PUB_KEY_SIZE * 2) hex_len = PUB_KEY_SIZE * 2;
+  // hex_len must be even
+  if (hex_len % 2) hex_len--;
+  uint8_t key_buf[PUB_KEY_SIZE] = {};
+  for (int i = 0; i < hex_len / 2; i++) {
+    char hi = pub_hex8[i * 2], lo = pub_hex8[i * 2 + 1];
+    auto hexdig = [](char c) -> uint8_t {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return 0;
+    };
+    key_buf[i] = (hexdig(hi) << 4) | hexdig(lo);
+  }
+  return rooms[room].acl.applyPermissions(rooms[room].id, key_buf, hex_len / 2, perms);
+}
+
 int MultiRoomMesh::addPeerFromWeb(const uint8_t* pub_key, const char* name) {
   // Duplicate check
   for (int i = 0; i < MAX_PEERS; i++) {

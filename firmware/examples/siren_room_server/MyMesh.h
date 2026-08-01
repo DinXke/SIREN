@@ -508,6 +508,22 @@ public:
   /** JSON array of DM thread messages for the contact with the given 8-char hex prefix. */
   String buildDmThreadJson(const char* pub_hex);
 
+  /* ---- ACL management API for web UI (JES-720) ---- */
+  /** Number of clients in room i (0 if inactive). */
+  int  getRoomNumClients(int i) const {
+    return (i >= 0 && i < MAX_ROOMS && rooms[i].active)
+           ? rooms[i].acl.getNumClients() : 0;
+  }
+  /** Client at index j in room i's ACL (nullptr if out of range). */
+  const ClientInfo* getRoomClient(int room, int j) {
+    if (room < 0 || room >= MAX_ROOMS || !rooms[room].active) return nullptr;
+    if (j < 0 || j >= rooms[room].acl.getNumClients()) return nullptr;
+    return rooms[room].acl.getClientByIdx(j);
+  }
+  /** Set permissions for a client identified by 8-char hex pubkey prefix.
+   *  Searches all clients in room; returns true on success, false if not found. */
+  bool setRoomClientPerm(int room, const char* pub_hex8, uint8_t perms);
+
   /* ---- Peer management API for web UI (JES-816) ---- */
   int          getNumPeers() const { return _num_peers; }
   const PeerInfo* getPeer(int i) const {
