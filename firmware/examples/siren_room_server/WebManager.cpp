@@ -1160,7 +1160,7 @@ static void writePageNav(PrintSink& page, const char* active) {
   page += "</div>";
 }
 
-// Uses AsyncResponseStream (JES-854) — chunked, avoids large contiguous heap alloc.
+// Uses AsyncResponseStream (JES-854) — NOTE: buffers full response in heap (see JES-864).
 void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
@@ -1685,7 +1685,7 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
     }
 
     page += "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
-            "CLI: <code>set flood_max &lt;n&gt;</code> / <code>set fwd on|off</code> / "
+            "CLI: <code>set flood_max &lt;n&gt;</code> / <code>set repeat on|off</code> / "
             "<code>region default &lt;naam&gt;</code></p></div>";
   }
 
@@ -1760,63 +1760,12 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
               "</div>";
     }
 
-    // Sync diagnostics panel (JES-833)
+    // Sync diagnostics: inline JS removed (JES-864) to reduce page heap usage.
+    // Raw data available via API: GET /api/sync/status
     page += "<div class='card'><h2>Sync Diagnostiek</h2>"
-            "<div id='sync-panel'><p style='color:#aaa'>Laden...</p></div>"
-            "<p style='font-size:0.8em;color:#aaa'>Auto-refresh 10s &bull; RAM-counters (reset bij reboot)</p></div>"
-            "<script>"
-            "function renderSync(d){"
-              "var el=document.getElementById('sync-panel');"
-              "if(!el)return;"
-              "while(el.firstChild)el.removeChild(el.firstChild);"
-              "var cp=document.createElement('p');"
-              "cp.style.fontSize='0.85em';"
-              "cp.textContent='REQ: '+d.counters.sync_req_sent"
-                "+'  DAT: '+d.counters.sync_dat_recv"
-                "+'  Recv: '+d.counters.sync_posts_recv"
-                "+'  Sent: '+d.counters.sync_posts_sent;"
-              "el.appendChild(cp);"
-              "if(d.rooms&&d.rooms.length){"
-                "var rp=document.createElement('p');"
-                "rp.style.fontSize='0.82em';"
-                "var rb=document.createElement('b');rb.textContent='Room hashes: ';rp.appendChild(rb);"
-                "d.rooms.forEach(function(r){"
-                  "var s=document.createElement('span');"
-                  "s.textContent='['+r.idx+'] '+r.name+' ('+r.hash+'...)  ';"
-                  "rp.appendChild(s);"
-                "});"
-                "el.appendChild(rp);"
-              "}"
-              "if(!d.peers||!d.peers.length){"
-                "var np=document.createElement('p');np.textContent='Geen peers.';el.appendChild(np);return;"
-              "}"
-              "var tbl=document.createElement('table');"
-              "var hr=document.createElement('tr');"
-              "['#','Naam','Status','Recv','Sent'].forEach(function(h){"
-                "var th=document.createElement('th');th.textContent=h;hr.appendChild(th);"
-              "});"
-              "tbl.appendChild(hr);"
-              "d.peers.forEach(function(p){"
-                "var tr=document.createElement('tr');"
-                "[p.idx,p.name,p.status,p.sync_posts_recv,p.sync_posts_sent"
-                "].forEach(function(v){"
-                  "var td=document.createElement('td');td.textContent=v;tr.appendChild(td);"
-                "});"
-                "tbl.appendChild(tr);"
-              "});"
-              "el.appendChild(tbl);"
-            "}"
-            "function loadSync(){"
-              "fetch('/api/sync/status')"
-                ".then(function(r){return r.json();})"
-                ".then(renderSync)"
-                ".catch(function(){"
-                  "var el=document.getElementById('sync-panel');"
-                  "if(el){var e=document.createElement('p');e.textContent='Fout.';el.appendChild(e);}"
-                "});"
-            "}"
-            "loadSync();setInterval(loadSync,10000);"
-            "</script>";
+            "<p style='font-size:0.88em;color:#aaa'>Sync-tellers beschikbaar via:"
+            " <a href='/api/sync/status'>/api/sync/status</a> (JSON)"
+            " &bull; CLI: <code>get stats</code></p></div>";
   }
 
   page += "</div>";  // end content wrapper
@@ -2085,9 +2034,9 @@ void WebManager::setupRoutes() {
     String ip = (_mode == MODE_AP)
       ? WiFi.softAPIP().toString()
       : WiFi.localIP().toString();
-    // Use chunked streaming to avoid a large contiguous heap allocation (JES-854).
-    // AsyncResponseStream buffers in linked 1460-byte chunks, so a 40KB+ page never
-    // requires more than ~2KB contiguous free heap at a time.
+    // NOTE (JES-864): AsyncResponseStream buffers the FULL response in a single growing
+    // cbuf — NOT linked chunks. Large pages still need contiguous heap. The status page is
+    // smaller than /network, but apply the same OOM guard if this page also becomes large.
     AsyncResponseStream* stream =
       req->beginResponseStream("text/html; charset=utf-8");
     if (!stream) {
@@ -2242,7 +2191,7 @@ void WebManager::setupRoutes() {
       if (!req->hasParam("repeater", true)) { req->send(400, "text/plain", "missing repeater"); return; }
       char cmd[20], reply[80];
       bool on = (req->getParam("repeater", true)->value() == "on");
-      snprintf(cmd, sizeof(cmd), "set fwd %s", on ? "on" : "off");
+      snprintf(cmd, sizeof(cmd), "set repeat %s", on ? "on" : "off");
       _mesh.handleCommand(0, cmd, reply);
       req->redirect("/rooms");
     });
@@ -2541,7 +2490,7 @@ void WebManager::setupRoutes() {
 
       const char* fwd = param("fwd");
       if (fwd) {
-        snprintf(cmd, sizeof(cmd), "set fwd %s", (strcmp(fwd, "on") == 0) ? "on" : "off");
+        snprintf(cmd, sizeof(cmd), "set repeat %s", (strcmp(fwd, "on") == 0) ? "on" : "off");
         _mesh.handleCommand(0, cmd, reply);
       }
       const char* fm = param("flood_max");
@@ -3157,8 +3106,24 @@ void WebManager::setupRoutes() {
   });
 
   // GET /network — Network settings page (JES-854 split)
+  // NOTE: AsyncResponseStream buffers the FULL response in a growing cbuf (contiguous heap).
+  // When MQTT TLS is active (~25 KB mbedTLS), heap fragmentation can cause cbuf::resize to
+  // throw std::bad_alloc → abort (JES-864). Guard prevents the crash; page size has been
+  // reduced (sync-diag JS removed) to lower the likelihood of hitting the guard.
   _server.on("/network", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (ESP.getMaxAllocHeap() < 20000) {
+      req->send(503, "text/html; charset=utf-8",
+        "<html><body style='background:#0f1117;color:#e0e0e0;font-family:sans-serif;padding:20px'>"
+        "<h2 style='color:#ff4444'>Tijdelijk weinig geheugen</h2>"
+        "<p>Pagina kan niet worden opgebouwd (vrij geheugen te laag).</p>"
+        "<p>Mogelijk veroorzaakt door MQTT TLS. Probeer: <code>mqtt disable</code> via CLI.</p>"
+        "<p>CLI-alternatieven: <code>wifi status</code> &bull; <code>peer list</code> "
+        "&bull; <code>mqtt status</code></p>"
+        "<p><a href='/' style='color:#00d4ff'>Terug naar Status</a></p>"
+        "</body></html>");
+      return;
+    }
     String ip = (_mode == MODE_AP) ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
     AsyncResponseStream* stream = req->beginResponseStream("text/html; charset=utf-8");
     if (!stream) { req->send(503, "text/plain", "OOM"); return; }
