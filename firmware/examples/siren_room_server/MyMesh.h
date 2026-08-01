@@ -29,10 +29,10 @@
 /* ------------------------------------------------------------------ */
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE  "2026"
+  #define FIRMWARE_BUILD_DATE  "2026-08-01"
 #endif
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION     "v1.0-siren-p1"
+  #define FIRMWARE_VERSION     "v1.9.0"
 #endif
 #ifndef LORA_FREQ
   #define LORA_FREQ            869.618
