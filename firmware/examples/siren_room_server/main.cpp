@@ -2,6 +2,7 @@
 #include <Mesh.h>
 #ifdef ESP32
   #include <esp_ota_ops.h>
+  #include <esp_system.h>
 #endif
 
 #include "MyMesh.h"
@@ -34,6 +35,21 @@ static char command[MAX_POST_TEXT_LEN + 1];
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
+#ifdef ESP32
+  // Log reset reason so crash cause is visible in serial output (JES-864)
+  {
+    static const char* const rst_names[] = {
+      "UNKNOWN", "POWERON", "EXT/RST_PIN", "SOFTWARE",
+      "PANIC/ABORT", "INT_WDT", "TASK_WDT", "WDT",
+      "DEEPSLEEP", "BROWNOUT", "SDIO"
+    };
+    esp_reset_reason_t rr = esp_reset_reason();
+    int rr_idx = ((int)rr >= 0 && (int)rr <= 10) ? (int)rr : 0;
+    Serial.printf("[BOOT] Reset reason: %s (%d)\n", rst_names[rr_idx], (int)rr);
+    Serial.printf("[BOOT] Free heap: %u bytes\n", esp_get_free_heap_size());
+  }
+#endif
 
   board.begin();
 
