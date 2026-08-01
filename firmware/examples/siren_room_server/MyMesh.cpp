@@ -2125,6 +2125,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     // p now points at "name|pass|guest <value>"
     if (memcmp(p, "name ", 5) == 0) {
       StrHelper::strncpy(rooms[idx].name, p + 5, sizeof(rooms[idx].name));
+      rooms[idx].config_ts = (uint32_t)getRTCClock()->getCurrentTime();  // JES-860: stamp for LWW
       saveRoomConfig();
       triggerRoomSync(-1);  // JES-856: propagate name change to all peers
       strcpy(reply, "OK");
@@ -2160,6 +2161,7 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
       strcpy(reply, "OK");
     } else if (memcmp(p, "guest ", 6) == 0) {
       StrHelper::strncpy(rooms[idx].guest_password, p + 6, sizeof(rooms[idx].guest_password));
+      rooms[idx].config_ts = (uint32_t)getRTCClock()->getCurrentTime();  // JES-860: stamp for LWW
       saveRoomConfig();
       triggerRoomSync(-1);  // JES-856: propagate guest_password change to all peers
       strcpy(reply, "OK");
@@ -4449,8 +4451,9 @@ void MultiRoomMesh::sendRoomSync(int pi) {
     if (!rooms[ri].active) continue;
 
     int len = 0;
-    uint32_t now = getRTCClock()->getCurrentTimeUnique();
-    memcpy(&reply_data[len], &now, 4);             len += 4;
+    // Use modification timestamp (config_ts) so remote end can apply last-writer-wins (JES-860).
+    uint32_t cts = rooms[ri].config_ts;
+    memcpy(&reply_data[len], &cts, 4);             len += 4;
     reply_data[len++] = (TXT_TYPE_ROOMSYNC << 2);
     reply_data[len++] = (uint8_t)ri;               // room_idx (informational)
 
@@ -4535,7 +4538,15 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
     if (!rooms[i].active) continue;
     if (memcmp(rooms[i].id.pub_key, recv_pub, PUB_KEY_SIZE) != 0) continue;
 
-    // Existing room found — update name and guest_password (last-writer-wins).
+    // Existing room found — update name and guest_password (last-writer-wins, JES-860).
+    // F1: reject stale frames; accept only if recv_ts is strictly newer than stored config_ts.
+    uint32_t recv_ts;
+    memcpy(&recv_ts, data, 4);
+    if (recv_ts <= rooms[i].config_ts) {
+      Serial.printf("[ROOMSYNC] skipped update room[%d] '%s' — recv_ts %u <= stored %u (stale)\n",
+                    i, rooms[i].name, (unsigned)recv_ts, (unsigned)rooms[i].config_ts);
+      return;
+    }
     bool changed = false;
     if (len > 102) {
       char new_name[24] = {};
@@ -4544,21 +4555,30 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
         StrHelper::strncpy(rooms[i].name, new_name, sizeof(rooms[i].name));
         changed = true;
       }
-      // guest_password starts after name + NUL
+      // F2: guest_password starts after name + NUL; only update when gp field is present in frame.
       size_t gp_offset = 102 + nl + 1;
-      char new_gp[16] = {};
-      parseNulStr(gp_offset, new_gp, 15);
-      if (strncmp(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password)) != 0) {
-        StrHelper::strncpy(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password));
-        changed = true;
+      if (gp_offset < len) {
+        char new_gp[16] = {};
+        parseNulStr(gp_offset, new_gp, 15);
+        if (strncmp(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password)) != 0) {
+          StrHelper::strncpy(rooms[i].guest_password, new_gp, sizeof(rooms[i].guest_password));
+          changed = true;
+        }
       }
     }
-    if (changed) saveRoomConfig();
+    if (changed) {
+      rooms[i].config_ts = recv_ts;  // F1: advance stored ts so older frames are rejected
+      saveRoomConfig();
+    }
     // SECURITY: log only slot + name — passwords never logged
     Serial.printf("[ROOMSYNC] updated room[%d] '%s' from peer[%d] '%s'\n",
                   i, rooms[i].name, pi, peers[pi].name);
     return;
   }
+
+  // Extract recv_ts for use in install branch (F1: seed config_ts on first install).
+  uint32_t recv_ts;
+  memcpy(&recv_ts, data, 4);
 
   // Validate private key (basic format check: reject all-0x00 or all-0xFF)
   const uint8_t* recv_prv = &data[6];
@@ -4597,6 +4617,9 @@ void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
   if (gp_offset < len) {
     parseNulStr(gp_offset, rooms[free_slot].guest_password, 15);
   }
+
+  // Seed config_ts from the received frame so future updates apply last-writer-wins (JES-860, F1).
+  rooms[free_slot].config_ts = recv_ts;
 
   // Activate slot with safe defaults
   rooms[free_slot].active  = true;
