@@ -82,6 +82,34 @@ They can also be managed via LoRa in the mobile app by using the Remote Manageme
 
 MeshCore is designed for devices listed in the [MeshCore Flasher](https://meshcore.io/flasher)
 
+## SIREN — Baked-in default identity key
+
+SIREN supports an optional build-time Ed25519 private key for room 0 (the primary room server identity). When set, a freshly erased device will use the pre-provisioned key instead of generating a random one. Subsequent boots always load the persisted identity from SPIFFS, so the baked key only takes effect once — on first boot after a full erase.
+
+### How to use
+
+1. Generate a key pair:
+   ```bash
+   python scripts/gen-identity-key.py
+   ```
+
+2. Copy the template and fill in the private key (128 hex chars):
+   ```bash
+   cp firmware/platformio_local.ini.example firmware/platformio_local.ini
+   # edit firmware/platformio_local.ini — paste the private key
+   ```
+
+3. Build as normal — PlatformIO picks up `platformio_local.ini` automatically.
+
+### Security notes
+
+- `firmware/platformio_local.ini` is **gitignored** — never commit it.
+- The `dist/` binaries published in this repo are built **without** a baked key. Room 0 gets a random identity on first boot if no key is injected.
+- Share only the **public key** (64 hex chars) with companion apps or pre-provisioning tooling.
+- If a device is stolen or compromised, generate a new key pair and reflash.
+
+---
+
 ## 📜 License
 
 MeshCore is open-source software released under the MIT License. You are free to use, modify, and distribute it for personal and commercial projects.
