@@ -463,6 +463,19 @@ public:
   /** JSON array of DM thread messages for the contact with the given 8-char hex prefix. */
   String buildDmThreadJson(const char* pub_hex);
 
+  /* ---- Peer management API for web UI (JES-816) ---- */
+  int          getNumPeers() const { return _num_peers; }
+  const PeerInfo* getPeer(int i) const {
+    return (i >= 0 && i < MAX_PEERS) ? &peers[i] : nullptr;
+  }
+  /** Add a peer by full pub_key + name from web UI (admin auth enforced by caller).
+   *  Returns peer index on success, or -1 on error (full / duplicate). */
+  int  addPeerFromWeb(const uint8_t* pub_key, const char* name);
+  /** Remove peer by index. Returns true on success. */
+  bool delPeerFromWeb(int idx);
+  /** Trigger immediate SYNCREQ: idx >= 0 = one peer, idx == -1 = all peers. */
+  void triggerPeerSync(int idx);
+
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {
     return (i >= 0 && i < MAX_ROOMS) ? rooms[i].password : "";

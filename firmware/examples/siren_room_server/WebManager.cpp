@@ -229,6 +229,18 @@ String WebManager::buildBackupJson() {
     if (i < MAX_ROOMS - 1) j += ",";
   }
 
+  // Peers (JES-816): each active peer as peer<n>_pub (64 hex) + peer<n>_name
+  for (int i = 0; i < MAX_PEERS; i++) {
+    const PeerInfo* peer = _mesh.getPeer(i);
+    if (!peer || !peer->active) continue;
+    char peer_pub_hex[65] = {};
+    for (int b = 0; b < PUB_KEY_SIZE; b++)
+      snprintf(peer_pub_hex + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
+    snprintf(tmp, sizeof(tmp), "%d", i);
+    j += ",\"peer"; j += tmp; j += "_pub\":\"";  j += peer_pub_hex;    j += "\"";
+    j += ",\"peer"; j += tmp; j += "_name\":\""; j += jsonEscape(peer->name); j += "\"";
+  }
+
   // Post pool (JES-790): flat key-value pairs for all active posts
   j += ",";
   j += _mesh.getPostsFlatJson();
@@ -359,6 +371,31 @@ bool WebManager::applyRestore(const String& json) {
       if (n == 96) {
         _mesh.setRoomIdentityFromBytes(i, id_buf, n);
       }
+    }
+  }
+
+  // Restore peers (JES-816) — present in v2 backups that include them
+  {
+    char peer_pub_key[20], peer_name_key[20];
+    char peer_pub_hex[65] = {}, peer_name[24] = {};
+    for (int i = 0; i < MAX_PEERS; i++) {
+      snprintf(peer_pub_key,  sizeof(peer_pub_key),  "peer%d_pub",  i);
+      snprintf(peer_name_key, sizeof(peer_name_key), "peer%d_name", i);
+      if (!extractField(peer_pub_key, peer_pub_hex, sizeof(peer_pub_hex))) continue;
+      if (strlen(peer_pub_hex) != 64) continue;
+      // Validate hex charset
+      bool valid = true;
+      for (int c = 0; c < 64; c++) {
+        char ch = peer_pub_hex[c];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
+          valid = false; break;
+        }
+      }
+      if (!valid) continue;
+      uint8_t key[PUB_KEY_SIZE] = {};
+      if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, peer_pub_hex)) continue;
+      extractField(peer_name_key, peer_name, sizeof(peer_name));
+      _mesh.addPeerFromWeb(key, peer_name[0] ? peer_name : nullptr);
     }
   }
 
@@ -676,6 +713,67 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "</table>";
   page += "<form method='post' action='/api/room/add'>"
           "<button type='submit'>+ Add Room</button></form></div>";
+
+  // Peer-koppeling (JES-816)
+  {
+    // Own node pubkey (rooms[0]) — share this with the other node's operator
+    const uint8_t* own_pub = mesh.getRoomPubKey(0);
+    char own_hex[65] = {};
+    if (own_pub) {
+      for (int b = 0; b < PUB_KEY_SIZE; b++)
+        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    }
+    page += "<div class='card'><h2>Peer-koppeling (Multi-room Replicatie)</h2>";
+    page += "<p><b>Eigen node pubkey</b> &mdash; geef dit aan de operator van de andere node:<br>"
+            "<code style='word-break:break-all;font-size:0.85em'>";
+    page += own_hex;
+    page += "</code></p>";
+
+    // Peers table
+    int np = mesh.getNumPeers();
+    page += "<p>"; page += np; page += " / "; page += MAX_PEERS; page += " peers geconfigureerd</p>";
+    if (np > 0) {
+      page += "<table><tr><th>#</th><th>Naam</th><th>Pubkey prefix</th><th>Laatste contact</th><th>Acties</th></tr>";
+      for (int i = 0; i < MAX_PEERS; i++) {
+        const PeerInfo* peer = mesh.getPeer(i);
+        if (!peer || !peer->active) continue;
+        char pfx[9] = {};
+        for (int b = 0; b < 4; b++)
+          snprintf(pfx + b * 2, 3, "%02x", (unsigned int)peer->pub_key[b]);
+        page += "<tr><td>"; page += i;
+        page += "</td><td>"; page += htmlEscape(peer->name);
+        page += "</td><td><code>"; page += pfx; page += "...</code>";
+        page += "</td><td>";
+        page += (peer->last_contact > 0 ? String((unsigned long)peer->last_contact) : "nooit");
+        page += "</td><td>";
+        page += "<form method='post' action='/api/peer/sync' style='display:inline'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button type='submit'>Sync</button></form> ";
+        page += "<form method='post' action='/api/peer/del' style='display:inline'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button onclick=\"return confirm('Peer "; page += i;
+        page += " verwijderen?')\">Del</button></form>";
+        page += "</td></tr>";
+      }
+      page += "</table>";
+    }
+
+    // Add peer form
+    page += "<br><b>Peer toevoegen</b> (voer de volledige 64-char hex pubkey in van de andere node)<br>"
+            "<form method='post' action='/api/peer/add'>"
+            "Pubkey: <input name='pub' size='36' maxlength='64' placeholder='64 hex chars' required> "
+            "Naam: <input name='name' size='16' maxlength='23'> "
+            "<button type='submit'>Toevoegen</button></form>";
+
+    // Sync all button
+    page += "<form method='post' action='/api/peer/sync' style='margin-top:6px'>"
+            "<button type='submit'>Sync All Nu</button></form>"
+            "<p style='font-size:0.85em;color:#aaa'>CLI (serial): "
+            "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code> &nbsp; "
+            "<code>peer del &lt;idx&gt;</code> &nbsp; "
+            "<code>peer sync</code></p>"
+            "</div>";
+  }
 
   // Edit room form
   page += "<div class='card'><h2>Edit Room</h2>"
@@ -1455,6 +1553,93 @@ void WebManager::setupRoutes() {
     if (text.length() == 0) { req->send(400, "text/plain", "empty text");  return; }
     bool ok = _mesh.dmSend(pub.c_str(), text.c_str());
     req->send(ok ? 200 : 404, "text/plain", ok ? "OK" : "contact not found");
+  });
+
+  // ---- Peer management (JES-816) — all routes behind admin basic-auth ----
+
+  // GET /api/peers — JSON list of configured peers + own pubkey
+  _server.on("/api/peers", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    const uint8_t* own_pub = _mesh.getRoomPubKey(0);
+    char own_hex[65] = {};
+    if (own_pub) {
+      for (int b = 0; b < PUB_KEY_SIZE; b++)
+        snprintf(own_hex + b * 2, 3, "%02x", (unsigned int)own_pub[b]);
+    }
+    String json = "{\"own_pub\":\"";
+    json += own_hex;
+    json += "\",\"peers\":[";
+    bool first = true;
+    for (int i = 0; i < MAX_PEERS; i++) {
+      const PeerInfo* p = _mesh.getPeer(i);
+      if (!p || !p->active) continue;
+      char pfx[9] = {};
+      for (int b = 0; b < 4; b++)
+        snprintf(pfx + b * 2, 3, "%02x", (unsigned int)p->pub_key[b]);
+      if (!first) json += ",";
+      first = false;
+      json += "{\"idx\":";  json += i;
+      json += ",\"name\":\""; json += jsonEscape(p->name); json += "\"";
+      json += ",\"pub_prefix\":\""; json += pfx; json += "\"";
+      json += ",\"last_contact\":"; json += (unsigned long)p->last_contact;
+      json += "}";
+    }
+    json += "]}";
+    req->send(200, "application/json", json);
+  });
+
+  // POST /api/peer/add (body: pub=<64hex>&name=<name>)
+  _server.on("/api/peer/add", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("pub", true)) { req->send(400, "text/plain", "missing pub"); return; }
+    const String& pub_str = req->getParam("pub", true)->value();
+    // Validate: must be exactly 64 hex characters
+    if (pub_str.length() != 64) { req->send(400, "text/plain", "pub must be 64 hex chars"); return; }
+    for (int i = 0; i < 64; i++) {
+      char c = pub_str[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+        req->send(400, "text/plain", "pub must be hex"); return;
+      }
+    }
+    uint8_t key[PUB_KEY_SIZE] = {};
+    if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, pub_str.c_str())) {
+      req->send(400, "text/plain", "bad hex"); return;
+    }
+    // Name (optional, clamped to 23 chars)
+    char name[24] = {};
+    if (req->hasParam("name", true)) {
+      const String& ns = req->getParam("name", true)->value();
+      size_t nlen = ns.length();
+      if (nlen >= sizeof(name)) nlen = sizeof(name) - 1;
+      memcpy(name, ns.c_str(), nlen);
+      name[nlen] = 0;
+    }
+    int idx = _mesh.addPeerFromWeb(key, name[0] ? name : nullptr);
+    if (idx < 0) {
+      req->send(409, "text/plain", "peer list full or duplicate"); return;
+    }
+    req->redirect("/");
+  });
+
+  // POST /api/peer/del (body: idx=<n>)
+  _server.on("/api/peer/del", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
+    int idx = req->getParam("idx", true)->value().toInt();
+    bool ok = _mesh.delPeerFromWeb(idx);
+    if (!ok) { req->send(400, "text/plain", "invalid idx"); return; }
+    req->redirect("/");
+  });
+
+  // POST /api/peer/sync (body: idx=<n> optional — omit for all peers)
+  _server.on("/api/peer/sync", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    int idx = -1;  // -1 = all peers
+    if (req->hasParam("idx", true) && req->getParam("idx", true)->value().length() > 0) {
+      idx = req->getParam("idx", true)->value().toInt();
+    }
+    _mesh.triggerPeerSync(idx);
+    req->redirect("/");
   });
 
   // ---------------------------------------------------------------------------
