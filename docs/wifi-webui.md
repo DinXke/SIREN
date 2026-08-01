@@ -140,6 +140,21 @@ On the **Netwerk** page, the **Advert & Verkeer** card lets you broadcast on dem
 
 The RX ring keeps the last 32 packets in RAM (reset on reboot); `total` in the JSON is a monotonic count of all packets seen since boot.
 
+### Advert intervals (JES-868)
+
+On the **Rooms** page the advert-interval card has **two separate settings, both in hours**:
+
+- **Zero-hop advert** (`0.01`–`18` u): how often each visible room advertises to **directly reachable neighbours only** (one hop, cheap). Stored internally in seconds; the field accepts fractional hours (e.g. `0.5` = 30 min).
+- **Flood advert** (`0`–`240` u, `0` = off, default `47` u): how often each visible room floods an advert across the **whole network**. This is the expensive network-wide beacon, so it defaults to a long period.
+
+Stealth rooms never advertise regardless of these values. Both are applied immediately and persisted (zero-hop to `room_cfg`, flood via the node prefs file).
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/advert/interval` | POST | Set `zerohop_hours` and/or `flood_hours` (both in hours) |
+
+Equivalent serial CLI: `advert interval <seconds>` (zero-hop) and `set flood.advert.interval <hours>` (flood).
+
 ### WiFi Settings
 
 Switch between AP and STA mode; set SSID and password for each mode.

@@ -327,6 +327,8 @@ The following commands are inherited from the MeshCore `CommonCLI` layer and wor
 | `set sf <7-12>` | Set spreading factor |
 | `set cr <5-8>` | Set coding rate (denominator; 4/5 to 4/8) |
 | `set tx_power <dBm>` | Set transmit power |
+| `advert interval [<seconds>]` | Get/set the zero-hop (local) advert interval, 10–64800 s. The web UI sets this in hours (JES-868). |
+| `set flood.advert.interval <hours>` | Set the flood advert interval in hours (0 = off, default 47). |
 | `radio` | Show current radio settings |
 | `stats` | Show packet statistics |
 | `radio stats` | Show radio-level statistics |
