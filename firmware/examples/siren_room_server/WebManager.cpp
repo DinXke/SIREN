@@ -16,7 +16,8 @@ WebManager::WebManager(MultiRoomMesh& mesh)
   : _server(80), _mesh(mesh), _ui_task(nullptr), _mqtt_mgr(nullptr),
     _started(false), _dns_started(false),
     _mode(MODE_AP),
-    _connect_started(0), _connecting(false)
+    _connect_started(0), _connecting(false),
+    _ntp_synced(false), _ntp_check_ms(0)
 {
   // Default AP SSID: "SIREN-Node" — overwritten in begin() with real node name
   strncpy(_ap_ssid, "SIREN-Node", sizeof(_ap_ssid) - 1);
@@ -453,6 +454,27 @@ static String base64Encode(const uint8_t* data, size_t len) {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+//  PrintSink — forwards String-like += calls to an AsyncResponseStream.
+//  Avoids allocating a single large contiguous heap block for the full page.
+//  AsyncResponseStream internally uses a linked list of 1460-byte chunks,
+//  so even a 40KB+ page never needs more than ~2KB of contiguous heap. (JES-854)
+// ---------------------------------------------------------------------------
+struct PrintSink {
+  Print& _p;
+  explicit PrintSink(Print& p) : _p(p) {}
+  void reserve(size_t) {}                              // no-op
+  PrintSink& operator+=(const char* s)                { if (s) _p.print(s); return *this; }
+  PrintSink& operator+=(const String& s)              { _p.print(s); return *this; }
+  PrintSink& operator+=(const __FlashStringHelper* f) { _p.print(f); return *this; }
+  PrintSink& operator+=(int i)           { _p.print(i); return *this; }
+  PrintSink& operator+=(unsigned int u)  { _p.print(u); return *this; }
+  PrintSink& operator+=(long l)          { _p.print(l); return *this; }
+  PrintSink& operator+=(unsigned long u) { _p.print(u); return *this; }
+  PrintSink& operator+=(uint8_t u)       { _p.print(u); return *this; }
+  PrintSink& operator+=(char c)          { _p.print(c); return *this; }
+};
 
 // ---------------------------------------------------------------------------
 //  HTML page builders
@@ -1032,14 +1054,16 @@ String WebManager::buildDebugLogJson() {
   return j;
 }
 
-String WebManager::buildStatusPage(const char* ip) {
+// Stream the main status page directly to an AsyncResponseStream.
+// Uses PrintSink so the existing page += ... code works without a large
+// contiguous heap allocation — AsyncResponseStream chains 1460-byte chunks. (JES-854)
+void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
   const char* ap_ssid = _ap_ssid;
   const char* sta_ssid = _sta_ssid;
 
-  String page;
-  page.reserve(28000);  // pre-allocate to avoid repeated heap re-allocs (JES-854)
+  PrintSink page(out);
   page += buildHead(mesh.getNodeName());
 
   // ---- Top bar ----
@@ -1085,6 +1109,19 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "</td></tr><tr><th>IP</th><td>"; page += ip;
   page += "</td></tr><tr><th>Rooms actief</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
+  {
+    uint32_t now_ts = mesh.getRTCClock()->getCurrentTime();
+    time_t t = (time_t)now_ts;
+    char tbuf[32] = "niet gesynchroniseerd";
+    if (now_ts > 1000000000UL) {
+      struct tm ti{};
+      gmtime_r(&t, &ti);
+      strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M UTC", &ti);
+    }
+    page += "<tr><th>Klok</th><td>"; page += tbuf;
+    if (_ntp_synced) page += " <span style='color:#00ff88'>(NTP &#10003;)</span>";
+    page += "</td></tr>";
+  }
   page += "</table>";
   // Server name edit form (JES-828)
   page += "<form method='post' action='/api/node/name' style='margin-top:12px'>"
@@ -1325,7 +1362,26 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "' maxlength='32'></div>"
           "<div class='frow'><label>Wachtwoord</label><input name='pass' type='password' maxlength='63'></div>"
           "<button type='submit'>STA opslaan &amp; verbinden</button></form>"
-          "<p style='margin-top:8px'>Huidig IP: <b>"; page += ip; page += "</b></p></div>";
+          "<p style='margin-top:8px'>Huidig IP: <b>"; page += ip; page += "</b></p>"
+          "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>Klok</h3>"
+          "<p style='font-size:0.9em;color:#aaa'>NTP synchroniseert automatisch als je verbonden bent met het internet (STA-modus). "
+          "Gebruik de knop hieronder als NTP niet beschikbaar is om de klok in te stellen op de tijd van je browser.</p>"
+          "<button type='button' class='sec' onclick='syncBrowserTime()'>&#128337; Synchroniseer browsertijd</button>"
+          "<span id='ts-status' style='margin-left:10px;font-size:0.85em;color:#aaa'></span>"
+          "<script>"
+          "function syncBrowserTime(){"
+          "  var ts=Math.floor(Date.now()/1000);"
+          "  fetch('/api/set_time',{method:'POST',credentials:'include',"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+          "    body:'ts='+ts})"
+          "  .then(function(r){"
+          "    document.getElementById('ts-status').textContent=r.ok?'Klok ingesteld!':'Fout bij instellen';"
+          "    document.getElementById('ts-status').style.color=r.ok?'#00ff88':'#ff4444';"
+          "  }).catch(function(){document.getElementById('ts-status').textContent='Verbindingsfout';});"
+          "}"
+          "</script>"
+          "</div>";
 
   // LoRa radio settings
   {
@@ -1689,7 +1745,7 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "</div>";  // end tab 3
 
   page += FPSTR(HTML_FOOT);
-  return page;
+  // (void return — PrintSink wrote directly to the AsyncResponseStream)
 }
 
 // ---------------------------------------------------------------------------
@@ -1834,9 +1890,12 @@ void WebManager::setupRoutes() {
     String ip = (_mode == MODE_AP)
       ? WiFi.softAPIP().toString()
       : WiFi.localIP().toString();
-    String pg = buildStatusPage(ip.c_str());
-    if (pg.length() < 500) {
-      // page build failed (heap OOM) — return small error instead of blank screen (JES-854)
+    // Use chunked streaming to avoid a large contiguous heap allocation (JES-854).
+    // AsyncResponseStream buffers in linked 1460-byte chunks, so a 40KB+ page never
+    // requires more than ~2KB contiguous free heap at a time.
+    AsyncResponseStream* stream =
+      req->beginResponseStream("text/html; charset=utf-8");
+    if (!stream) {
       req->send(503, "text/html; charset=utf-8",
         "<html><body style='background:#0f1117;color:#e0e0e0;font-family:sans-serif;padding:20px'>"
         "<h2 style='color:#ff4444'>Tijdelijk weinig geheugen</h2>"
@@ -1845,7 +1904,8 @@ void WebManager::setupRoutes() {
         "</body></html>");
       return;
     }
-    req->send(200, "text/html; charset=utf-8", pg);
+    buildStatusPageStream(*stream, ip.c_str());
+    req->send(stream);
   });
 
   // API: set server (node) name (JES-828)
@@ -2092,6 +2152,25 @@ void WebManager::setupRoutes() {
         _connecting = false;
         connectSTA();
       }
+    });
+
+  // API: set clock from browser timestamp (fallback when NTP unavailable)
+  // POST /api/set_time  body: ts=<unix_seconds>
+  // Admin-only; browser sends Math.floor(Date.now()/1000).
+  _server.on("/api/set_time", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      if (!req->hasParam("ts", true)) {
+        req->send(400, "application/json", "{\"error\":\"ts required\"}"); return;
+      }
+      long ts = req->getParam("ts", true)->value().toInt();
+      if (ts < 1000000000L || ts > 2147483647L) {
+        req->send(400, "application/json", "{\"error\":\"ts out of range\"}"); return;
+      }
+      _mesh.getRTCClock()->setCurrentTime((uint32_t)ts);
+      Serial.printf("[Clock] Time set via browser: %lu\n", (unsigned long)ts);
+      req->send(200, "application/json", "{\"ok\":true}");
     });
 
   // API: backup download
@@ -2963,6 +3042,24 @@ void WebManager::loop() {
     _dns.processNextRequest();
   }
 
+  // NTP clock sync: poll SNTP status every 2 s until the RTC is set,
+  // then re-sync once every hour to correct drift.
+  if (_mode == MODE_STA && !_connecting && WiFi.status() == WL_CONNECTED
+      && millis() >= _ntp_check_ms) {
+    _ntp_check_ms = millis() + (_ntp_synced ? 3600000UL : 2000UL);
+    struct tm ti{};
+    if (getLocalTime(&ti, 0)) {
+      time_t now = mktime(&ti);
+      if (now > 1000000000L) {
+        _mesh.getRTCClock()->setCurrentTime((uint32_t)now);
+        if (!_ntp_synced) {
+          _ntp_synced = true;
+          Serial.printf("[NTP] Clock synced — %s", asctime(&ti));
+        }
+      }
+    }
+  }
+
   if (_mode == MODE_STA && _connecting) {
     wl_status_t st = WiFi.status();
     if (st == WL_CONNECTED) {
@@ -2973,6 +3070,11 @@ void WebManager::loop() {
         _started = true;
         Serial.printf("[WiFi] Web UI: http://%s/\n", WiFi.localIP().toString().c_str());
       }
+      // Start NTP sync now that we have internet access
+      _ntp_synced = false;
+      _ntp_check_ms = millis() + 2000;  // first check after 2 s
+      configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+      Serial.println("[NTP] Sync started");
     } else if (millis() - _connect_started > WIFI_CONNECT_TIMEOUT_MS) {
       _connecting = false;
       Serial.printf("[WiFi] STA connect timeout (status %d). Falling back to AP mode.\n", st);
