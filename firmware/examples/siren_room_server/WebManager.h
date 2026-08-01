@@ -77,6 +77,9 @@ private:
   void connectSTA();
 
   void buildStatusPageStream(AsyncResponseStream& out, const char* ip);
+  void buildRoomsPageStream(AsyncResponseStream& out);
+  void buildNetworkPageStream(AsyncResponseStream& out, const char* ip);
+  void buildSystemPageStream(AsyncResponseStream& out);
   String buildChatPage();
   String buildAclPage();
   String buildStatsPage();
