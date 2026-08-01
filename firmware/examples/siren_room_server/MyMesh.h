@@ -197,6 +197,25 @@ struct Tombstone {
   uint8_t  room_hash[4];  // first 4 bytes of the room's pub_key
 };
 
+/* ---- RX live-view log (JES-868) ----
+ * Small ring buffer recording metadata of EVERY packet the radio receives,
+ * including flood packets not addressed to this node. Display/diagnostics only;
+ * no packet payload is stored (privacy — traffic may be encrypted for others). */
+#ifndef RX_LOG_SIZE
+  #define RX_LOG_SIZE 32
+#endif
+struct RxLogEntry {
+  uint32_t rx_millis;   // millis() when received (for age display)
+  uint32_t rtc;         // RTC unix time when received (0 if clock unset)
+  int16_t  rssi;        // last RSSI (dBm)
+  int8_t   snr;         // last SNR (dB)
+  uint8_t  ptype;       // PAYLOAD_TYPE_*
+  uint8_t  route;       // 0 = flood, 1 = direct
+  uint8_t  dhash;       // first payload byte (dest-hash for addressed packets)
+  uint8_t  path_len;    // routing path length
+  uint8_t  plen;        // payload length
+};
+
 /**
  * One virtual room server: owns its own keypair, name, passwords,
  * client ACL, and post ring-buffer.
@@ -291,6 +310,17 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   volatile int  _web_syncreq_idx;
   volatile bool _web_roomsync_pending;  // ROOMSYNC push requested from web
   volatile int  _web_roomsync_idx;
+  volatile bool _web_advert_pending;    // manual flood advert requested from web (JES-868)
+
+  /* ---- RX live-view ring (JES-868) ----
+   * Written by onRecvPacket() on the mesh task (Core 1); read by the AsyncTCP
+   * web task (Core 0) via getRxLog(). Single-writer/single-reader of POD; a
+   * torn read only garbles one display row and can never crash (fixed array,
+   * bounded indices), so no lock is taken on this hot RX path. */
+  RxLogEntry        _rxlog[RX_LOG_SIZE];
+  volatile uint8_t  _rxlog_head;    // index of next write slot
+  volatile uint32_t _rxlog_total;   // total packets ever seen (monotonic)
+  void recordRxLog(mesh::Packet* pkt);
 
   /* ---- Post-pool dirty timer (JES-794) ---- */
   unsigned long _post_dirty_at;   // 0 = not dirty; set to futureMillis(5000) on new post
@@ -531,9 +561,15 @@ public:
   int           getNotifyTargetCount(int room_idx) const;
   const uint8_t* getNotifyTarget(int room_idx, int i) const;
 
-  /** Get/set local advert interval in seconds (10-3600). Persisted to SPIFFS. */
+  /** Get/set zero-hop (local) advert interval in seconds (10-64800). Persisted to SPIFFS.
+   *  Exposed to the board in HOURS via the web UI (JES-868). */
   uint16_t getAdvertIntervalSec() const { return _advert_interval_sec; }
   void     setAdvertIntervalSec(uint16_t sec);
+
+  /** Get/set flood advert interval in HOURS (0 = off, max 240). Persisted via savePrefs().
+   *  Separate from the zero-hop interval above (JES-868). */
+  uint8_t getFloodAdvertIntervalHours() const { return _prefs.flood_advert_interval; }
+  void    setFloodAdvertIntervalHours(uint8_t hours);
 
   /** Get/set anti-entropy sync interval in seconds (10-3600). Persisted to /sync_cfg (JES-844). */
   uint32_t getSyncIntervalSec() const { return _sync_interval_s; }
@@ -656,6 +692,24 @@ public:
   void triggerPeerSync(int idx);
   /** Push all active rooms (1+) to one peer (idx >= 0) or all peers (idx == -1). */
   void triggerRoomSync(int idx);
+
+  /* ---- Manual flood advert + RX live-view (JES-868) ---- */
+  /** Request a manual flood advert from the web UI. Sets a pending flag; the
+   *  actual TX runs on the mesh task in loop() (never on the AsyncTCP task). */
+  void triggerAdvertFromWeb();
+  /** Total packets ever received (monotonic; wraps naturally at 2^32). */
+  uint32_t getRxLogTotal() const { return _rxlog_total; }
+  /** Number of ring slots. */
+  int getRxLogSize() const { return RX_LOG_SIZE; }
+  /** Copy RX log entry at physical ring index i (0..RX_LOG_SIZE-1).
+   *  Returns false if i out of range. POD copy; safe to read from web task. */
+  bool getRxLogEntry(int i, RxLogEntry& out) const {
+    if (i < 0 || i >= RX_LOG_SIZE) return false;
+    out = _rxlog[i];
+    return true;
+  }
+  /** Index of the next slot to be written (oldest entry when ring is full). */
+  int getRxLogHead() const { return _rxlog_head; }
 
   /* ---- Region / scope accessors for web UI (JES-852) ---- */
   int getRegionCount() const { return region_map.getCount(); }

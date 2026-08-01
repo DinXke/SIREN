@@ -842,6 +842,56 @@ String WebManager::buildChatPage() {
 }
 
 // ---------------------------------------------------------------------------
+//  RX live-view page (JES-868) — shows metadata of ALL received packets,
+//  including flood traffic not addressed to this node. Admin-only. Payload is
+//  never shown (traffic may be encrypted for others). Data via GET /api/rxlog.
+// ---------------------------------------------------------------------------
+String WebManager::buildRxLogPage() {
+  String page = buildHead(_mesh.getNodeName());
+
+  page += "<div id='topbar'><h1>&#128225; Live verkeer</h1>"
+          "<a href='/network'>&#8592; Netwerk</a></div>";
+
+  page += "<div style='padding:10px'>"
+          "<p style='font-size:0.85em;color:#aaa'>Alle door de radio ontvangen pakketten "
+          "(ook flood-verkeer dat niet voor deze node bestemd is). Enkel metadata; "
+          "berichtinhoud wordt nooit getoond.</p>"
+          "<p style='font-size:0.85em'>Totaal ontvangen: <b id='tot'>&mdash;</b> "
+          "&bull; <label><input type='checkbox' id='auto' checked> auto-refresh (2s)</label></p>"
+          "<div style='overflow-x:auto'>"
+          "<table style='width:100%;font-size:0.82em'>"
+          "<thead><tr><th>Leeftijd</th><th>Type</th><th>Route</th><th>Dest</th>"
+          "<th>Hops</th><th>Len</th><th>RSSI</th><th>SNR</th></tr></thead>"
+          "<tbody id='rows'><tr><td colspan='8'>Laden&hellip;</td></tr></tbody>"
+          "</table></div></div>";
+
+  page += "<script>\n"
+          "var PT={0:'REQ',1:'RESP',2:'TXT',3:'ACK',4:'ADVERT',5:'GRP_TXT',"
+          "6:'GRP_DATA',7:'ANON_REQ',8:'PATH',9:'TRACE',10:'MULTIPART',"
+          "11:'CONTROL',15:'RAW'};\n"
+          "function h2(n){return ('0'+(n&255).toString(16)).slice(-2);}\n"
+          "function age(ms){var s=Math.floor(ms/1000);if(s<1)return 'nu';"
+          "if(s<60)return s+'s';var m=Math.floor(s/60);if(m<60)return m+'m';"
+          "return Math.floor(m/60)+'h';}\n"
+          "function load(){fetch('/api/rxlog').then(function(r){return r.json();})"
+          ".then(function(d){document.getElementById('tot').textContent=d.total;"
+          "var b=document.getElementById('rows');b.innerHTML='';"
+          "if(!d.pkts.length){var tr=document.createElement('tr');var td=document.createElement('td');"
+          "td.colSpan=8;td.textContent='Nog geen verkeer ontvangen';tr.appendChild(td);b.appendChild(tr);return;}"
+          "d.pkts.forEach(function(p){var tr=document.createElement('tr');"
+          "function cell(t){var td=document.createElement('td');td.textContent=t;tr.appendChild(td);}"
+          "cell(age(p.age));cell(PT[p.ptype]!==undefined?PT[p.ptype]:('0x'+h2(p.ptype)));"
+          "cell(p.flood?'flood':'direct');cell('0x'+h2(p.dhash));"
+          "cell(p.hops);cell(p.plen);cell(p.rssi);cell(p.snr);b.appendChild(tr);});})"
+          ".catch(function(){});}\n"
+          "load();setInterval(function(){if(document.getElementById('auto').checked)load();},2000);\n"
+          "</script>\n";
+
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
+
+// ---------------------------------------------------------------------------
 //  ACL management page (JES-720) — admin-only, no serial required
 // ---------------------------------------------------------------------------
 String WebManager::buildAclPage() {
@@ -1468,16 +1518,27 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
             "<button class='warn-btn' name='stealth' value='on' "
             "onclick=\"return confirm('Alle rooms verbergen? Adverts stoppen.')\">Alles verbergen</button></form>"
             "</div>";
-    char adv_sec_str[8];
-    snprintf(adv_sec_str, sizeof(adv_sec_str), "%d", (int)mesh.getAdvertIntervalSec());
+    // Advert intervals — separate zero-hop and flood settings, in HOURS (JES-868).
+    char zh_hours_str[12];
+    snprintf(zh_hours_str, sizeof(zh_hours_str), "%.3g",
+             (double)mesh.getAdvertIntervalSec() / 3600.0);
+    char fl_hours_str[8];
+    snprintf(fl_hours_str, sizeof(fl_hours_str), "%d",
+             (int)mesh.getFloodAdvertIntervalHours());
     page += "<form method='post' action='/api/advert/interval'>"
-            "<div class='frow'><label>Advert interval</label>"
-            "<input name='seconds' type='number' min='10' max='3600' value='";
-    page += adv_sec_str;
-    page += "'> s</div>"
+            "<div class='frow'><label>Zero-hop advert</label>"
+            "<input name='zerohop_hours' type='number' step='0.05' min='0.01' max='18' value='";
+    page += zh_hours_str;
+    page += "'> uur</div>"
+            "<div class='frow'><label>Flood advert</label>"
+            "<input name='flood_hours' type='number' step='1' min='0' max='240' value='";
+    page += fl_hours_str;
+    page += "'> uur</div>"
             "<button type='submit'>Opslaan</button></form>"
             "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
-            "10&ndash;3600 s, standaard 120 s. CLI: <code>advert interval &lt;s&gt;</code></p>"
+            "Beide in uren. Zero-hop = advert enkel naar directe buren (0.01&ndash;18 u). "
+            "Flood = advert over het hele netwerk (0 = uit, standaard 47 u). "
+            "CLI: <code>advert interval &lt;s&gt;</code> / <code>set flood.advert.interval &lt;u&gt;</code></p>"
             "</div>";
   }
 
@@ -1812,6 +1873,15 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
             "<button type='submit'>Rooms Sync (stuur rooms naar peers)</button></form>"
             "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>CLI: "
             "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code></p></div>";
+
+    // Manual flood advert + RX live-view (JES-868). Kept compact to limit /network heap use.
+    page += "<div class='card'><h2>Advert &amp; Verkeer</h2>"
+            "<form method='post' action='/api/advert'>"
+            "<button type='submit'>Flood advert nu versturen</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "Verstuurt direct een flood-advert voor alle zichtbare (niet-stealth) rooms.</p>"
+            "<p style='margin-top:8px'><a href='/rxlog'>&#128225; Live ontvangen verkeer &raquo;</a></p>"
+            "</div>";
 
     // Sync interval (JES-844)
     {
@@ -2310,13 +2380,33 @@ void WebManager::setupRoutes() {
     });
 
   // API: set global advert interval (seconds)
+  // Set zero-hop and/or flood advert interval, both in HOURS (JES-868).
+  // Legacy 'seconds' param (zero-hop in seconds) still accepted for backward compat.
   _server.on("/api/advert/interval", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
-      if (!req->hasParam("seconds", true)) { req->send(400, "text/plain", "missing seconds"); return; }
-      int sec = req->getParam("seconds", true)->value().toInt();
-      if (sec < 10 || sec > 3600) { req->send(400, "text/plain", "seconds must be 10-3600"); return; }
-      _mesh.setAdvertIntervalSec((uint16_t)sec);
+      bool any = false;
+      if (req->hasParam("zerohop_hours", true)) {
+        float h = req->getParam("zerohop_hours", true)->value().toFloat();
+        if (h < 0.01f || h > 18.0f) { req->send(400, "text/plain", "zerohop_hours must be 0.01-18"); return; }
+        long sec = lroundf(h * 3600.0f);
+        if (sec < 10) sec = 10;
+        if (sec > 64800) sec = 64800;
+        _mesh.setAdvertIntervalSec((uint16_t)sec);
+        any = true;
+      } else if (req->hasParam("seconds", true)) {
+        int sec = req->getParam("seconds", true)->value().toInt();
+        if (sec < 10 || sec > 64800) { req->send(400, "text/plain", "seconds must be 10-64800"); return; }
+        _mesh.setAdvertIntervalSec((uint16_t)sec);
+        any = true;
+      }
+      if (req->hasParam("flood_hours", true)) {
+        int fh = req->getParam("flood_hours", true)->value().toInt();
+        if (fh < 0 || fh > 240) { req->send(400, "text/plain", "flood_hours must be 0-240"); return; }
+        _mesh.setFloodAdvertIntervalHours((uint8_t)fh);
+        any = true;
+      }
+      if (!any) { req->send(400, "text/plain", "missing zerohop_hours or flood_hours"); return; }
       req->redirect("/rooms");
     });
 
@@ -3134,6 +3224,56 @@ void WebManager::setupRoutes() {
     }
     _mesh.triggerRoomSync(idx);
     req->redirect("/network");
+  });
+
+  // POST /api/advert — manual flood advert (JES-868, admin-auth required).
+  // Sets a pending flag; the mesh loop performs the actual TX (never here).
+  _server.on("/api/advert", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    _mesh.triggerAdvertFromWeb();
+    req->redirect("/network");
+  });
+
+  // GET /rxlog — live view of all received packets (JES-868, admin-auth required)
+  _server.on("/rxlog", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    req->send(200, "text/html; charset=utf-8", buildRxLogPage());
+  });
+
+  // GET /api/rxlog — JSON snapshot of the RX ring buffer (metadata only, no payload)
+  _server.on("/api/rxlog", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    String j = "{\"total\":";
+    j += (unsigned long)_mesh.getRxLogTotal();
+    j += ",\"now\":";
+    j += (unsigned long)millis();
+    j += ",\"pkts\":[";
+    int sz = _mesh.getRxLogSize();
+    int head = _mesh.getRxLogHead();
+    bool first = true;
+    // Emit newest-first: walk backwards from the slot before head.
+    for (int n = 0; n < sz; n++) {
+      int idx = (head - 1 - n + sz * 2) % sz;
+      RxLogEntry e;
+      if (!_mesh.getRxLogEntry(idx, e)) continue;
+      if (e.rx_millis == 0 && e.rtc == 0 && e.plen == 0) continue;  // unused slot
+      if (!first) j += ",";
+      first = false;
+      j += "{\"age\":";   j += (unsigned long)(millis() - e.rx_millis);
+      j += ",\"rtc\":";   j += (unsigned long)e.rtc;
+      j += ",\"rssi\":";  j += (int)e.rssi;
+      j += ",\"snr\":";   j += (int)e.snr;
+      j += ",\"ptype\":"; j += (int)e.ptype;
+      j += ",\"flood\":"; j += (e.route == 0 ? 1 : 0);
+      j += ",\"dhash\":"; j += (int)e.dhash;
+      j += ",\"hops\":";  j += (int)e.path_len;
+      j += ",\"plen\":";  j += (int)e.plen;
+      j += "}";
+    }
+    j += "]}";
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", j);
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
   });
 
   // GET /api/sync/status — sync diagnostics (JES-833, admin-auth required)

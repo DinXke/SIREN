@@ -125,6 +125,21 @@ Couples this node with another SIREN node so their rooms replicate. All routes a
 
 Two nodes only sync a given room when **both** hold a room with the **same key** (matched by `room_hash`). Coupling nodes ≠ coupling individual rooms — see [replication-protocol.md](replication-protocol.md#coupling-nodes-in-practice). Equivalent serial CLI: `peer add <hex64> <name>`, `peer del <idx>`, `peer list`, `peer sync`.
 
+### Advert & Verkeer (Manual advert + live traffic) — JES-868
+
+On the **Netwerk** page, the **Advert & Verkeer** card lets you broadcast on demand and watch the airwaves:
+
+- **Flood advert nu versturen**: immediately floods an advert for every visible (non-stealth) room, so other nodes can discover this node right away instead of waiting for the periodic timer. Stealth rooms are still skipped. The button only queues the request; the actual radio transmit runs on the mesh task, never on the web task (avoids the TX/`self_id` race, cf JES-864).
+- **Live ontvangen verkeer**: opens `/rxlog`, a live view of **every** packet the radio receives — including flood traffic **not addressed to this node**. Each row shows age, payload type (ADVERT, TXT, ACK, SYNC/REQ…), route (flood/direct), destination-hash byte, hop count, payload length, and last RSSI/SNR. Auto-refreshes every 2 s (toggle off with the checkbox). **Only packet metadata is shown — message content is never decoded or displayed**, since traffic may be encrypted for other nodes.
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/advert` | POST | Queue a manual flood advert (all non-stealth rooms) |
+| `/rxlog` | GET | Live received-traffic page |
+| `/api/rxlog` | GET | JSON snapshot of the RX ring (metadata only, newest first) |
+
+The RX ring keeps the last 32 packets in RAM (reset on reboot); `total` in the JSON is a monotonic count of all packets seen since boot.
+
 ### WiFi Settings
 
 Switch between AP and STA mode; set SSID and password for each mode.

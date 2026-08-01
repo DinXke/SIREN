@@ -58,6 +58,10 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   set_radio_at = revert_radio_at = 0;
   _web_syncreq_pending = _web_roomsync_pending = false;
   _web_syncreq_idx = _web_roomsync_idx = -1;
+  _web_advert_pending = false;
+  memset((void*)_rxlog, 0, sizeof(_rxlog));
+  _rxlog_head = 0;
+  _rxlog_total = 0;
   _post_dirty_at = 0;
   _mqtt_post_cb  = nullptr;
   _mqtt_post_ctx = nullptr;
@@ -467,7 +471,7 @@ void MultiRoomMesh::loadRoomConfig() {
   // Global advert interval — appended after all rooms; default=120 on EOF
   uint16_t ais = 120;
   f.read((uint8_t*)&ais, 2);  // ignore return; default holds on short read
-  if (ais < 10 || ais > 3600) ais = 120;
+  if (ais < 10 || ais > 64800) ais = 120;
   _advert_interval_sec = ais;
   f.close();
 }
@@ -501,7 +505,7 @@ void MultiRoomMesh::setRoomStealth(int idx, bool s) {
 /* ------------------------------------------------------------------ */
 void MultiRoomMesh::setAdvertIntervalSec(uint16_t sec) {
   if (sec < 10) sec = 10;
-  if (sec > 3600) sec = 3600;
+  if (sec > 64800) sec = 64800;   // 18 h — board sets this in hours via the web UI
   _advert_interval_sec = sec;
   // Reschedule local advert timers for all visible active rooms
   for (int i = 0; i < MAX_ROOMS; i++) {
@@ -510,6 +514,16 @@ void MultiRoomMesh::setAdvertIntervalSec(uint16_t sec) {
     rooms[i].next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + offset_ms);
   }
   saveRoomConfig();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Flood advert interval (hours) — separate from zero-hop (JES-868)   */
+/* ------------------------------------------------------------------ */
+void MultiRoomMesh::setFloodAdvertIntervalHours(uint8_t hours) {
+  if (hours > 240) hours = 240;   // uint8 cap; 0 = disable flood adverts
+  _prefs.flood_advert_interval = hours;
+  updateFloodAdvertTimer();       // reschedules all visible rooms (0 => disabled)
+  savePrefs();                    // persisted by CommonCLI prefs file
 }
 
 /* ------------------------------------------------------------------ */
@@ -560,6 +574,10 @@ void MultiRoomMesh::loadSyncConfig() {
 /* ------------------------------------------------------------------ */
 mesh::DispatcherAction MultiRoomMesh::onRecvPacket(mesh::Packet* pkt) {
   uint8_t ptype = pkt->getPayloadType();
+
+  // Live-view: record metadata of EVERY received packet (JES-868), incl. flood
+  // packets not addressed to this node. Metadata only — never the payload.
+  recordRxLog(pkt);
 
   // For addressed packets (anon login / peer data / path), find the matching room
   if (pkt->payload_len >= 1 &&
@@ -1211,6 +1229,33 @@ void MultiRoomMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
   }
 }
 
+/* Web-triggered manual flood advert (JES-868). Runs on the AsyncTCP task, so it
+ * MUST NOT touch the radio/self_id here (would race the mesh loop, cf JES-864).
+ * Only set the pending flag; loop() performs the actual TX on the mesh task. */
+void MultiRoomMesh::triggerAdvertFromWeb() {
+  _web_advert_pending = true;
+}
+
+/* Record metadata of a received packet into the RX live-view ring (JES-868).
+ * Called from onRecvPacket() on the mesh task (single writer). No payload is
+ * stored — traffic may be encrypted for other nodes (privacy). */
+void MultiRoomMesh::recordRxLog(mesh::Packet* pkt) {
+  if (!pkt) return;
+  uint8_t h = _rxlog_head;
+  RxLogEntry& e = _rxlog[h];
+  e.rx_millis = millis();
+  e.rtc       = getRTCClock()->getCurrentTime();
+  e.rssi      = (int16_t)radio_driver.getLastRSSI();
+  e.snr       = (int8_t)radio_driver.getLastSNR();
+  e.ptype     = pkt->getPayloadType();
+  e.route     = pkt->isRouteFlood() ? 0 : 1;
+  e.dhash     = (pkt->payload_len >= 1) ? pkt->payload[0] : 0;
+  e.path_len  = pkt->getPathHashCount();
+  e.plen      = (uint8_t)(pkt->payload_len > 255 ? 255 : pkt->payload_len);
+  _rxlog_head = (uint8_t)((h + 1) % RX_LOG_SIZE);
+  _rxlog_total++;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Advert timer management                                             */
 /* ------------------------------------------------------------------ */
@@ -1390,7 +1435,13 @@ void MultiRoomMesh::loop() {
       if (slot.next_flood_advert && millisHasNowPassed(slot.next_flood_advert)) {
         self_id = slot.id;
         sendRoomAdvertisement(slot, 0, true);
-        slot.next_flood_advert = futureMillis(FLOOD_ADVERT_INTERVAL_MS + (uint32_t)i * 15000);
+        // Reschedule using the configurable flood interval (hours); 0 = disable.
+        if (_prefs.flood_advert_interval > 0) {
+          slot.next_flood_advert = futureMillis(
+              (uint32_t)_prefs.flood_advert_interval * 60UL * 60UL * 1000UL + (uint32_t)i * 15000);
+        } else {
+          slot.next_flood_advert = 0;
+        }
         slot.next_local_advert = futureMillis((uint32_t)_advert_interval_sec * 1000 + (uint32_t)i * 15000);
       } else if (slot.next_local_advert && millisHasNowPassed(slot.next_local_advert)) {
         self_id = slot.id;
@@ -1444,6 +1495,13 @@ void MultiRoomMesh::loop() {
     } else {
       for (int i = 0; i < MAX_PEERS; i++) if (peers[i].active) sendRoomSync(i);
     }
+  }
+
+  // Deferred web-triggered flood advert (JES-868): performed on the mesh task so
+  // the radio TX + self_id swap never race the AsyncTCP web callback (JES-864).
+  if (_web_advert_pending) {
+    _web_advert_pending = false;
+    sendSelfAdvertisement(0, true);   // flood; skips stealth rooms internally
   }
 
   // Debounced post-pool persistence (JES-794): write SPIFFS ~5s after last new post

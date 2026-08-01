@@ -84,6 +84,7 @@ private:
   void buildNetworkPageStream(AsyncResponseStream& out, const char* ip);
   void buildSystemPageStream(AsyncResponseStream& out);
   String buildChatPage();
+  String buildRxLogPage();   // JES-868: live received-traffic view
   String buildAclPage();
   String buildStatsPage();
   String buildStatsJson();
