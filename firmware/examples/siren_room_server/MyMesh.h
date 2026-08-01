@@ -91,14 +91,14 @@
 /* Phase 5: version-vector replication constants. */
 #define MAX_VV_ORIGINS  8    // per-room VV entries (one per known origin server)
 #define MAX_SYNC_POSTS  8    // SYNCDAT frames per SYNCREQ response (airtime guard)
-/* Periodic anti-entropy pull interval. 3-min default; boot delay is 45 s per peer. */
-#define PEER_SYNC_INTERVAL_MS   (3UL * 60 * 1000)
+/* Periodic anti-entropy pull interval. 45 s (JES-840); boot delay is 45 s per peer. */
+#define PEER_SYNC_INTERVAL_MS   (45UL * 1000)
 #define PEER_SYNC_BOOT_DELAY_MS 45000UL
 
 /* Server-to-server sync TXT sub-types (data[4] >> 2).
    Range 4-6 is free above the existing SIGNED_PLAIN=2, CLI_DATA=1, PLAIN=0. */
 #define TXT_TYPE_SYNCREQ  4   // A→B pull request  [ts][flags][num_vv][VV...]
-#define TXT_TYPE_SYNCDAT  5   // B→A one post       [ts][flags][post_ts][orig[4]][auth[4]][text]
+#define TXT_TYPE_SYNCDAT  5   // B→A one post       [ts][flags][room_hash[4]][post_ts][orig[4]][auth[4]][1:name_len][name][text]
 #define TXT_TYPE_SYNCEND  6   // B→A end of stream  [ts][flags][num_vv][VV...]
 #define TXT_TYPE_SYNCDEL  7   // delete tombstone   [ts][flags][room_hash[4]][origin_id[4]][post_ts[4]]
 
@@ -548,6 +548,7 @@ public:
   /* ---- IRC / chat accessors (JES-798) ---- */
   /** Resolve a 32-byte pubkey to an advertised name. Falls back to 8-char hex prefix. */
   const char* resolveName(const uint8_t* pubkey);
+  void        storeName(const uint8_t* pub4, const char* name);
   /** Direct access to the global post pool for web/CLI inspection. */
   const PostInfo* getPostPool() const { return _post_pool; }
   /** Post a server-authored message to a room. Pushes to connected companions. */

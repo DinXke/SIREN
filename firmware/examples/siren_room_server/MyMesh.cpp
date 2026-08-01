@@ -2913,6 +2913,36 @@ const char* MultiRoomMesh::resolveName(const uint8_t* pubkey) {
   return hex_buf;
 }
 
+/**
+ * Store a name→pubkey-prefix mapping in the name table (JES-840).
+ * Used by handleSyncDat to learn author names from peer SYNCDAT frames.
+ * pub4 = first NAME_KEY_SIZE bytes of the author's pubkey.
+ */
+void MultiRoomMesh::storeName(const uint8_t* pub4, const char* name) {
+  if (!name || name[0] == '\0') return;
+  // Find existing entry or LRU victim
+  int victim = 0;
+  uint32_t min_seq = UINT32_MAX;
+  for (int i = 0; i < NAME_TABLE_SIZE; i++) {
+    if (_names[i].lru_seq == 0) {
+      victim = i;
+      min_seq = 0;
+      break;
+    }
+    if (memcmp(_names[i].pub_prefix, pub4, NAME_KEY_SIZE) == 0) {
+      StrHelper::strncpy(_names[i].name, name, sizeof(_names[i].name));
+      _names[i].lru_seq = ++_name_lru_ctr;
+      saveNameTable();
+      return;
+    }
+    if (_names[i].lru_seq < min_seq) { min_seq = _names[i].lru_seq; victim = i; }
+  }
+  memcpy(_names[victim].pub_prefix, pub4, NAME_KEY_SIZE);
+  StrHelper::strncpy(_names[victim].name, name, sizeof(_names[victim].name));
+  _names[victim].lru_seq = ++_name_lru_ctr;
+  saveNameTable();
+}
+
 void MultiRoomMesh::addServerPost(int room_idx, const char* text) {
   if (room_idx < 0 || room_idx >= MAX_ROOMS || !rooms[room_idx].active) return;
   if (!text || text[0] == 0) return;
@@ -3349,9 +3379,10 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
 
 /**
  * Push a single post to peer pi via SYNCDAT DM.
- * Wire format (JES-816 multi-room):
- *   [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][text]
+ * Wire format (JES-816 multi-room, JES-840):
+ *   [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len][name][text]
  * room_hash = first 4 bytes of the sending room's public key.
+ * name_len = 0..23; name = advertised author name for receiving node's name table.
  * All sync DMs are sent from rooms[0].id (node transport identity).
  */
 void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
@@ -3365,8 +3396,17 @@ void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
   memcpy(&reply_data[len], &post.post_timestamp, 4);        len += 4;
   memcpy(&reply_data[len], post.origin_id, 4);              len += 4;
   memcpy(&reply_data[len], post.author.pub_key, 4);         len += 4;
+  // Bug 2 (JES-840): embed author name so the receiving node can populate its name table
+  const char* aname = resolveName(post.author.pub_key);
+  uint8_t name_len = (uint8_t)strlen(aname);
+  if (name_len > 23) name_len = 23;
+  reply_data[len++] = name_len;
+  memcpy(&reply_data[len], aname, name_len);                len += name_len;
+  // clamp text to remaining space
+  int max_text = (int)sizeof(reply_data) - len;
+  if (max_text < 0) max_text = 0;
   int text_len = strlen(post.text);
-  if (text_len > MAX_POST_TEXT_LEN) text_len = MAX_POST_TEXT_LEN;
+  if (text_len > max_text) text_len = max_text;
   memcpy(&reply_data[len], post.text, text_len);            len += text_len;
 
   // Send from node transport identity (rooms[0])
@@ -3381,6 +3421,10 @@ void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
     sendFlood(pkt, (uint32_t)0, (uint8_t)(_prefs.path_hash_mode + 1));
     peers[pi].sync_posts_sent++;
     _sync_posts_sent++;
+  } else {
+    // Bug 1B (JES-840): log push failure so it is visible on serial
+    Serial.printf("[SYNC] pushPostToPeer: createDatagram FAILED for peer[%d] '%s' (secret_valid=%d)\n",
+                  pi, peers[pi].name, (int)peers[pi].secret_valid);
   }
 }
 
@@ -3510,8 +3554,17 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
     memcpy(&buf[dlen], &p.post_timestamp, 4);  dlen += 4;
     memcpy(&buf[dlen], p.origin_id, 4);        dlen += 4;
     memcpy(&buf[dlen], p.author.pub_key, 4);   dlen += 4;
+    // Bug 2 (JES-840): embed author name so receiving node can populate its name table
+    const char* pname = resolveName(p.author.pub_key);
+    uint8_t pname_len = (uint8_t)strlen(pname);
+    if (pname_len > 23) pname_len = 23;
+    buf[dlen++] = pname_len;
+    memcpy(&buf[dlen], pname, pname_len);      dlen += pname_len;
+    // clamp text to remaining space
+    int max_tlen = (int)sizeof(buf) - dlen;
+    if (max_tlen < 0) max_tlen = 0;
     int tlen = strlen(p.text);
-    if (tlen > MAX_POST_TEXT_LEN) tlen = MAX_POST_TEXT_LEN;
+    if (tlen > max_tlen) tlen = max_tlen;
     memcpy(&buf[dlen], p.text, tlen);          dlen += tlen;
 
     self_id = rooms[0].id;
@@ -3572,12 +3625,13 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
 }
 
 /**
- * Handle incoming SYNCDAT from peer pi — ingest one post (JES-816 multi-room).
- * Wire format: [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][text]
+ * Handle incoming SYNCDAT from peer pi — ingest one post (JES-816 multi-room, JES-840).
+ * Wire format: [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len][name][text]
+ * name_len=0 means no name embedded (hex fallback on display).
  * Routes the post to the local room matching room_hash.
  */
 void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
-  if (len < 21) return;  // [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub]
+  if (len < 22) return;  // [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len] min
   uint8_t  room_hash[4];
   uint32_t post_ts;
   uint8_t  origin_id[4], author_pub[4];
@@ -3585,8 +3639,18 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   memcpy(&post_ts,   &data[9],  4);
   memcpy(origin_id,  &data[13], 4);
   memcpy(author_pub, &data[17], 4);
+  // Bug 2 (JES-840): parse embedded author name and store in name table
+  uint8_t name_len = data[21];
+  if (name_len > 23) name_len = 23;  // clamp — reject oversized (no buffer overflow)
+  if ((size_t)(22 + name_len) > len) return;  // bounds guard for name + text
+  if (name_len > 0) {
+    char author_name[24];
+    memcpy(author_name, &data[22], name_len);
+    author_name[name_len] = '\0';
+    storeName(author_pub, author_name);
+  }
   data[len] = 0;   // NUL-terminate text
-  const char* text = (const char*)&data[21];
+  const char* text = (const char*)&data[22 + name_len];
 
   // Find local room matching hash
   int ri = -1;
