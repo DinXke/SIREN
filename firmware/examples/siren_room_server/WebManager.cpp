@@ -262,6 +262,10 @@ String WebManager::buildBackupJson() {
   // PRV_KEY_SIZE=64, PUB_KEY_SIZE=32
   uint8_t id_buf[96];
   char    id_hex[193];
+  // Lock rooms[] against concurrent ROOMSYNC writes so the backup captures a
+  // consistent snapshot of names/keys (JES-865). Best-effort: never block the
+  // AsyncTCP task indefinitely; proceed after a bounded wait.
+  bool rooms_locked = _mesh.lockRooms(100);
   for (int i = 0; i < MAX_ROOMS; i++) {
     snprintf(tmp, sizeof(tmp), "%d", i);
     j += "\"room"; j += tmp; j += "_active\":\"";
@@ -283,6 +287,7 @@ String WebManager::buildBackupJson() {
     j += id_hex; j += "\"";
     if (i < MAX_ROOMS - 1) j += ",";
   }
+  if (rooms_locked) _mesh.unlockRooms();  // JES-865
 
   // Peers (JES-816): each active peer as peer<n>_pub (64 hex) + peer<n>_name
   for (int i = 0; i < MAX_PEERS; i++) {
@@ -637,8 +642,10 @@ String WebManager::buildChatPage() {
           "<a href='/'>&#8592; Beheer</a></div>";
 
   // Tab bar — one tab per active room (skip room 0: identity-only, JES-846)
+  // Lock rooms[] against concurrent ROOMSYNC writes (JES-865).
   int _firstRoom = -1;
   page += "<div style='display:flex;flex-wrap:wrap;gap:6px;padding:10px 10px 0'>";
+  if (_mesh.lockRooms(50)) {
   for (int i = 1; i < MAX_ROOMS; i++) {
     if (!_mesh.isRoomActive(i)) continue;
     page += "<button class='rtab";
@@ -649,6 +656,8 @@ String WebManager::buildChatPage() {
     page += htmlEscape(_mesh.getRoomName(i));
     page += "</button>";
     if (_firstRoom < 0) _firstRoom = i;
+  }
+  _mesh.unlockRooms();  // JES-865
   }
   page += "</div>";
 
@@ -848,6 +857,10 @@ String WebManager::buildAclPage() {
   // Role labels
   static const char* ROLE_NAMES[] = { "GUEST (geen toegang)", "Read-only", "Read-write", "ADMIN" };
 
+  // Lock rooms[] against concurrent ROOMSYNC writes (JES-865).
+  if (!_mesh.lockRooms(50)) {
+    page += "<p style='color:red'>Rooms tijdelijk bezig — herlaad de pagina.</p>";
+  } else {
   for (int r = 0; r < MAX_ROOMS; r++) {
     if (!_mesh.isRoomActive(r)) continue;
     int nc = _mesh.getRoomNumClients(r);
@@ -908,6 +921,8 @@ String WebManager::buildAclPage() {
     }
     page += "</div>";
   }
+  _mesh.unlockRooms();  // JES-865
+  }
 
   page += "</div>";  // padding wrapper
   page += FPSTR(HTML_FOOT);
@@ -932,8 +947,10 @@ String WebManager::buildStatsJson() {
   }
   j += "]";
 
-  // Per-room array
+  // Per-room array — lock rooms[] against concurrent ROOMSYNC writes (JES-865).
+  // On timeout, emit an empty array; the client polls again shortly.
   j += ",\"rooms\":[";
+  if (mesh.lockRooms(50)) {
   bool first_room = true;
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!mesh.isRoomActive(i)) continue;
@@ -985,6 +1002,8 @@ String WebManager::buildStatsJson() {
     }
     j += "]}";
   }
+  mesh.unlockRooms();  // JES-865
+  }
   j += "]}";
   return j;
 }
@@ -1012,7 +1031,10 @@ String WebManager::buildStatsPage() {
   page += "</td></tr><tr><th>Totaal contacts</th><td>"; page += (int)mesh.getTotalContacts();
   page += "</td></tr></table></div>";
 
-  // Per-room tables
+  // Per-room tables — lock rooms[] against concurrent ROOMSYNC writes (JES-865).
+  if (!mesh.lockRooms(50)) {
+    page += "<p style='color:red'>Rooms tijdelijk bezig — herlaad de pagina.</p>";
+  } else {
   for (int i = 0; i < MAX_ROOMS; i++) {
     if (!mesh.isRoomActive(i)) continue;
     int nc = mesh.getRoomNumClients(i);
@@ -1049,6 +1071,8 @@ String WebManager::buildStatsPage() {
       page += "</table>";
     }
     page += "</div>";
+  }
+  mesh.unlockRooms();  // JES-865
   }
 
   // 24-hour message histogram (CSS bar chart)
@@ -1144,6 +1168,11 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
   const char* sta_ssid = _sta_ssid;
 
   PrintSink page(out);
+  // Lock rooms[] for the duration of this page build (JES-865).
+  if (!mesh.lockRooms(50)) {
+    page += "<p style='color:red'>503 — rooms busy, probeer opnieuw.</p>";
+    return;
+  }
   page += buildHead(mesh.getNodeName());
 
   // ---- Top bar ----
@@ -1218,6 +1247,7 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
   page += "</div>";  // end status content wrapper
 
   page += FPSTR(HTML_FOOT);
+  mesh.unlockRooms();  // JES-865
   // (void return — PrintSink wrote directly to the AsyncResponseStream)
 }
 
@@ -1227,6 +1257,13 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
 void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
   MultiRoomMesh& mesh = _mesh;
   PrintSink page(out);
+  // Lock rooms[] for the duration of this page build (JES-865):
+  // AsyncTCP task (Core 0) reads rooms[] here; main loop (Core 1) may write
+  // via handleRoomSync(). Timeout 50 ms — return a brief error on contention.
+  if (!mesh.lockRooms(50)) {
+    page += "<p style='color:red'>503 — rooms busy, probeer opnieuw.</p>";
+    return;
+  }
   page += buildHead(mesh.getNodeName());
   page += "<div id='topbar'><h1>";
   page += htmlEscape(mesh.getNodeName());
@@ -1456,6 +1493,7 @@ void WebManager::buildRoomsPageStream(AsyncResponseStream& out) {
 
   page += "</div>";  // end content wrapper
   page += FPSTR(HTML_FOOT);
+  mesh.unlockRooms();  // JES-865
 }
 
 // ---------------------------------------------------------------------------
@@ -3053,8 +3091,9 @@ void WebManager::setupRoutes() {
     j += "\"sync_dat_recv\":";   j += _mesh.getSyncDatRecv();   j += ",";
     j += "\"sync_posts_recv\":"; j += _mesh.getSyncPostsRecv(); j += ",";
     j += "\"sync_posts_sent\":"; j += _mesh.getSyncPostsSent(); j += "},";
-    // Room hashes
+    // Room hashes — lock rooms[] against concurrent ROOMSYNC writes (JES-865).
     j += "\"rooms\":[";
+    if (_mesh.lockRooms(50)) {
     bool rf = true;
     for (int i = 0; i < MAX_ROOMS; i++) {
       if (!_mesh.isRoomActive(i)) continue;
@@ -3068,6 +3107,8 @@ void WebManager::setupRoutes() {
       j += "{\"idx\":";      j += i;
       j += ",\"name\":\"";   j += jsonEscape(_mesh.getRoomName(i)); j += "\"";
       j += ",\"hash\":\"";   j += hash; j += "\"}";
+    }
+    _mesh.unlockRooms();  // JES-865
     }
     j += "],";
     // Per-peer sync state

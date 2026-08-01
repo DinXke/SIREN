@@ -319,6 +319,12 @@ bool MqttManager::connectBroker() {
     return false;
   }
 
+  // Limit blocking time: a TCP+TLS connect to an unreachable broker can block
+  // the Arduino loop for the full socket timeout, triggering the Task WDT.
+  // 4 s is safely under the default 5 s TWDT threshold (JES-864).
+  _wifi_client.setTimeout(4);          // socket read/write timeout (seconds)
+  _wifi_client.setHandshakeTimeout(4); // TLS handshake timeout (seconds)
+
   // TLS configuration
   // NOTE: ESP32 WiFiClientSecure (SDK >=2.x) removed setFingerprint().
   // CA PEM certificate can be loaded from SPIFFS /mqtt_ca.pem for cert validation.
@@ -420,6 +426,14 @@ void MqttManager::begin() {
 
 void MqttManager::loop() {
   if (!_cfg.enable) return;
+
+  // Guard: skip MQTT entirely when WiFi is not up (JES-864).
+  // connectBroker() makes a blocking TLS call that can hang the loop for
+  // seconds and trigger the Task WDT when the broker is unreachable.
+  if (WiFi.status() != WL_CONNECTED) {
+    _last_connect_attempt = 0;  // retry immediately once WiFi is back
+    return;
+  }
 
   unsigned long now = millis();
 

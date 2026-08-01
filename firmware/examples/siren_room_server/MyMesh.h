@@ -10,6 +10,7 @@
   #include <LittleFS.h>
 #elif defined(ESP32)
   #include <SPIFFS.h>
+  #include <freertos/semphr.h>
 #endif
 
 #include <helpers/ArduinoHelpers.h>
@@ -216,6 +217,7 @@ struct RoomSlot {
   uint16_t   num_post_pushes;
 
   bool          stealth;           // if true: no adverts/location sent (default)
+  uint32_t      config_ts;         // last-writer-wins: modification timestamp for name/guest_password (JES-860)
 
   unsigned long next_push;
   unsigned long next_local_advert;
@@ -237,6 +239,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   RoomSlot      rooms[MAX_ROOMS];
   int           _num_active_rooms;
   int           _active_slot;     // set during onRecvPacket dispatch
+
+#ifdef ESP32
+  /* Mutex protecting rooms[] against concurrent access from AsyncTCP task
+   * (web handlers, Core 0) vs main loop (LoRa/ROOMSYNC, Core 1).
+   * Always acquire with a timeout; never hold across slow SPIFFS writes.  (JES-865) */
+  SemaphoreHandle_t _rooms_mutex = nullptr;
+#endif
 
   /* ---- Global post pool (shared budget across all rooms) ---- */
   PostInfo      _post_pool[MAX_TOTAL_POSTS];
@@ -428,6 +437,25 @@ public:
                 mesh::RTCClock& rtc, mesh::MeshTables& tables);
 
   void begin(FILESYSTEM* fs);
+
+  /* ---- rooms[] concurrency guard (JES-865) ----
+   * AsyncTCP web handlers (Core 0) and the LoRa/ROOMSYNC main loop (Core 1)
+   * both access rooms[].  Call lockRooms() before any rooms[] read/write from
+   * the AsyncTCP task; unlockRooms() immediately after the critical section.
+   * Never hold the lock across slow SPIFFS operations.
+   * Returns false (and does NOT acquire) on timeout — caller must handle. */
+#ifdef ESP32
+  bool lockRooms(uint32_t timeout_ms = 100) {
+    if (!_rooms_mutex) return true;
+    return xSemaphoreTake(_rooms_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+  }
+  void unlockRooms() {
+    if (_rooms_mutex) xSemaphoreGive(_rooms_mutex);
+  }
+#else
+  bool lockRooms(uint32_t = 100) { return true; }
+  void unlockRooms() {}
+#endif
 
   /* ---- CommonCLICallbacks ---- */
   const char*          getFirmwareVer()  override { return FIRMWARE_VERSION; }
