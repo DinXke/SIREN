@@ -1038,7 +1038,9 @@ String WebManager::buildStatusPage(const char* ip) {
   const char* ap_ssid = _ap_ssid;
   const char* sta_ssid = _sta_ssid;
 
-  String page = buildHead(mesh.getNodeName());
+  String page;
+  page.reserve(28000);  // pre-allocate to avoid repeated heap re-allocs (JES-854)
+  page += buildHead(mesh.getNodeName());
 
   // ---- Top bar ----
   page += "<div id='topbar'><h1>";
@@ -1805,7 +1807,18 @@ void WebManager::setupRoutes() {
     String ip = (_mode == MODE_AP)
       ? WiFi.softAPIP().toString()
       : WiFi.localIP().toString();
-    req->send(200, "text/html; charset=utf-8", buildStatusPage(ip.c_str()));
+    String pg = buildStatusPage(ip.c_str());
+    if (pg.length() < 500) {
+      // page build failed (heap OOM) — return small error instead of blank screen (JES-854)
+      req->send(503, "text/html; charset=utf-8",
+        "<html><body style='background:#0f1117;color:#e0e0e0;font-family:sans-serif;padding:20px'>"
+        "<h2 style='color:#ff4444'>Tijdelijk weinig geheugen</h2>"
+        "<p>Pagina kon niet worden opgebouwd. Herlaad de pagina.</p>"
+        "<p><a href='/' style='color:#00d4ff'>Opnieuw proberen</a></p>"
+        "</body></html>");
+      return;
+    }
+    req->send(200, "text/html; charset=utf-8", pg);
   });
 
   // API: set server (node) name (JES-828)
