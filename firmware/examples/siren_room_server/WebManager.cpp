@@ -559,10 +559,10 @@ String WebManager::buildChatPage() {
   page += "</h1>"
           "<a href='/'>&#8592; Beheer</a></div>";
 
-  // Tab bar — one tab per active room
+  // Tab bar — one tab per active room (skip room 0: identity-only, JES-846)
   int _firstRoom = -1;
   page += "<div style='display:flex;flex-wrap:wrap;gap:6px;padding:10px 10px 0'>";
-  for (int i = 0; i < MAX_ROOMS; i++) {
+  for (int i = 1; i < MAX_ROOMS; i++) {
     if (!_mesh.isRoomActive(i)) continue;
     page += "<button class='rtab";
     page += (_firstRoom < 0 ? " act" : "");
@@ -2054,11 +2054,11 @@ void WebManager::setupRoutes() {
   _server.on("/api/chat/messages", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
 
-    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 1;
     uint32_t since_ts = req->hasParam("since") ? (uint32_t)req->getParam("since")->value().toInt() : 0;
 
-    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
-      req->send(400, "application/json", "[]"); return;
+    if (room_idx <= 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;  // JES-846: room 0 rejected
     }
 
     const PostInfo* pool = _mesh.getPostPool();
@@ -2109,9 +2109,9 @@ void WebManager::setupRoutes() {
   _server.on("/api/chat/nicks", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
 
-    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 0;
-    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
-      req->send(400, "application/json", "[]"); return;
+    int room_idx = req->hasParam("room") ? req->getParam("room")->value().toInt() : 1;
+    if (room_idx <= 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "[]"); return;  // JES-846: room 0 rejected
     }
 
     String json = _mesh.buildNickJson(room_idx);
@@ -2129,8 +2129,8 @@ void WebManager::setupRoutes() {
     }
     int room_idx = req->getParam("room", true)->value().toInt();
     const String& text = req->getParam("text", true)->value();
-    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
-      req->send(400, "text/plain", "invalid room"); return;
+    if (room_idx <= 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room (use 1+, room 0 is identity-only)\"}"); return;  // JES-846
     }
     if (text.length() == 0) { req->send(400, "text/plain", "empty text"); return; }
     // Length clamp happens inside addServerPost -> addPost
