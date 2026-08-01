@@ -264,6 +264,47 @@ void MultiRoomMesh::saveRoomIdentity(int idx) {
   store.save(key, rooms[idx].id);
 }
 
+/* JES-821: Rotate private key for room idx.
+   - Generates a new keypair (with 0x00/0xFF retry-guard, same as initial key gen).
+   - Persists immediately to IdentityStore.
+   - Room 0: updates self_id and invalidates all peer ECDH shared secrets.
+   - Resets VV (we are now a new origin; old VV entries are stale).
+   - Schedules an advert shortly if room is not stealth (JES-772).
+   SECURITY: never logs or returns the private key. */
+void MultiRoomMesh::rekeyRoom(int idx) {
+  if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) return;
+
+  // Generate new keypair with 0x00/0xFF retry-guard
+  rooms[idx].id = radio_new_identity();
+  int attempts = 0;
+  while (attempts < 10 &&
+         (rooms[idx].id.pub_key[0] == 0x00 ||
+          rooms[idx].id.pub_key[0] == 0xFF)) {
+    rooms[idx].id = radio_new_identity();
+    attempts++;
+  }
+
+  // Persist to flash immediately
+  saveRoomIdentity(idx);
+
+  if (idx == 0) {
+    // Room 0 = node identity: update self_id and invalidate all peer ECDH secrets
+    self_id = rooms[0].id;
+    for (int pi = 0; pi < MAX_PEERS; pi++) {
+      peers[pi].secret_valid = false;  // force ECDH recalc on next sync
+    }
+  }
+
+  // Reset VV — we are now a different origin; old VV entries are stale
+  memset(rooms[idx].vv, 0, sizeof(rooms[idx].vv));
+
+  // Schedule advert soon if NOT stealth (JES-772)
+  if (!rooms[idx].stealth) {
+    rooms[idx].next_local_advert = futureMillis(500);
+    rooms[idx].next_flood_advert = futureMillis(500);
+  }
+}
+
 /* Room config: simple binary layout
    [1 byte: num_rooms] then for each room:
      [1 byte: active][24: name][16: password][16: guest_password]
@@ -1452,6 +1493,8 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  room list                      List all rooms with details");
       Serial.println("  room add                       Add a new room slot");
       Serial.println("  room del <idx>                 Delete room [serial only]");
+      Serial.println("  room rekey <idx>               Show rekey warning [serial only]");
+      Serial.println("  room rekey <idx> confirm       Rotate private key (2-step) [serial only]");
       Serial.println("  room set <idx> name <val>      Set room name");
       Serial.println("  room set <idx> pass <val>      Set room password");
       Serial.println("  room set <idx> guest <val>     Set guest access password");
@@ -1871,7 +1914,47 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
+  // "room rekey <idx>" / "room rekey <idx> confirm" — serial-only, two-step key rotation
+  if (memcmp(args, "rekey", 5) == 0 && (args[5] == ' ' || args[5] == 0)) {
+    if (!serial) { strcpy(reply, "Err - room rekey only allowed via serial CLI"); return; }
+    const char* p = args + 5;
+    while (*p == ' ') p++;
+    int idx = atoi(p);
+    // advance past idx digits
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    bool confirmed = (strcmp(p, "confirm") == 0);
+
+    if (idx < 0 || idx >= MAX_ROOMS) { strcpy(reply, "Err - invalid room idx"); return; }
+    if (!rooms[idx].active) { strcpy(reply, "Err - room not active"); return; }
+
+    if (!confirmed) {
+      // Step 1: print warning and instruct operator to re-run with 'confirm'
+      Serial.printf("\n*** WARNING: room rekey %d ***\n", idx);
+      if (idx == 0) {
+        Serial.println("  Room 0 = node identity. Rekeying BREAKS all peer links.");
+        Serial.println("  All companion nodes must re-add this room-server.");
+      } else {
+        Serial.printf("  Room[%d] '%s': existing join URIs/QR codes become invalid.\n",
+                      idx, rooms[idx].name);
+        Serial.println("  Companions must re-import the room after rekeying.");
+      }
+      Serial.println("  Make a new backup afterwards.");
+      Serial.printf("  To proceed, run: room rekey %d confirm\n\n", idx);
+      reply[0] = 0;
+      return;
+    }
+
+    // Step 2: confirmed — perform key rotation
+    rekeyRoom(idx);
+    int pos = snprintf(reply, 160, "OK - room[%d] rekeyed. New pub prefix=", idx);
+    for (int b = 0; b < 4 && pos < 156; b++) {
+      pos += snprintf(reply + pos, 160 - pos, "%02X", rooms[idx].id.pub_key[b]);
+    }
+    return;
+  }
+
+  strcpy(reply, "Err - usage: room list|add|del <idx>|rekey <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
 }
 
 /* ------------------------------------------------------------------ */

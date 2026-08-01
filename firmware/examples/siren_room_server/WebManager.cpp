@@ -702,6 +702,24 @@ String WebManager::buildStatusPage(const char* ip) {
     // QR join code button
     page += " <a href='/api/room/qr?idx="; page += i;
     page += "' style='text-decoration:none'><button>QR</button></a>";
+    // Rekey button — double-confirm via JS prompt (type room name or REKEY for room 0)
+    {
+      const char* exp_name = (i == 0) ? "REKEY" : mesh.getRoomName(i);
+      page += " <form method='post' action='/api/room/rekey' style='display:inline'>"
+              "<input type='hidden' name='idx' value='"; page += i;
+      page += "'><input type='hidden' name='confirm' value=''>"
+              "<button type='button' onclick=\""
+              "var e='"; page += htmlEscape(exp_name);
+      page += "';"
+              "var w="; page += (i == 0) ? "'Room 0 = node-identiteit. Alle peer-links verbreken!'" : "'Bestaande QR-codes en join-URIs worden ongeldig.'";
+      page += ";"
+              "var c=window.prompt('Rekey room "; page += i;
+      page += " (' + e + ')?\\n' + w + '\\nTyp \\'' + e + '\\' ter bevestiging:');"
+              "if(c!==null){"
+              "this.closest('form').elements.namedItem('confirm').value=c;"
+              "this.closest('form').submit();}"
+              "\">Rekey</button></form>";
+    }
     if (i > 0) {
       page += " <form method='post' action='/api/room/del' style='display:inline'>"
               "<input type='hidden' name='idx' value='"; page += i;
@@ -1118,6 +1136,29 @@ void WebManager::setupRoutes() {
                req->getParam("idx", true)->value().c_str());
       char reply[160] = {};
       _mesh.handleCommand(0, cmd, reply);
+      req->redirect("/");
+    });
+
+  // API: rekey room — generate new private key; double-confirm required
+  _server.on("/api/room/rekey", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("idx", true) || !req->hasParam("confirm", true)) {
+        req->send(400, "text/plain", "missing idx or confirm"); return;
+      }
+      int idx = req->getParam("idx", true)->value().toInt();
+      if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+        req->send(400, "text/plain", "invalid or inactive room"); return;
+      }
+      // Double-confirm: must type exact room name (room 0: "REKEY")
+      String confirm_val = req->getParam("confirm", true)->value();
+      String expected = (idx == 0) ? String("REKEY") : String(_mesh.getRoomName(idx));
+      if (!confirm_val.equals(expected)) {
+        req->send(400, "text/plain",
+          "Bevestiging onjuist. Typ de exacte roomnaam ter bevestiging (of REKEY voor room 0).");
+        return;
+      }
+      _mesh.rekeyRoom(idx);
       req->redirect("/");
     });
 

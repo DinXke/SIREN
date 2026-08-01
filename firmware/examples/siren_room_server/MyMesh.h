@@ -412,6 +412,11 @@ public:
     return (i >= 0 && i < MAX_ROOMS) ? rooms[i].id.pub_key : nullptr;
   }
 
+  /** JES-821: Generate a new private key for room idx and persist.
+   *  Room 0 also updates self_id and invalidates peer ECDH secrets.
+   *  Serial CLI and web admin only — never expose the new private key. */
+  void rekeyRoom(int idx);
+
   /* ---- Screensaver stats accessors (JES-781) ---- */
   uint64_t getUptimeMillis() const { return uptime_millis; }
   uint32_t getTotalPosts() const {
