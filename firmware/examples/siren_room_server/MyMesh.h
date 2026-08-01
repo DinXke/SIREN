@@ -216,6 +216,7 @@ struct RoomSlot {
   uint16_t   num_post_pushes;
 
   bool          stealth;           // if true: no adverts/location sent (default)
+  uint32_t      config_ts;         // last-writer-wins: modification timestamp for name/guest_password (JES-860)
 
   unsigned long next_push;
   unsigned long next_local_advert;
