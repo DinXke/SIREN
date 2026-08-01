@@ -25,6 +25,8 @@ WebManager::WebManager(MultiRoomMesh& mesh)
   _ap_pass[0]  = 0;
   _sta_ssid[0] = 0;
   _sta_pass[0] = 0;
+  strncpy(_ntp_server, "pool.ntp.org", sizeof(_ntp_server) - 1);
+  _ntp_server[sizeof(_ntp_server) - 1] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,10 +56,17 @@ void WebManager::loadConfig() {
   extractField("mode", mode_str, sizeof(mode_str));
   _mode = (strcmp(mode_str, "sta") == 0) ? MODE_STA : MODE_AP;
 
-  extractField("ap_ssid",  _ap_ssid,  sizeof(_ap_ssid));
-  extractField("ap_pass",  _ap_pass,  sizeof(_ap_pass));
-  extractField("sta_ssid", _sta_ssid, sizeof(_sta_ssid));
-  extractField("sta_pass", _sta_pass, sizeof(_sta_pass));
+  extractField("ap_ssid",    _ap_ssid,    sizeof(_ap_ssid));
+  extractField("ap_pass",    _ap_pass,    sizeof(_ap_pass));
+  extractField("sta_ssid",   _sta_ssid,   sizeof(_sta_ssid));
+  extractField("sta_pass",   _sta_pass,   sizeof(_sta_pass));
+  // ntp_server is optional — keep default "pool.ntp.org" if absent
+  char ntp_buf[64] = {};
+  extractField("ntp_server", ntp_buf, sizeof(ntp_buf));
+  if (ntp_buf[0]) {
+    strncpy(_ntp_server, ntp_buf, sizeof(_ntp_server) - 1);
+    _ntp_server[sizeof(_ntp_server) - 1] = 0;
+  }
 }
 
 void WebManager::saveConfig() {
@@ -65,10 +74,47 @@ void WebManager::saveConfig() {
   if (!f) return;
   f.printf("{\"mode\":\"%s\","
            "\"ap_ssid\":\"%s\",\"ap_pass\":\"%s\","
-           "\"sta_ssid\":\"%s\",\"sta_pass\":\"%s\"}",
+           "\"sta_ssid\":\"%s\",\"sta_pass\":\"%s\","
+           "\"ntp_server\":\"%s\"}",
            _mode == MODE_STA ? "sta" : "ap",
            _ap_ssid, _ap_pass,
-           _sta_ssid, _sta_pass);
+           _sta_ssid, _sta_pass,
+           _ntp_server);
+  f.close();
+}
+
+// ---------------------------------------------------------------------------
+//  Clock epoch persistence — keeps time reasonable across power cycles even
+//  when NTP is unavailable (e.g. AP-only mode).  A single text file stores
+//  the last RTC epoch; it is restored on boot and updated after every
+//  authoritative sync (NTP or browser).
+// ---------------------------------------------------------------------------
+#define CLOCK_EPOCH_PATH  "/clock_epoch"
+// Minimum plausible epoch: 2026-01-01 00:00:00 UTC
+#define CLOCK_EPOCH_FLOOR 1767225600UL
+
+void WebManager::loadClockEpoch() {
+  File f = SPIFFS.open(CLOCK_EPOCH_PATH, "r");
+  if (!f) return;
+  String s = f.readStringUntil('\n');
+  f.close();
+  uint32_t saved = (uint32_t)s.toInt();
+  if (saved > CLOCK_EPOCH_FLOOR) {
+    uint32_t curr = (uint32_t)_mesh.getRTCClock()->getCurrentTime();
+    if (saved > curr) {
+      _mesh.getRTCClock()->setCurrentTime(saved);
+      Serial.printf("[Clock] Restored saved epoch %lu from SPIFFS\n",
+                    (unsigned long)saved);
+    }
+  }
+}
+
+void WebManager::saveClockEpoch() {
+  uint32_t now = (uint32_t)_mesh.getRTCClock()->getCurrentTime();
+  if (now <= CLOCK_EPOCH_FLOOR) return;  // don't persist obviously wrong time
+  File f = SPIFFS.open(CLOCK_EPOCH_PATH, "w");
+  if (!f) return;
+  f.println((unsigned long)now);
   f.close();
 }
 
@@ -210,6 +256,7 @@ String WebManager::buildBackupJson() {
   j += "\"ap_pass\":\"" + jsonEscape(_ap_pass)  + "\",";
   j += "\"sta_ssid\":\"" + jsonEscape(_sta_ssid) + "\",";
   j += "\"sta_pass\":\"" + jsonEscape(_sta_pass)  + "\",";
+  j += "\"ntp_server\":\"" + jsonEscape(_ntp_server) + "\",";
 
   // Rooms — identity bytes = prv(64) || pub(32) = 96 bytes = 192 hex chars
   // PRV_KEY_SIZE=64, PUB_KEY_SIZE=32
@@ -343,6 +390,12 @@ bool WebManager::applyRestore(const String& json) {
   strncpy(_ap_pass,  ap_pass,  sizeof(_ap_pass)  - 1);
   if (sta_ssid[0]) strncpy(_sta_ssid, sta_ssid, sizeof(_sta_ssid) - 1);
   strncpy(_sta_pass, sta_pass, sizeof(_sta_pass) - 1);
+  char ntp_server_r[64] = {};
+  extractField("ntp_server", ntp_server_r, sizeof(ntp_server_r));
+  if (ntp_server_r[0]) {
+    strncpy(_ntp_server, ntp_server_r, sizeof(_ntp_server) - 1);
+    _ntp_server[sizeof(_ntp_server) - 1] = 0;
+  }
   saveConfig();
 
   // Rooms — 96 bytes identity (prv64 + pub32) hex-encoded
@@ -1415,8 +1468,8 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
           "<p style='margin-top:8px'>Huidig IP: <b>"; page += ip; page += "</b></p>"
           "<hr style='border-color:#2a3050;margin:12px 0'>"
           "<h3>Klok</h3>"
-          "<p style='font-size:0.9em;color:#aaa'>NTP synchroniseert automatisch als je verbonden bent met het internet (STA-modus). "
-          "Gebruik de knop hieronder als NTP niet beschikbaar is om de klok in te stellen op de tijd van je browser.</p>"
+          "<p style='font-size:0.9em;color:#aaa'>NTP synchroniseert automatisch zodra de node verbinding heeft met het internet (STA-modus). "
+          "Als NTP niet beschikbaar is, gebruik dan de knop hieronder om de klok in te stellen op de tijd van je browser.</p>"
           "<button type='button' class='sec' onclick='syncBrowserTime()'>&#128337; Synchroniseer browsertijd</button>"
           "<span id='ts-status' style='margin-left:10px;font-size:0.85em;color:#aaa'></span>"
           "<script>"
@@ -1431,6 +1484,20 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
           "  }).catch(function(){document.getElementById('ts-status').textContent='Verbindingsfout';});"
           "}"
           "</script>"
+          "<hr style='border-color:#2a3050;margin:12px 0'>"
+          "<h3>NTP server</h3>"
+          "<p style='font-size:0.9em;color:#aaa'>Huidige status: ";
+  page += _ntp_synced ? "<span style='color:#00ff88'>&#10003; Gesynchroniseerd</span>"
+                      : "<span style='color:#aaa'>Niet gesynchroniseerd (of AP-modus)</span>";
+  page += "</p>"
+          "<form method='post' action='/api/ntp'>"
+          "<div class='frow'><label>NTP server</label>"
+          "<input name='server' value='";
+  page += htmlEscape(_ntp_server);
+  page += "' maxlength='63' placeholder='pool.ntp.org'>"
+          "</div>"
+          "<button type='submit'>Opslaan &amp; herverbinden</button>"
+          "</form>"
           "</div>";
 
   // LoRa radio settings
@@ -2226,8 +2293,36 @@ void WebManager::setupRoutes() {
         req->send(400, "application/json", "{\"error\":\"ts out of range\"}"); return;
       }
       _mesh.getRTCClock()->setCurrentTime((uint32_t)ts);
+      saveClockEpoch();  // persist so next power cycle starts near correct time
       Serial.printf("[Clock] Time set via browser: %lu\n", (unsigned long)ts);
       req->send(200, "application/json", "{\"ok\":true}");
+    });
+
+  // POST /api/ntp  body: server=<hostname>
+  // Save NTP server and (re)start SNTP sync (STA mode only).
+  _server.on("/api/ntp", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      if (!req->hasParam("server", true)) {
+        req->send(400, "application/json", "{\"error\":\"server required\"}"); return;
+      }
+      String srv = req->getParam("server", true)->value();
+      srv.trim();
+      if (srv.length() == 0 || srv.length() > 63) {
+        req->send(400, "application/json", "{\"error\":\"server invalid\"}"); return;
+      }
+      strncpy(_ntp_server, srv.c_str(), sizeof(_ntp_server) - 1);
+      _ntp_server[sizeof(_ntp_server) - 1] = 0;
+      saveConfig();
+      // Restart SNTP with new server when in STA mode
+      if (_mode == MODE_STA && WiFi.status() == WL_CONNECTED) {
+        _ntp_synced = false;
+        _ntp_check_ms = millis() + 1000;
+        configTime(0, 0, _ntp_server, "time.cloudflare.com");
+        Serial.printf("[NTP] Server updated to '%s', sync restarted\n", _ntp_server);
+      }
+      req->redirect("/network");
     });
 
   // API: backup download
@@ -3084,6 +3179,7 @@ void WebManager::setupRoutes() {
 // ---------------------------------------------------------------------------
 void WebManager::begin() {
   loadConfig();
+  loadClockEpoch();
 
 #if defined(SIREN_DEFAULT_STA_SSID)
   // Provisioning: if no STA credentials configured yet, apply build-time defaults.
@@ -3140,6 +3236,7 @@ void WebManager::loop() {
         if (!_ntp_synced) {
           _ntp_synced = true;
           Serial.printf("[NTP] Clock synced — %s", asctime(&ti));
+          saveClockEpoch();  // persist so AP-mode reboots start with correct time
         }
       }
     }
@@ -3158,8 +3255,8 @@ void WebManager::loop() {
       // Start NTP sync now that we have internet access
       _ntp_synced = false;
       _ntp_check_ms = millis() + 2000;  // first check after 2 s
-      configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
-      Serial.println("[NTP] Sync started");
+      configTime(0, 0, _ntp_server, "time.cloudflare.com");
+      Serial.printf("[NTP] Sync started — server: %s\n", _ntp_server);
     } else if (millis() - _connect_started > WIFI_CONNECT_TIMEOUT_MS) {
       _connecting = false;
       Serial.printf("[WiFi] STA connect timeout (status %d). Falling back to AP mode.\n", st);

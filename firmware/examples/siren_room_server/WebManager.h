@@ -65,12 +65,15 @@ private:
   // NTP clock sync state (STA mode)
   bool             _ntp_synced;       // true once the RTC has been set via NTP
   unsigned long    _ntp_check_ms;     // millis() of next SNTP status poll
+  char             _ntp_server[64];   // configurable primary NTP server (persisted)
 
   // Accumulation buffer for POST /api/restore upload body
   String           _restore_buf;
 
   void loadConfig();
   void saveConfig();
+  void loadClockEpoch();
+  void saveClockEpoch();
   void setupRoutes();
   void startAP();
   void stopCaptivePortal();
