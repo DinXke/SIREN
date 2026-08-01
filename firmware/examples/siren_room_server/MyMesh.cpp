@@ -1538,8 +1538,12 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  room add                       Add a new room slot");
       Serial.println("  room del <idx>                 Delete room [serial only]");
       Serial.println("  room delpost <idx> <hex8> <ts> Delete post by origin_id+ts [serial only, y/N confirm]");
+      Serial.println("  room export <idx>              Print private key as 128 hex chars [serial only]");
+      Serial.println("  room import <idx> <128hex>     Import 64-byte private key into slot [serial only]");
       Serial.println("  room rekey <idx>               Show rekey warning [serial only]");
       Serial.println("  room rekey <idx> confirm       Rotate private key (2-step) [serial only]");
+      Serial.println("  room export <idx>              Print private key hex [serial only]");
+      Serial.println("  room import <idx> <hex128>     Import private key from another node [serial only]");
       Serial.println("  room set <idx> name <val>      Set room name");
       Serial.println("  room set <idx> pass <val>      Set room password");
       Serial.println("  room set <idx> guest <val>     Set guest access password");
@@ -1959,6 +1963,96 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     return;
   }
 
+  // "room export <idx>" — serial-only: print 64-byte (128 hex chars) private key to serial.
+  // SECURITY: key is NEVER written to reply, web-UI, or any log; stack copy is scrubbed.
+  if (memcmp(args, "export", 6) == 0 && (args[6] == ' ' || args[6] == 0)) {
+    if (!serial) { strcpy(reply, "Err - room export only allowed via serial CLI"); return; }
+    const char* p = args + 6;
+    while (*p == ' ') p++;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS) { strcpy(reply, "Err - invalid room idx"); return; }
+    if (!rooms[idx].active) { strcpy(reply, "Err - room not active"); return; }
+
+    uint8_t prv[PRV_KEY_SIZE];
+    rooms[idx].id.writeTo(prv, PRV_KEY_SIZE);
+
+    Serial.printf("\n=== PRIVATE KEY: room[%d] '%s' ===\n", idx, rooms[idx].name);
+    Serial.println("WARNING: Sharing this key grants full room access. Use only in a");
+    Serial.println("         controlled, trusted environment. Never paste in logs or issues.");
+    Serial.print("PRIVKEY: ");
+    mesh::Utils::printHex(Serial, prv, PRV_KEY_SIZE);
+    Serial.println();
+    Serial.println("=== END PRIVATE KEY ===\n");
+
+    memset(prv, 0, PRV_KEY_SIZE);  // scrub private key from stack
+    reply[0] = 0;
+    return;
+  }
+
+  // "room import <idx> <128hex>" — serial-only: import 64-byte private key into room slot.
+  // Accepts exactly PRV_KEY_SIZE*2 (128) hex chars. Derives pubkey via ed25519_derive_pub.
+  // If the slot is inactive it is activated (with a default name). If active, the key is
+  // replaced in-place. Peer ECDH secrets are invalidated and VV is reset.
+  // SECURITY: key material is scrubbed from the stack after use; never echoed in reply.
+  if (memcmp(args, "import", 6) == 0 && (args[6] == ' ' || args[6] == 0)) {
+    if (!serial) { strcpy(reply, "Err - room import only allowed via serial CLI"); return; }
+    const char* p = args + 6;
+    while (*p == ' ') p++;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS) { strcpy(reply, "Err - invalid room idx"); return; }
+    // advance past idx digits
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // p now points at hex string — must be exactly PRV_KEY_SIZE*2 chars (128)
+    size_t hexlen = strlen(p);
+    if (hexlen != (size_t)(PRV_KEY_SIZE * 2)) {
+      snprintf(reply, 160, "Err - key must be exactly %d hex chars (%d bytes), got %d",
+               PRV_KEY_SIZE * 2, PRV_KEY_SIZE, (int)hexlen);
+      return;
+    }
+    uint8_t prv[PRV_KEY_SIZE];
+    if (!mesh::Utils::fromHex(prv, PRV_KEY_SIZE, p)) {
+      strcpy(reply, "Err - invalid hex chars in key");
+      memset(prv, 0, PRV_KEY_SIZE);
+      return;
+    }
+    if (!mesh::LocalIdentity::validatePrivateKey(prv)) {
+      strcpy(reply, "Err - key validation failed (pub prefix 00/FF, or ECDH mismatch)");
+      memset(prv, 0, PRV_KEY_SIZE);
+      return;
+    }
+    // Load: readFrom(src, PRV_KEY_SIZE) stores prv_key and derives pub_key via ed25519_derive_pub
+    rooms[idx].id.readFrom(prv, PRV_KEY_SIZE);
+    memset(prv, 0, PRV_KEY_SIZE);  // scrub key from stack
+
+    // Activate slot if not already active
+    if (!rooms[idx].active) {
+      rooms[idx].active = true;
+      snprintf(rooms[idx].name, sizeof(rooms[idx].name), "Room%d", idx);
+      StrHelper::strncpy(rooms[idx].password, _prefs.password, sizeof(rooms[idx].password));
+      rooms[idx].guest_password[0] = 0;
+      _num_active_rooms++;
+    }
+
+    saveRoomIdentity(idx);
+    saveRoomConfig();
+
+    // Invalidate all peer ECDH shared secrets (room key changed — force ECDH recalc)
+    for (int pi = 0; pi < MAX_PEERS; pi++) {
+      peers[pi].secret_valid = false;
+    }
+
+    // Reset VV — this is now a different origin; old VV entries are stale
+    memset(rooms[idx].vv, 0, sizeof(rooms[idx].vv));
+
+    // Reply shows pub prefix only — private key is NEVER echoed
+    int pos = snprintf(reply, 160, "OK - room[%d] key imported. pub prefix=", idx);
+    for (int b = 0; b < 4 && pos < 156; b++) {
+      pos += snprintf(reply + pos, 160 - pos, "%02X", rooms[idx].id.pub_key[b]);
+    }
+    return;
+  }
+
   // "room rekey <idx>" / "room rekey <idx> confirm" — serial-only, two-step key rotation
   if (memcmp(args, "rekey", 5) == 0 && (args[5] == ' ' || args[5] == 0)) {
     if (!serial) { strcpy(reply, "Err - room rekey only allowed via serial CLI"); return; }
@@ -2045,7 +2139,76 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|delpost <idx> <origin_id_hex8> <post_ts>|rekey <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
+  // "room export <idx>" — serial-only; prints 64-byte private key as 128-char hex
+  // Used to share a room identity to another node so both host the same room (JES-832).
+  // SECURITY: private key is printed in clear; use only on trusted console.
+  if (memcmp(args, "export ", 7) == 0) {
+    if (!serial) { strcpy(reply, "Err - room export only allowed via serial CLI"); return; }
+    int idx = atoi(args + 7);
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - room not active");
+      return;
+    }
+    uint8_t prv_buf[PRV_KEY_SIZE];
+    size_t prv_len = rooms[idx].id.writeTo(prv_buf, sizeof(prv_buf));
+    if (prv_len < PRV_KEY_SIZE) { strcpy(reply, "Err - writeTo failed"); return; }
+    char hex[PRV_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(hex, prv_buf, PRV_KEY_SIZE);
+    hex[PRV_KEY_SIZE * 2] = 0;
+    Serial.printf("room[%d] '%s' private key (128 hex chars) — handle with care:\n%s\n",
+                  idx, rooms[idx].name, hex);
+    reply[0] = 0;
+    return;
+  }
+
+  // "room import <idx> <hex128>" — serial-only; import a private key from another node.
+  // After import both nodes share the same room identity → sync works via room_hash match.
+  // SECURITY: serial-only; resets VV; invalidates peer ECDH secrets for room 0.
+  if (memcmp(args, "import ", 7) == 0) {
+    if (!serial) { strcpy(reply, "Err - room import only allowed via serial CLI"); return; }
+    char* p = args + 7;
+    int idx = atoi(p);
+    if (idx < 0 || idx >= MAX_ROOMS) { strcpy(reply, "Err - invalid room idx"); return; }
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    if ((int)strlen(p) < PRV_KEY_SIZE * 2) {
+      strcpy(reply, "Err - need 128-char hex private key (from: room export <idx>)");
+      return;
+    }
+    uint8_t prv[PRV_KEY_SIZE];
+    if (!mesh::Utils::fromHex(prv, PRV_KEY_SIZE, p)) {
+      strcpy(reply, "Err - invalid hex");
+      return;
+    }
+    if (!mesh::LocalIdentity::validatePrivateKey(prv)) {
+      strcpy(reply, "Err - invalid private key");
+      return;
+    }
+    // Activate slot if importing into an empty slot
+    if (!rooms[idx].active) {
+      rooms[idx].active = true;
+      _num_active_rooms++;
+      snprintf(rooms[idx].name, sizeof(rooms[idx].name), "Room%d", idx);
+      StrHelper::strncpy(rooms[idx].password, _prefs.password, sizeof(rooms[idx].password));
+      rooms[idx].guest_password[0] = 0;
+      saveRoomConfig();
+    }
+    rooms[idx].id.readFrom(prv, PRV_KEY_SIZE);
+    saveRoomIdentity(idx);
+    // Reset VV — fresh start with new/shared identity
+    memset(rooms[idx].vv, 0, sizeof(rooms[idx].vv));
+    if (idx == 0) {
+      self_id = rooms[0].id;
+      for (int pi = 0; pi < MAX_PEERS; pi++) peers[pi].secret_valid = false;
+    }
+    Serial.printf("room[%d] identity imported. New pub prefix=", idx);
+    for (int b = 0; b < 4; b++) Serial.printf("%02X", rooms[idx].id.pub_key[b]);
+    Serial.println();
+    strcpy(reply, "OK");
+    return;
+  }
+
+  strcpy(reply, "Err - usage: room list|add|del <idx>|delpost <idx> <origin_id_hex8> <post_ts>|rekey <idx>|export <idx>|import <idx> <hex128>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
 }
 
 /* ------------------------------------------------------------------ */
