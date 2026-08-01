@@ -1155,6 +1155,47 @@ String WebManager::buildStatusPage(const char* ip) {
           "Guest: <input name='guest' size='16'> "
           "<button type='submit'>Save</button></form></div>";
 
+  // Login notification targets (JES-834)
+  {
+    page += "<div class='card'><h2>Login Notificaties</h2>"
+            "<p style='font-size:0.85em;color:#aaa'>"
+            "Stuur een DM naar deze pubkeys bij elke inlogpoging. "
+            "Voeg de volledige 64-hex pubkey van het companion-apparaat toe. "
+            "Max " + String(MAX_NOTIFY_TARGETS) + " per room.</p>";
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (!mesh.isRoomActive(i)) continue;
+      int cnt = mesh.getNotifyTargetCount(i);
+      page += "<p><b>Room " + String(i) + " &mdash; ";
+      page += htmlEscape(mesh.getRoomName(i));
+      page += "</b> (";
+      page += cnt;
+      page += "/" + String(MAX_NOTIFY_TARGETS) + " targets)";
+      if (cnt > 0) {
+        page += "<br>";
+        for (int t = 0; t < cnt; t++) {
+          const uint8_t* k = mesh.getNotifyTarget(i, t);
+          char hex[65] = {};
+          for (int b = 0; b < PUB_KEY_SIZE; b++) snprintf(hex + b * 2, 3, "%02x", k[b]);
+          page += "<code style='font-size:0.8em'>" + String(hex).substring(0, 8) + "&hellip;</code> ";
+          page += "<form method='post' action='/api/room/notify/del' style='display:inline'>"
+                  "<input type='hidden' name='idx' value='" + String(i) + "'>"
+                  "<input type='hidden' name='pubkey' value='" + String(hex) + "'>"
+                  "<button type='submit' style='font-size:0.8em;padding:1px 6px'>&#x2715;</button>"
+                  "</form> ";
+        }
+      }
+      if (cnt < MAX_NOTIFY_TARGETS) {
+        page += "<form method='post' action='/api/room/notify/add' style='display:inline'>"
+                "<input type='hidden' name='idx' value='" + String(i) + "'>"
+                "<input name='pubkey' size='64' placeholder='64-hex pubkey van companion'> "
+                "<button type='submit'>Toevoegen</button>"
+                "</form>";
+      }
+      page += "</p>";
+    }
+    page += "</div>";
+  }
+
   // Visibility (stealth) — global toggle
   {
     bool all_stealth = true;
@@ -2143,6 +2184,84 @@ void WebManager::setupRoutes() {
     } else {
       req->send(404, "application/json", "{\"error\":\"not found\"}");
     }
+  });
+
+  // GET /api/room/notify?idx=N — list login-notification targets for a room (JES-834)
+  _server.on("/api/room/notify", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("idx")) { req->send(400, "application/json", "{\"error\":\"missing idx\"}"); return; }
+    int idx = req->getParam("idx")->value().toInt();
+    if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    String j = "{\"idx\":";
+    j += idx;
+    j += ",\"targets\":[";
+    int cnt = _mesh.getNotifyTargetCount(idx);
+    for (int i = 0; i < cnt; i++) {
+      const uint8_t* k = _mesh.getNotifyTarget(idx, i);
+      char hex[65] = {};
+      for (int b = 0; b < PUB_KEY_SIZE; b++) {
+        snprintf(hex + b * 2, 3, "%02x", k[b]);
+      }
+      if (i > 0) j += ",";
+      j += "{\"pub_key\":\"";
+      j += hex;
+      j += "\",\"pub_prefix\":\"";
+      j += String(hex).substring(0, 8);
+      j += "\"}";
+    }
+    j += "]}";
+    req->send(200, "application/json", j);
+  });
+
+  // POST /api/room/notify/add (body: idx=N&pubkey=<64hex>) — add notification target (JES-834)
+  _server.on("/api/room/notify/add", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+    if (!req->hasParam("idx", true) || !req->hasParam("pubkey", true)) {
+      req->send(400, "application/json", "{\"error\":\"missing idx or pubkey\"}"); return;
+    }
+    int idx = req->getParam("idx", true)->value().toInt();
+    if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    const String& pub_str = req->getParam("pubkey", true)->value();
+    if ((int)pub_str.length() != PUB_KEY_SIZE * 2) {
+      req->send(400, "application/json", "{\"error\":\"pubkey must be 64 hex chars\"}"); return;
+    }
+    uint8_t key[PUB_KEY_SIZE];
+    if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, pub_str.c_str())) {
+      req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
+    }
+    if (_mesh.addNotifyTarget(idx, key)) {
+      req->redirect("/");
+    } else {
+      req->send(400, "application/json", "{\"error\":\"target list full\"}");
+    }
+  });
+
+  // POST /api/room/notify/del (body: idx=N&pubkey=<64hex>) — remove notification target (JES-834)
+  _server.on("/api/room/notify/del", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+    if (!req->hasParam("idx", true) || !req->hasParam("pubkey", true)) {
+      req->send(400, "application/json", "{\"error\":\"missing idx or pubkey\"}"); return;
+    }
+    int idx = req->getParam("idx", true)->value().toInt();
+    if (idx < 0 || idx >= MAX_ROOMS || !_mesh.isRoomActive(idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    const String& pub_str = req->getParam("pubkey", true)->value();
+    if ((int)pub_str.length() != PUB_KEY_SIZE * 2) {
+      req->send(400, "application/json", "{\"error\":\"pubkey must be 64 hex chars\"}"); return;
+    }
+    uint8_t key[PUB_KEY_SIZE];
+    if (!mesh::Utils::fromHex(key, PUB_KEY_SIZE, pub_str.c_str())) {
+      req->send(400, "application/json", "{\"error\":\"invalid hex\"}"); return;
+    }
+    _mesh.delNotifyTarget(idx, key);
+    req->redirect("/");
   });
 
   // POST /api/peer/sync (body: idx=<n> optional — omit for all peers)

@@ -78,6 +78,11 @@
   #define MAX_TOMBSTONES 64
 #endif
 
+/* Maximum login-notification targets per room (JES-834). */
+#ifndef MAX_NOTIFY_TARGETS
+  #define MAX_NOTIFY_TARGETS 4
+#endif
+
 /* Maximum peer room-server nodes tracked for Phase 5 replication. */
 #ifndef MAX_PEERS
   #define MAX_PEERS  8
@@ -275,8 +280,10 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t  _sync_posts_recv;  // total posts ingested via sync
   uint32_t  _sync_posts_sent;  // total posts pushed to peers
 
-  /* ---- Login notification rate-limit (JES-834) ---- */
+  /* ---- Login notification targets + rate-limit (JES-834) ---- */
   uint32_t  _last_login_notify_ms[MAX_ROOMS];  // millis() of last DM sent per room
+  uint8_t   _notify_targets[MAX_ROOMS][MAX_NOTIFY_TARGETS][PUB_KEY_SIZE];
+  uint8_t   _notify_target_count[MAX_ROOMS];
 
   /* ---- Message-rate histogram ring-buffer (JES-800) ---- */
   /* 24 buckets × 1 hour = rolling 24-hour window. RAM: 24×2 = 48 bytes. */
@@ -350,6 +357,9 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   /* ---- Login-attempt admin notification (JES-834) ---- */
   void          _notifyAdminsLoginAttempt(int slot_idx, const uint8_t* caller_pubkey, bool success);
+
+  void          saveNotifyTargets();
+  void          loadNotifyTargets();
 
   /* ---- CLI helpers ---- */
   void          handleRoomCommand(char* args, char* reply, bool serial);
@@ -462,6 +472,12 @@ public:
   }
   /** Set stealth for one room and persist; idx -1 = all rooms. */
   void setRoomStealth(int idx, bool s);
+
+  /* Notify target management (JES-834) — public for WebManager access */
+  bool          addNotifyTarget(int room_idx, const uint8_t* pub_key);
+  bool          delNotifyTarget(int room_idx, const uint8_t* pub_key);
+  int           getNotifyTargetCount(int room_idx) const;
+  const uint8_t* getNotifyTarget(int room_idx, int i) const;
 
   /** Get/set local advert interval in seconds (10-3600). Persisted to SPIFFS. */
   uint16_t getAdvertIntervalSec() const { return _advert_interval_sec; }
