@@ -73,6 +73,11 @@
   #define MAX_ROOMS  16
 #endif
 
+/* Maximum tombstones tracked for replicating post deletes (JES-824). Oldest evicted when full. */
+#ifndef MAX_TOMBSTONES
+  #define MAX_TOMBSTONES 64
+#endif
+
 /* Maximum peer room-server nodes tracked for Phase 5 replication. */
 #ifndef MAX_PEERS
   #define MAX_PEERS  8
@@ -90,6 +95,7 @@
 #define TXT_TYPE_SYNCREQ  4   // A→B pull request  [ts][flags][num_vv][VV...]
 #define TXT_TYPE_SYNCDAT  5   // B→A one post       [ts][flags][post_ts][orig[4]][auth[4]][text]
 #define TXT_TYPE_SYNCEND  6   // B→A end of stream  [ts][flags][num_vv][VV...]
+#define TXT_TYPE_SYNCDEL  7   // delete tombstone   [ts][flags][room_hash[4]][origin_id[4]][post_ts[4]]
 
 /* Name resolution table — maps pubkey prefix → advertised node name.
    Populated from onAdvertRecv(); persisted to SPIFFS /names.          */
@@ -163,6 +169,16 @@ struct PostInfo {
   char            text[MAX_POST_TEXT_LEN + 1];
   uint8_t         room_idx;       // owning room (0xFF = free slot)
   uint8_t         origin_id[4];   // Phase 5: 4-byte prefix of room-server that originated post
+};
+
+/**
+ * Tombstone for a deleted post (JES-824). Keyed on (origin_id, post_ts).
+ * room_hash (first 4 bytes of room pub_key) stored for SYNCDEL routing during SYNCREQ.
+ */
+struct Tombstone {
+  uint8_t  origin_id[4];
+  uint32_t post_ts;
+  uint8_t  room_hash[4];  // first 4 bytes of the room's pub_key
 };
 
 /**
@@ -242,6 +258,18 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   /* ---- Post-pool dirty timer (JES-794) ---- */
   unsigned long _post_dirty_at;   // 0 = not dirty; set to futureMillis(5000) on new post
+
+  /* ---- Tombstone log (JES-824) ---- */
+  Tombstone _tombstones[MAX_TOMBSTONES];
+  uint8_t   _tombstone_count;
+
+  void saveTombstones();
+  void loadTombstones();
+  bool isTombstoned(const uint8_t* origin_id, uint32_t post_ts);
+  void addTombstone(const uint8_t* origin_id, uint32_t post_ts, const uint8_t* room_hash);
+  bool deletePostEntry(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts);
+  void emitSyncDel(const uint8_t* room_hash, const uint8_t* origin_id, uint32_t post_ts);
+  void handleSyncDel(int pi, uint8_t* data, size_t len);
 
   /* ---- Name resolution table (JES-798) ---- */
   NameEntry     _names[NAME_TABLE_SIZE];
@@ -423,6 +451,11 @@ public:
    *  Room 0 also updates self_id and invalidates peer ECDH secrets.
    *  Serial CLI and web admin only — never expose the new private key. */
   void rekeyRoom(int idx);
+
+  /** JES-824: Delete post + record tombstone + persist + emit SYNCDEL to peers.
+   *  Tombstone is always recorded (prevents resurrection); returns true if the
+   *  post was actually found and removed from the local pool. */
+  bool handleDeletePost(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts);
 
   /* ---- Screensaver stats accessors (JES-781) ---- */
   uint64_t getUptimeMillis() const { return uptime_millis; }

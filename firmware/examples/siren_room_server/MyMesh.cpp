@@ -61,6 +61,9 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   memset(_dm_convs, 0, sizeof(_dm_convs));
   _dm_num_convs = 0;
 
+  memset(_tombstones, 0, sizeof(_tombstones));
+  _tombstone_count = 0;
+
   memset(&_prefs, 0, sizeof(_prefs));
   _prefs.airtime_factor       = 1.0f;
   _prefs.rx_delay_base        = 0.0f;
@@ -190,8 +193,9 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
       peers[i].next_sync_at = futureMillis(PEER_SYNC_BOOT_DELAY_MS + (uint32_t)i * 5000);
     }
   }
-  loadPostPool();   // restore persisted messages (JES-787)
-  loadNameTable();  // restore advertised-name cache (JES-798)
+  loadPostPool();      // restore persisted messages (JES-787)
+  loadTombstones();   // restore delete tombstones (JES-824)
+  loadNameTable();    // restore advertised-name cache (JES-798)
 
   region_map.load(_fs);
 
@@ -639,6 +643,7 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
       if      (flags == TXT_TYPE_SYNCREQ) handleSyncReq(pi, data, len);
       else if (flags == TXT_TYPE_SYNCDAT) handleSyncDat(pi, data, len);
       else if (flags == TXT_TYPE_SYNCEND) handleSyncEnd(pi, data, len);
+      else if (flags == TXT_TYPE_SYNCDEL) handleSyncDel(pi, data, len);
     }
     return;
   }
@@ -1532,6 +1537,7 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  room list                      List all rooms with details");
       Serial.println("  room add                       Add a new room slot");
       Serial.println("  room del <idx>                 Delete room [serial only]");
+      Serial.println("  room delpost <idx> <hex8> <ts> Delete post by origin_id+ts [serial only, y/N confirm]");
       Serial.println("  room rekey <idx>               Show rekey warning [serial only]");
       Serial.println("  room rekey <idx> confirm       Rotate private key (2-step) [serial only]");
       Serial.println("  room set <idx> name <val>      Set room name");
@@ -1993,7 +1999,53 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|rekey <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
+  // "room delpost <idx> <origin_id_hex8> <post_ts>" — serial-only, with y/N confirmation
+  if (memcmp(args, "delpost", 7) == 0 && (args[7] == ' ' || args[7] == 0)) {
+    if (!serial) { strcpy(reply, "Err - room delpost only allowed via serial CLI"); return; }
+    const char* p = args + 7;
+    while (*p == ' ') p++;
+    int idx = atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    // origin_id: must be exactly 8 hex chars
+    if (strlen(p) < 8 || !isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1]) ||
+        !isxdigit((unsigned char)p[2]) || !isxdigit((unsigned char)p[3]) ||
+        !isxdigit((unsigned char)p[4]) || !isxdigit((unsigned char)p[5]) ||
+        !isxdigit((unsigned char)p[6]) || !isxdigit((unsigned char)p[7]) ||
+        (p[8] != ' ' && p[8] != 0)) {
+      strcpy(reply, "Err - origin_id must be exactly 8 hex chars");
+      return;
+    }
+    uint8_t oid[4];
+    for (int b = 0; b < 4; b++) {
+      char hb[3] = { p[b * 2], p[b * 2 + 1], 0 };
+      oid[b] = (uint8_t)strtoul(hb, nullptr, 16);
+    }
+    p += 8;
+    while (*p == ' ') p++;
+    if (*p == 0) { strcpy(reply, "Err - missing post_ts"); return; }
+    uint32_t post_ts = (uint32_t)strtoul(p, nullptr, 10);
+    if (post_ts == 0) { strcpy(reply, "Err - invalid post_ts"); return; }
+    if (idx < 0 || idx >= MAX_ROOMS || !rooms[idx].active) {
+      strcpy(reply, "Err - invalid or inactive room idx"); return;
+    }
+    // Two-step confirmation
+    Serial.printf("Delete post ts=%lu from room[%d]? [y/N]: ", (unsigned long)post_ts, idx);
+    // Read confirmation from serial (blocking short wait — serial CLI is synchronous)
+    unsigned long deadline = millis() + 10000;
+    char conf = 'N';
+    while (millis() < deadline) {
+      if (Serial.available()) { conf = (char)Serial.read(); break; }
+      delay(10);
+    }
+    Serial.println(conf);
+    if (conf != 'y' && conf != 'Y') { strcpy(reply, "Aborted"); return; }
+    bool found = handleDeletePost((uint8_t)idx, oid, post_ts);
+    strcpy(reply, found ? "OK: post deleted" : "Error: post not found");
+    return;
+  }
+
+  strcpy(reply, "Err - usage: room list|add|del <idx>|delpost <idx> <origin_id_hex8> <post_ts>|rekey <idx>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
 }
 
 /* ------------------------------------------------------------------ */
@@ -2659,6 +2711,9 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
                                     const char* text) {
   if (ridx >= MAX_ROOMS || !rooms[ridx].active) return false;
 
+  // Resurrection guard: silently drop tombstoned posts (JES-824)
+  if (isTombstoned(origin_id, ts)) return false;
+
   // Dedup check: already have this (origin, ts) pair?
   for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
     if (_post_pool[i].room_idx == ridx &&
@@ -2861,6 +2916,7 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
     if (p.room_idx != (uint8_t)ri) continue;
     uint32_t peer_knows = peerKnows(p.origin_id);
     if (p.post_timestamp <= peer_knows) continue;
+    if (isTombstoned(p.origin_id, p.post_timestamp)) continue;  // don't push deleted posts (JES-824)
 
     int dlen = 0;
     uint32_t now = getRTCClock()->getCurrentTimeUnique();
@@ -2907,6 +2963,26 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
     auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
                                peers[pi].shared_secret, buf, dlen);
     if (pkt) sendFlood(pkt, delay_ms, _prefs.path_hash_mode + 1);
+  }
+
+  // Relay all tombstones to peer (idempotent; bounded by MAX_TOMBSTONES=64) (JES-824)
+  // We send them after SYNCEND so the peer can immediately apply them.
+  for (uint8_t ti = 0; ti < _tombstone_count; ti++) {
+    uint8_t dbuf[MAX_PACKET_PAYLOAD];
+    int ddlen = 0;
+    uint32_t tnow = getRTCClock()->getCurrentTimeUnique();
+    memcpy(&dbuf[ddlen], &tnow, 4);                                  ddlen += 4;
+    dbuf[ddlen++] = (TXT_TYPE_SYNCDEL << 2);
+    memcpy(&dbuf[ddlen], _tombstones[ti].room_hash, 4);              ddlen += 4;
+    memcpy(&dbuf[ddlen], _tombstones[ti].origin_id, 4);              ddlen += 4;
+    memcpy(&dbuf[ddlen], &_tombstones[ti].post_ts,  4);              ddlen += 4;
+    self_id = rooms[0].id;
+    auto tpkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
+                                peers[pi].shared_secret, dbuf, ddlen);
+    if (tpkt) {
+      sendFlood(tpkt, delay_ms, _prefs.path_hash_mode + 1);
+      delay_ms += 200;
+    }
   }
 
   Serial.printf("[SYNC] SYNCREQ from peer[%d]: sent %d post(s) for room[%d]\n", pi, sent, ri);
@@ -2961,6 +3037,182 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
   }
   (void)ri;  // informational only
   Serial.printf("[SYNC] SYNCEND from peer[%d] room[%d]\n", pi, ri);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Tombstone log (JES-824)                                             */
+/* ------------------------------------------------------------------ */
+#define TOMBSTONE_LOG_PATH    "/tombstone_log"
+#define TOMBSTONE_LOG_TMP     "/tombstone_log.tmp"
+#define TOMBSTONE_LOG_MAGIC_0 0x54   // 'T'
+#define TOMBSTONE_LOG_MAGIC_1 0x42   // 'B'
+#define TOMBSTONE_LOG_VERSION 1
+
+void MultiRoomMesh::saveTombstones() {
+  if (!_fs) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(TOMBSTONE_LOG_TMP, "w");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(TOMBSTONE_LOG_TMP);
+  File f = _fs->open(TOMBSTONE_LOG_TMP, FILE_O_WRITE);
+#else
+  File f = _fs->open(TOMBSTONE_LOG_TMP, "w", true);
+#endif
+  if (!f) return;
+  uint8_t hdr[3] = { TOMBSTONE_LOG_MAGIC_0, TOMBSTONE_LOG_MAGIC_1, TOMBSTONE_LOG_VERSION };
+  f.write(hdr, 3);
+  f.write(&_tombstone_count, 1);
+  for (uint8_t i = 0; i < _tombstone_count; i++) {
+    f.write(_tombstones[i].origin_id, 4);
+    f.write((const uint8_t*)&_tombstones[i].post_ts, 4);
+    f.write(_tombstones[i].room_hash, 4);
+  }
+  f.close();
+  _fs->remove(TOMBSTONE_LOG_PATH);
+  _fs->rename(TOMBSTONE_LOG_TMP, TOMBSTONE_LOG_PATH);
+}
+
+void MultiRoomMesh::loadTombstones() {
+  if (!_fs) return;
+  if (_fs->exists(TOMBSTONE_LOG_TMP)) _fs->remove(TOMBSTONE_LOG_TMP);
+#if defined(RP2040_PLATFORM)
+  if (!_fs->exists(TOMBSTONE_LOG_PATH)) return;
+  File f = _fs->open(TOMBSTONE_LOG_PATH, "r");
+#else
+  if (!_fs->exists(TOMBSTONE_LOG_PATH)) return;
+  File f = _fs->open(TOMBSTONE_LOG_PATH);
+#endif
+  if (!f) return;
+  uint8_t hdr[4];
+  if (f.read(hdr, 4) != 4) { f.close(); return; }
+  if (hdr[0] != TOMBSTONE_LOG_MAGIC_0 || hdr[1] != TOMBSTONE_LOG_MAGIC_1) { f.close(); return; }
+  if (hdr[2] != TOMBSTONE_LOG_VERSION) { f.close(); return; }  // unknown version — start empty
+  uint8_t cnt = hdr[3];
+  if (cnt > MAX_TOMBSTONES) cnt = MAX_TOMBSTONES;
+  _tombstone_count = 0;
+  for (uint8_t i = 0; i < cnt; i++) {
+    uint8_t  oid[4], rhash[4];
+    uint32_t pts;
+    if (f.read(oid, 4) != 4) break;
+    if (f.read((uint8_t*)&pts, 4) != 4) break;
+    if (f.read(rhash, 4) != 4) break;
+    memcpy(_tombstones[_tombstone_count].origin_id, oid, 4);
+    _tombstones[_tombstone_count].post_ts = pts;
+    memcpy(_tombstones[_tombstone_count].room_hash, rhash, 4);
+    _tombstone_count++;
+  }
+  f.close();
+}
+
+bool MultiRoomMesh::isTombstoned(const uint8_t* origin_id, uint32_t post_ts) {
+  for (uint8_t i = 0; i < _tombstone_count; i++) {
+    if (_tombstones[i].post_ts == post_ts &&
+        memcmp(_tombstones[i].origin_id, origin_id, 4) == 0) return true;
+  }
+  return false;
+}
+
+void MultiRoomMesh::addTombstone(const uint8_t* origin_id, uint32_t post_ts,
+                                  const uint8_t* room_hash) {
+  // Idempotent: skip if already recorded
+  if (isTombstoned(origin_id, post_ts)) return;
+  // Evict oldest if full
+  if (_tombstone_count == MAX_TOMBSTONES) {
+    memmove(&_tombstones[0], &_tombstones[1], (MAX_TOMBSTONES - 1) * sizeof(Tombstone));
+    _tombstone_count--;
+  }
+  memcpy(_tombstones[_tombstone_count].origin_id, origin_id, 4);
+  _tombstones[_tombstone_count].post_ts = post_ts;
+  memcpy(_tombstones[_tombstone_count].room_hash, room_hash, 4);
+  _tombstone_count++;
+}
+
+bool MultiRoomMesh::deletePostEntry(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts) {
+  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    if (_post_pool[i].room_idx == room_idx &&
+        _post_pool[i].post_timestamp == post_ts &&
+        memcmp(_post_pool[i].origin_id, origin_id, 4) == 0) {
+      memset(&_post_pool[i], 0, sizeof(PostInfo));
+      _post_pool[i].room_idx = 0xFF;
+      if (room_idx < MAX_ROOMS && rooms[room_idx].num_posted > 0)
+        rooms[room_idx].num_posted--;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MultiRoomMesh::handleDeletePost(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts) {
+  if (room_idx >= MAX_ROOMS || !rooms[room_idx].active) return false;
+  const uint8_t* room_hash = rooms[room_idx].id.pub_key;
+  // Record tombstone BEFORE clearing the post entry (prevents resurrection race)
+  addTombstone(origin_id, post_ts, room_hash);
+  bool found = deletePostEntry(room_idx, origin_id, post_ts);
+  saveTombstones();
+  if (found) {
+    savePostPool();
+    _post_dirty_at = 0;   // no pending dirty save needed
+  }
+  Serial.printf("[DEL] room[%d] origin=%02x%02x%02x%02x ts=%lu found=%d\n",
+                (int)room_idx, origin_id[0], origin_id[1], origin_id[2], origin_id[3],
+                (unsigned long)post_ts, found ? 1 : 0);
+  emitSyncDel(room_hash, origin_id, post_ts);
+  return found;
+}
+
+void MultiRoomMesh::emitSyncDel(const uint8_t* room_hash, const uint8_t* origin_id,
+                                 uint32_t post_ts) {
+  for (int pi = 0; pi < MAX_PEERS; pi++) {
+    if (!peers[pi].active) continue;
+    calcPeerSecret(pi);
+    uint8_t buf[MAX_PACKET_PAYLOAD];
+    int dlen = 0;
+    uint32_t now = getRTCClock()->getCurrentTimeUnique();
+    memcpy(&buf[dlen], &now, 4);              dlen += 4;
+    buf[dlen++] = (TXT_TYPE_SYNCDEL << 2);
+    memcpy(&buf[dlen], room_hash, 4);         dlen += 4;
+    memcpy(&buf[dlen], origin_id, 4);         dlen += 4;
+    memcpy(&buf[dlen], &post_ts, 4);          dlen += 4;
+    mesh::Identity peer_id;
+    memset(peer_id.pub_key, 0, PUB_KEY_SIZE);
+    memcpy(peer_id.pub_key, peers[pi].pub_key, PUB_KEY_SIZE);
+    self_id = rooms[0].id;
+    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
+                               peers[pi].shared_secret, buf, dlen);
+    if (pkt) sendFlood(pkt, (uint32_t)0, (uint8_t)(_prefs.path_hash_mode + 1));
+  }
+}
+
+/**
+ * Handle incoming SYNCDEL from peer pi (JES-824).
+ * Wire format: [4:ts][1:flags][4:room_hash][4:origin_id][4:post_ts]
+ * Total: 17 bytes minimum.
+ */
+void MultiRoomMesh::handleSyncDel(int pi, uint8_t* data, size_t len) {
+  if (len < 17) return;  // [4:ts][1:flags][4:room_hash][4:origin_id][4:post_ts]
+  uint8_t  room_hash[4];
+  uint8_t  origin_id[4];
+  uint32_t post_ts;
+  memcpy(room_hash,  &data[5],  4);
+  memcpy(origin_id,  &data[9],  4);
+  memcpy(&post_ts,   &data[13], 4);
+
+  // Find matching local room
+  int ri = -1;
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (rooms[i].active && memcmp(rooms[i].id.pub_key, room_hash, 4) == 0) {
+      ri = i; break;
+    }
+  }
+  if (ri < 0) return;  // room not known locally — ignore
+
+  addTombstone(origin_id, post_ts, room_hash);
+  bool found = deletePostEntry((uint8_t)ri, origin_id, post_ts);
+  saveTombstones();
+  if (found) savePostPool();
+  Serial.printf("[SYNCDEL] peer[%d]: del ts=%lu room[%d] found=%d\n",
+                pi, (unsigned long)post_ts, ri, found ? 1 : 0);
+  // No re-broadcast — single-hop fanout is sufficient for small mesh
 }
 
 /* ------------------------------------------------------------------ */

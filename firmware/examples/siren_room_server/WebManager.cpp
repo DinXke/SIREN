@@ -541,6 +541,16 @@ String WebManager::buildChatPage() {
           "  clearTimeout(pollT);clearTimeout(nickT);\n"
           "  fetchMsgs();fetchNicks();\n"
           "}\n"
+          "function delPost(ridx,oid,pts,el){\n"
+          "  if(!confirm('Verwijder dit bericht?'))return;\n"
+          "  var body='room_idx='+encodeURIComponent(ridx)+'&origin_id='+encodeURIComponent(oid)+'&post_ts='+encodeURIComponent(pts);\n"
+          "  fetch('/api/room/delpost',{method:'POST',credentials:'include',\n"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})\n"
+          "  .then(function(r){\n"
+          "    if(r.ok){el.parentNode&&el.parentNode.removeChild(el);}\n"
+          "    else r.json().then(function(j){alert('Fout: '+(j.error||'onbekend'));});\n"
+          "  }).catch(function(){alert('Verbindingsfout');});\n"
+          "}\n"
           "function fetchMsgs(){\n"
           "  fetch('/api/chat/messages?room='+room+'&since='+since,{credentials:'include'})\n"
           "  .then(function(r){return r.json();})\n"
@@ -558,7 +568,12 @@ String WebManager::buildChatPage() {
           "      s2.style.color='#00d4ff';\n"
           "      s2.textContent='<'+m.author+'> ';\n"
           "      var s3=document.createTextNode(m.text);\n"
-          "      row.appendChild(s1);row.appendChild(s2);row.appendChild(s3);\n"
+          "      var btn=document.createElement('button');\n"
+          "      btn.textContent='[x]';\n"
+          "      btn.style.cssText='margin-left:6px;font-size:0.7em;padding:1px 4px;cursor:pointer;background:transparent;color:#ff4444;border:1px solid #ff4444;border-radius:2px';\n"
+          "      btn.title='Verwijder bericht';\n"
+          "      (function(rr,oid,pts,el){btn.onclick=function(){delPost(rr,oid,pts,el);};})(room,m.origin_id,m.ts,row);\n"
+          "      row.appendChild(s1);row.appendChild(s2);row.appendChild(s3);row.appendChild(btn);\n"
           "      box.appendChild(row);\n"
           "      if(m.ts>since)since=m.ts;\n"
           "    });\n"
@@ -1505,9 +1520,15 @@ void WebManager::setupRoutes() {
       if (since_ts > 0 && sorted[i]->post_timestamp <= since_ts) continue;
       if (!first) json += ",";
       first = false;
+      // origin_id as 8 hex chars for delete button (JES-824)
+      char oid_hex[9] = {};
+      for (int b = 0; b < 4; b++)
+        snprintf(oid_hex + b * 2, 3, "%02x", (unsigned int)sorted[i]->origin_id[b]);
       json += "{\"ts\":";
       json += (unsigned long)sorted[i]->post_timestamp;
-      json += ",\"author\":\"";
+      json += ",\"origin_id\":\"";
+      json += oid_hex;
+      json += "\",\"author\":\"";
       json += jsonEscape(_mesh.resolveName(sorted[i]->author.pub_key));
       json += "\",\"text\":\"";
       json += jsonEscape(sorted[i]->text);
@@ -1666,6 +1687,44 @@ void WebManager::setupRoutes() {
     bool ok = _mesh.delPeerFromWeb(idx);
     if (!ok) { req->send(400, "text/plain", "invalid idx"); return; }
     req->redirect("/");
+  });
+
+  // POST /api/room/delpost (body: room_idx=N&origin_id=XXXXXXXX&post_ts=T) — admin only (JES-824)
+  _server.on("/api/room/delpost", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("room_idx", true) || !req->hasParam("origin_id", true) ||
+        !req->hasParam("post_ts", true)) {
+      req->send(400, "application/json", "{\"error\":\"missing params\"}"); return;
+    }
+    int room_idx = req->getParam("room_idx", true)->value().toInt();
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !_mesh.isRoomActive(room_idx)) {
+      req->send(400, "application/json", "{\"error\":\"invalid room\"}"); return;
+    }
+    const String& oid_str = req->getParam("origin_id", true)->value();
+    if (oid_str.length() != 8) {
+      req->send(400, "application/json", "{\"error\":\"origin_id must be 8 hex chars\"}"); return;
+    }
+    for (int i = 0; i < 8; i++) {
+      char c = oid_str[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+        req->send(400, "application/json", "{\"error\":\"origin_id must be hex\"}"); return;
+      }
+    }
+    uint8_t oid[4];
+    for (int b = 0; b < 4; b++) {
+      char hb[3] = { oid_str[b * 2], oid_str[b * 2 + 1], 0 };
+      oid[b] = (uint8_t)strtoul(hb, nullptr, 16);
+    }
+    uint32_t post_ts = (uint32_t)req->getParam("post_ts", true)->value().toInt();
+    if (post_ts == 0) {
+      req->send(400, "application/json", "{\"error\":\"invalid post_ts\"}"); return;
+    }
+    bool found = _mesh.handleDeletePost((uint8_t)room_idx, oid, post_ts);
+    if (found) {
+      req->send(200, "application/json", "{\"ok\":true}");
+    } else {
+      req->send(404, "application/json", "{\"error\":\"not found\"}");
+    }
   });
 
   // POST /api/peer/sync (body: idx=<n> optional — omit for all peers)
