@@ -314,7 +314,7 @@ bool WebManager::applyRestore(const String& json) {
   // Admin password
   if (extractField("admin_pass", val, sizeof(val)) && val[0]) {
     char cmd[160];
-    snprintf(cmd, sizeof(cmd), "set pass %s", val);
+    snprintf(cmd, sizeof(cmd), "password %s", val);
     _mesh.handleCommand(0, cmd, reply);
   }
 

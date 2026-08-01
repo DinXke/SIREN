@@ -149,7 +149,7 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
       _prefs.password[10] = 0;
       _cli.savePrefs(_fs);
       Serial.printf("[SIREN] First-boot admin password: %s\n", _prefs.password);
-      Serial.printf("[SIREN] Change via web UI > Settings or serial CLI: set password <new>\n");
+      Serial.printf("[SIREN] Change via web UI > Settings or serial CLI: password <new>\n");
     }
   }
 
