@@ -91,7 +91,7 @@
 /* Name resolution table — maps pubkey prefix → advertised node name.
    Populated from onAdvertRecv(); persisted to SPIFFS /names.          */
 #define NAME_TABLE_SIZE 32
-#define NAME_KEY_SIZE    8   // first 8 bytes of pubkey used as lookup key
+#define NAME_KEY_SIZE    4   // first 4 bytes of pubkey used as lookup key
 
 #define FIRMWARE_ROLE        "siren_room"
 #define MAX_POST_TEXT_LEN    (160 - 9)
@@ -127,7 +127,7 @@ struct PeerInfo {
 };
 
 struct NameEntry {
-  uint8_t  pub_prefix[NAME_KEY_SIZE];   // first 8 bytes of pubkey
+  uint8_t  pub_prefix[NAME_KEY_SIZE];   // first 4 bytes of pubkey
   char     name[24];                    // advertised name (NUL-terminated)
   uint32_t lru_seq;                     // 0 = empty; higher = more recently seen
 };

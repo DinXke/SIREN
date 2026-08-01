@@ -1854,7 +1854,7 @@ void MultiRoomMesh::loadPostPool() {
 #define NAMES_PATH "/names"
 #define NAMES_MAGIC_0 0x4E   // 'N'
 #define NAMES_MAGIC_1 0x4D   // 'M'
-#define NAMES_VERSION    1
+#define NAMES_VERSION    2   // v2: pub_prefix reduced from 8 to 4 bytes (NAME_KEY_SIZE)
 
 void MultiRoomMesh::saveNameTable() {
   if (!_fs) return;
