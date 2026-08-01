@@ -278,6 +278,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Login notification rate-limit (JES-834) ---- */
   uint32_t  _last_login_notify_ms[MAX_ROOMS];  // millis() of last DM sent per room
 
+  /* ---- Message-rate histogram ring-buffer (JES-800) ---- */
+  /* 24 buckets × 1 hour = rolling 24-hour window. RAM: 24×2 = 48 bytes. */
+  #define HIST_BUCKETS 24
+  uint16_t  _hist_ring[HIST_BUCKETS];   // messages in each 1-hour bucket
+  uint8_t   _hist_head;                 // current (write) bucket index
+  uint32_t  _hist_bucket_ts;            // RTC timestamp when _hist_head bucket started
+
   void saveTombstones();
   void loadTombstones();
   bool isTombstoned(const uint8_t* origin_id, uint32_t post_ts);
@@ -498,6 +505,16 @@ public:
   uint32_t getSyncDatRecv()   const { return _sync_dat_recv; }
   uint32_t getSyncPostsRecv() const { return _sync_posts_recv; }
   uint32_t getSyncPostsSent() const { return _sync_posts_sent; }
+
+  /* ---- Message-rate histogram accessors (JES-800) ---- */
+  /** Returns message count for histogram bucket idx (0=current, 1=1h ago, …, 23=23h ago). */
+  uint16_t getHistBucket(int idx) const {
+    if (idx < 0 || idx >= HIST_BUCKETS) return 0;
+    int i = ((int)_hist_head - idx + HIST_BUCKETS) % HIST_BUCKETS;
+    return _hist_ring[i];
+  }
+  /** Advance histogram to the correct bucket for the current RTC time. */
+  void histAdvance(uint32_t now_ts);
 
   /* ---- Post pool backup / restore (JES-790) ---- */
   /** Serialise active posts as flat JSON key-value pairs for inclusion in backup. */

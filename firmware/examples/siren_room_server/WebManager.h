@@ -73,6 +73,8 @@ private:
   String buildStatusPage(const char* ip);
   String buildChatPage();
   String buildAclPage();
+  String buildStatsPage();
+  String buildStatsJson();
 
   String buildBackupJson();
   bool   applyRestore(const String& json);

@@ -96,6 +96,9 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   }
   _sync_req_sent = _sync_dat_recv = _sync_posts_recv = _sync_posts_sent = 0;
   memset(_last_login_notify_ms, 0, sizeof(_last_login_notify_ms));
+  memset(_hist_ring, 0, sizeof(_hist_ring));
+  _hist_head      = 0;
+  _hist_bucket_ts = 0;
   _advert_interval_sec = 120;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
@@ -658,6 +661,10 @@ void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
     client->out_path_len = OUT_PATH_UNKNOWN;
   }
 
+  // Update per-client radio stats (JES-800)
+  client->last_rssi = (int8_t)radio_driver.getLastRSSI();
+  client->last_snr  = (int8_t)(radio_driver.getLastSNR() * 4);
+
   uint32_t now = getRTCClock()->getCurrentTimeUnique();
   memcpy(reply_data, &now, 4);
   reply_data[4] = RESP_SERVER_LOGIN_OK;
@@ -730,6 +737,9 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
       uint32_t now = getRTCClock()->getCurrentTimeUnique();
       client->last_activity = now;
       client->extra.room.push_failures = 0;
+      // Update per-client radio stats (JES-800)
+      client->last_rssi = (int8_t)radio_driver.getLastRSSI();
+      client->last_snr  = (int8_t)(radio_driver.getLastSNR() * 4);
 
       data[len] = 0;
 
@@ -937,6 +947,13 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   slot.num_posted++;
   _post_dirty_at = futureMillis(5000);  // debounced persist (JES-794)
 
+  // Per-client message counter (JES-800)
+  if (client && client->msg_count < 0xFFFF) client->msg_count++;
+
+  // Histogram ring-buffer: advance to current bucket then increment (JES-800)
+  histAdvance(free_slot->post_timestamp);
+  _hist_ring[_hist_head]++;
+
   // Phase 5: update local VV and push to peers immediately
   vvUpdate(slot, free_slot->origin_id, free_slot->post_timestamp);
   for (int pi = 0; pi < MAX_PEERS; pi++) {
@@ -949,6 +966,29 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
                   free_slot->author.pub_key, free_slot->text,
                   _mqtt_post_ctx);
   }
+}
+
+/* Advance the histogram ring-buffer so _hist_ring[_hist_head] covers now_ts.
+ * Skipped buckets (node was offline or no posts for >1 h) are zeroed. */
+void MultiRoomMesh::histAdvance(uint32_t now_ts) {
+  if (_hist_bucket_ts == 0) {
+    // First ever post — seed bucket timestamp
+    _hist_bucket_ts = now_ts;
+    return;
+  }
+  if (now_ts < _hist_bucket_ts) return;  // clock skew guard
+  uint32_t elapsed_secs = now_ts - _hist_bucket_ts;
+  uint32_t buckets_elapsed = elapsed_secs / 3600u;
+  if (buckets_elapsed == 0) return;  // still within current bucket
+
+  // Advance at most HIST_BUCKETS steps; if more, zero the entire ring
+  uint32_t steps = buckets_elapsed < (uint32_t)HIST_BUCKETS
+                   ? buckets_elapsed : (uint32_t)HIST_BUCKETS;
+  for (uint32_t s = 0; s < steps; s++) {
+    _hist_head = (_hist_head + 1) % HIST_BUCKETS;
+    _hist_ring[_hist_head] = 0;
+  }
+  _hist_bucket_ts += buckets_elapsed * 3600u;  // align to bucket boundary
 }
 
 void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post) {
@@ -1658,6 +1698,10 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  STATS");
       Serial.println("  -----");
       Serial.println("  get stats                      Show node statistics summary");
+      Serial.println("  stats                          Brief totals (rooms/posts/contacts/uptime)");
+      Serial.println("  stats rooms                    Per-room client counts + post totals");
+      Serial.println("  stats users                    Per-user role/hops/RSSI/msgs [all rooms]");
+      Serial.println("  stats hist                     24-hour message histogram");
       Serial.println("  stats-core                     Show core stats [serial only]");
       Serial.println("  stats-radio                    Show radio stats [serial only]");
       Serial.println("  neighbors                      List mesh neighbors");
@@ -1694,6 +1738,111 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
                (unsigned long)_sync_posts_recv,
                (unsigned long)_sync_posts_sent);
     }
+    return;
+  }
+
+  // ---- stats rooms / stats users / stats hist (JES-800) ----
+  if (memcmp(command, "stats", 5) == 0 && (command[5] == ' ' || command[5] == 0)) {
+    const char* sub = command + 5;
+    while (*sub == ' ') sub++;
+
+    if (strcmp(sub, "rooms") == 0) {
+      if (is_serial) {
+        Serial.printf("Rooms (%d active):\n", _num_active_rooms);
+        for (int i = 0; i < MAX_ROOMS; i++) {
+          if (!rooms[i].active) continue;
+          int nc = rooms[i].acl.getNumClients();
+          int admin_c = 0, rw_c = 0, ro_c = 0, guest_c = 0;
+          for (int j = 0; j < nc; j++) {
+            auto c = rooms[i].acl.getClientByIdx(j);
+            switch (c->permissions & PERM_ACL_ROLE_MASK) {
+              case PERM_ACL_ADMIN:      admin_c++; break;
+              case PERM_ACL_READ_WRITE: rw_c++;    break;
+              case PERM_ACL_READ_ONLY:  ro_c++;    break;
+              default:                  guest_c++; break;
+            }
+          }
+          Serial.printf("  [%d] '%s'  clients=%d (adm=%d rw=%d ro=%d g=%d)  posts=%d\n",
+                        i, rooms[i].name, nc,
+                        admin_c, rw_c, ro_c, guest_c,
+                        rooms[i].num_posted);
+        }
+      } else {
+        int pos = 0;
+        for (int i = 0; i < MAX_ROOMS && pos < 140; i++) {
+          if (!rooms[i].active) continue;
+          pos += snprintf(reply + pos, 160 - pos, "[%d]%s c=%d p=%d; ",
+                          i, rooms[i].name,
+                          rooms[i].acl.getNumClients(),
+                          rooms[i].num_posted);
+        }
+        if (pos == 0) strcpy(reply, "no rooms");
+      }
+      return;
+    }
+
+    if (strcmp(sub, "users") == 0) {
+      if (is_serial) {
+        for (int i = 0; i < MAX_ROOMS; i++) {
+          if (!rooms[i].active) continue;
+          int nc = rooms[i].acl.getNumClients();
+          Serial.printf("Room[%d] '%s':\n", i, rooms[i].name);
+          for (int j = 0; j < nc; j++) {
+            auto c = rooms[i].acl.getClientByIdx(j);
+            char hex[9]; mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+            const char* nm = resolveName(c->id.pub_key);
+            Serial.printf("  <%s> '%s' perm=%d hops=%s rssi=%d snr=%d msgs=%d\n",
+                          hex, nm,
+                          (c->permissions & PERM_ACL_ROLE_MASK),
+                          c->out_path_len == OUT_PATH_UNKNOWN ? "?" : String(c->out_path_len).c_str(),
+                          (int)c->last_rssi,
+                          (int)c->last_snr,
+                          (int)c->msg_count);
+          }
+        }
+      } else {
+        // Compact mesh-DM reply; admin-only enforced by caller
+        int pos = 0;
+        int scope = _active_slot;
+        int nc = rooms[scope].acl.getNumClients();
+        for (int j = 0; j < nc && pos < 140; j++) {
+          auto c = rooms[scope].acl.getClientByIdx(j);
+          char hex[9]; mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+          pos += snprintf(reply + pos, 160 - pos, "<%s> p=%d m=%d; ",
+                          hex,
+                          (c->permissions & PERM_ACL_ROLE_MASK),
+                          (int)c->msg_count);
+        }
+        if (pos == 0) strcpy(reply, "no users");
+      }
+      return;
+    }
+
+    if (strcmp(sub, "hist") == 0) {
+      histAdvance(getRTCClock()->getCurrentTime());
+      if (is_serial) {
+        Serial.println("Message histogram (last 24h, newest first):");
+        for (int b = 0; b < HIST_BUCKETS; b++) {
+          uint16_t cnt = getHistBucket(b);
+          Serial.printf("  -%2dh: %u\n", b, (unsigned)cnt);
+        }
+      } else {
+        // Compact: last 12 buckets
+        int pos = snprintf(reply, 160, "hist:");
+        for (int b = 0; b < 12 && pos < 150; b++) {
+          pos += snprintf(reply + pos, 160 - pos, "%u,", (unsigned)getHistBucket(b));
+        }
+        reply[pos > 0 ? pos - 1 : 0] = 0;  // trim trailing comma
+      }
+      return;
+    }
+
+    // "stats" with no sub-command: brief totals
+    snprintf(reply, 160, "rooms=%d posts=%lu contacts=%d uptime=%lus",
+             _num_active_rooms,
+             (unsigned long)getTotalPosts(),
+             (int)getTotalContacts(),
+             (unsigned long)(uptime_millis / 1000UL));
     return;
   }
 

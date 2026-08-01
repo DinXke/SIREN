@@ -20,6 +20,9 @@ struct ClientInfo {
   uint8_t shared_secret[PUB_KEY_SIZE];
   uint32_t last_timestamp;   // by THEIR clock  (transient)
   uint32_t last_activity;    // by OUR clock    (transient)
+  int8_t   last_rssi;        // last packet RSSI from this client (0 = unknown, transient)
+  int8_t   last_snr;         // last packet SNR×4 from this client (0 = unknown, transient)
+  uint16_t msg_count;        // total posts submitted by this client (transient)
   union  {
     struct {
       uint32_t sync_since;  // sync messages SINCE this timestamp (by OUR clock)
