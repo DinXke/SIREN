@@ -78,6 +78,9 @@ private:
   String buildStatsPage();
   String buildStatsJson();
 
+  String buildDebugLogJson();
+  String buildDebugLogPage();
+
   String buildBackupJson();
   bool   applyRestore(const String& json);
 

@@ -1000,6 +1000,38 @@ String WebManager::buildStatsPage() {
   return page;
 }
 
+/* ---- Debug log JSON (JES-852) ------------------------------------------- */
+String WebManager::buildDebugLogJson() {
+  String j = "{\"enabled\":";
+  j += _mesh.isDebugLogEnabled() ? "true" : "false";
+  j += ",\"count\":";
+  j += (int)g_dbglog.count();
+  j += ",\"entries\":[";
+  uint16_t cnt = g_dbglog.count();
+  // Return up to last 200 entries newest-last (oldest first in array)
+  // Entries are already ordered oldest-first by DebugLog::get()
+  for (uint16_t i = 0; i < cnt; i++) {
+    const DebugEntry& e = g_dbglog.get(i);
+    if (i > 0) j += ',';
+    j += "{\"ts\":";
+    j += (unsigned long)e.ts;
+    j += ",\"msg\":\"";
+    // JSON-escape the message (reuse existing jsonEscape helper if available,
+    // otherwise do minimal escaping: backslash and double-quote)
+    for (const char* p = e.msg; *p; p++) {
+      char c = *p;
+      if      (c == '"')  j += "\\\"";
+      else if (c == '\\') j += "\\\\";
+      else if (c == '\n') j += "\\n";
+      else if (c == '\r') j += "\\r";
+      else                j += c;
+    }
+    j += "\"}";
+  }
+  j += "]}";
+  return j;
+}
+
 String WebManager::buildStatusPage(const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
@@ -1317,6 +1349,73 @@ String WebManager::buildStatusPage(const char* ip) {
             "Freq/BW/SF/CR vereisen herstart. TX power is live.</p></div>";
   }
 
+  // MeshCore scope/regio instellingen (JES-852)
+  {
+    const NodePrefs* p = mesh.getNodePrefs();
+    char fm_str[8], fmu_str[8], fma_str[8], phm_str[8];
+    snprintf(fm_str,  sizeof(fm_str),  "%d", (int)p->flood_max);
+    snprintf(fmu_str, sizeof(fmu_str), "%d", (int)p->flood_max_unscoped);
+    snprintf(fma_str, sizeof(fma_str), "%d", (int)p->flood_max_advert);
+    snprintf(phm_str, sizeof(phm_str), "%d", (int)p->path_hash_mode);
+
+    page += "<div class='card'><h2>MeshCore Scope &amp; Regio</h2>";
+
+    // Flood forwarding + flood limits
+    page += "<form method='post' action='/api/meshcore' style='margin-bottom:8px'>"
+            "<div class='frow'><label>Flood door sturen</label><select name='fwd'>"
+            "<option value='on'"; page += (p->disable_fwd == 0) ? " selected" : ""; page += ">Aan (aanbevolen)</option>"
+            "<option value='off'"; page += (p->disable_fwd != 0) ? " selected" : ""; page += ">Uit</option>"
+            "</select></div>";
+    page += "<div class='frow'><label>flood_max (scoped)</label>"
+            "<input name='flood_max' type='number' min='1' max='255' value='"; page += fm_str;
+    page += "'></div>"
+            "<div class='frow'><label>flood_max_unscoped</label>"
+            "<input name='flood_max_unscoped' type='number' min='1' max='255' value='"; page += fmu_str;
+    page += "'></div>"
+            "<div class='frow'><label>flood_max_advert</label>"
+            "<input name='flood_max_advert' type='number' min='1' max='255' value='"; page += fma_str;
+    page += "'></div>"
+            "<div class='frow'><label>Path hash mode</label><select name='path_hash'>"
+            "<option value='0'"; page += ((int)p->path_hash_mode == 0) ? " selected" : ""; page += ">0 &ndash; geen</option>"
+            "<option value='1'"; page += ((int)p->path_hash_mode == 1) ? " selected" : ""; page += ">1 &ndash; normaal</option>"
+            "<option value='2'"; page += ((int)p->path_hash_mode == 2) ? " selected" : ""; page += ">2 &ndash; streng</option>"
+            "</select></div>"
+            "<button type='submit'>Opslaan</button></form>";
+
+    // Default scope (region)
+    {
+      const RegionEntry* def = mesh.getDefaultRegion();
+      int rcount = mesh.getRegionCount();
+      page += "<hr style='border-color:#2a3050;margin:10px 0'>"
+              "<h3 style='margin:0 0 6px'>Standaard scope (regio)</h3>"
+              "<p style='font-size:0.84em;color:#aaa;margin:0 0 8px'>"
+              "Huidig: <b>"; page += def ? htmlEscape(def->name) : "geen (globaal)";
+      page += "</b></p>";
+      if (rcount > 0) {
+        page += "<form method='post' action='/api/meshcore/region'>"
+                "<div class='frow'><label>Regio</label><select name='region'>"
+                "<option value='null'"; page += (!def) ? " selected" : ""; page += ">geen (globaal)</option>";
+        for (int ri = 0; ri < rcount; ri++) {
+          const RegionEntry* r = mesh.getRegionByIdx(ri);
+          if (!r || r->isWildcard()) continue;
+          String esc = htmlEscape(r->name);
+          page += "<option value='"; page += esc;
+          if (def && strcmp(r->name, def->name) == 0) page += "' selected='selected";
+          page += "'>"; page += esc; page += "</option>";
+        }
+        page += "</select></div>"
+                "<button type='submit'>Scope instellen</button></form>";
+      } else {
+        page += "<p style='font-size:0.84em;color:#aaa'>Geen regio&apos;s geladen. "
+                "Gebruik CLI: <code>region def &lt;naam&gt;</code></p>";
+      }
+    }
+
+    page += "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "CLI: <code>set flood_max &lt;n&gt;</code> / <code>set fwd on|off</code> / "
+            "<code>region default &lt;naam&gt;</code></p></div>";
+  }
+
   // Peer-koppeling (JES-816)
   {
     const uint8_t* own_pub = mesh.getRoomPubKey(0);
@@ -1506,6 +1605,57 @@ String WebManager::buildStatusPage(const char* ip) {
   // Legacy ElegantOTA serial-upload link (fallback)
   page += "<div class='card'><p style='font-size:0.85em'>"
           "<a href='/update'>Handmatige OTA upload (ElegantOTA)</a></p></div>";
+
+  // Debug Log (JES-852) — RAM-only ring buffer, admin-gated
+  {
+    bool dlog_on = mesh.isDebugLogEnabled();
+    page += "<div class='card'><h2>Debug Log</h2>"
+            "<p style='font-size:0.84em;color:#aaa'>"
+            "RAM-ring ("; page += (int)(DEBUG_LOG_MAX_ENTRIES);
+    page += " regels max, ~"; page += (int)(DEBUG_LOG_MAX_ENTRIES * (4 + DEBUG_LOG_MSG_LEN) / 1024);
+    page += " KB). Niet persistent: leeg na herstart.</p>"
+            "<form method='post' action='/api/debuglog/enable' style='display:inline;margin-right:8px'>"
+            "<input type='hidden' name='on' value='"; page += dlog_on ? "0" : "1";
+    page += "'><button type='submit'>"; page += dlog_on ? "Logging UIT" : "Logging AAN";
+    page += "</button></form>"
+            "<form method='post' action='/api/debuglog/clear' style='display:inline'>"
+            "<button type='submit' class='del'>Clear</button></form>"
+            "<div id='dlog-panel' style='margin-top:10px'>"
+            "<p style='color:#aaa;font-size:0.85em'>"; page += dlog_on ? "Laden..." : "Logging uitgeschakeld.";
+    page += "</p></div>";
+    if (dlog_on) {
+      page += "<script>"
+              "function loadDlog(){"
+                "fetch('/api/debuglog',{credentials:'include'})"
+                  ".then(function(r){return r.json();})"
+                  ".then(function(d){"
+                    "var el=document.getElementById('dlog-panel');"
+                    "if(!el)return;"
+                    "while(el.firstChild)el.removeChild(el.firstChild);"
+                    "if(!d.entries||!d.entries.length){"
+                      "var p=document.createElement('p');p.style.color='#aaa';"
+                      "p.textContent='Geen log-regels.';el.appendChild(p);return;"
+                    "}"
+                    "var pre=document.createElement('pre');"
+                    "pre.style.cssText='background:#111;padding:8px;border-radius:4px;"
+                                       "font-size:0.78em;overflow-x:auto;max-height:400px;overflow-y:auto';"
+                    "d.entries.forEach(function(e){"
+                      "var ln=document.createTextNode('['+e.ts+'] '+e.msg+'\\n');"
+                      "pre.appendChild(ln);"
+                    "});"
+                    "el.appendChild(pre);"
+                    "pre.scrollTop=pre.scrollHeight;"
+                  "})"
+                  ".catch(function(){"
+                    "var el=document.getElementById('dlog-panel');"
+                    "if(el){var p=document.createElement('p');p.textContent='Fout.';el.appendChild(p);}"
+                  "});"
+              "}"
+              "loadDlog();setInterval(loadDlog,3000);"
+              "</script>";
+    }
+    page += "</div>";
+  }
 
   page += "</div>";  // end tab 3
 
@@ -1962,6 +2112,106 @@ void WebManager::setupRoutes() {
         snprintf(cmd, sizeof(cmd), "set txpower %s",
                  req->getParam("txpower", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
+      }
+      req->redirect("/");
+    });
+
+  // -------------------------------------------------------------------------
+  // API: Debug log (JES-852)
+  // -------------------------------------------------------------------------
+
+  // GET /api/debuglog — JSON array of log entries (admin auth)
+  _server.on("/api/debuglog", HTTP_GET,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      req->send(200, "application/json", buildDebugLogJson());
+    });
+
+  // POST /api/debuglog/enable?on=1|0 — enable or disable logging
+  _server.on("/api/debuglog/enable", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (req->hasParam("on", true)) {
+        bool on = (req->getParam("on", true)->value() == "1");
+        _mesh.enableDebugLog(on);
+      }
+      req->redirect("/");
+    });
+
+  // POST /api/debuglog/clear — discard all log entries
+  _server.on("/api/debuglog/clear", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      _mesh.clearDebugLog();
+      req->redirect("/");
+    });
+
+  // -------------------------------------------------------------------------
+  // API: MeshCore scope / region settings (JES-852)
+  // -------------------------------------------------------------------------
+
+  // POST /api/meshcore — flood limits, forwarding, path_hash
+  _server.on("/api/meshcore", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      char cmd[80], reply[160];
+
+      auto param = [&](const char* n) -> const char* {
+        return req->hasParam(n, true) ? req->getParam(n, true)->value().c_str() : nullptr;
+      };
+
+      const char* fwd = param("fwd");
+      if (fwd) {
+        snprintf(cmd, sizeof(cmd), "set fwd %s", (strcmp(fwd, "on") == 0) ? "on" : "off");
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* fm = param("flood_max");
+      if (fm && fm[0]) {
+        snprintf(cmd, sizeof(cmd), "set flood_max %s", fm);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* fmu = param("flood_max_unscoped");
+      if (fmu && fmu[0]) {
+        snprintf(cmd, sizeof(cmd), "set flood_max_unscoped %s", fmu);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* fma = param("flood_max_advert");
+      if (fma && fma[0]) {
+        snprintf(cmd, sizeof(cmd), "set flood_max_advert %s", fma);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      const char* phm = param("path_hash");
+      if (phm && phm[0]) {
+        snprintf(cmd, sizeof(cmd), "set path_hash %s", phm);
+        _mesh.handleCommand(0, cmd, reply);
+      }
+      req->redirect("/");
+    });
+
+  // POST /api/meshcore/region — set default scope region
+  _server.on("/api/meshcore/region", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      char cmd[80], reply[160];
+      if (req->hasParam("region", true)) {
+        const String& rv = req->getParam("region", true)->value();
+        if (rv == "null" || rv.isEmpty()) {
+          snprintf(cmd, sizeof(cmd), "region default null");
+        } else {
+          // Validate: only allow alphanumeric + _ + - (region name chars)
+          bool safe = true;
+          for (size_t i = 0; i < rv.length(); i++) {
+            char c = rv[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
+              safe = false; break;
+            }
+          }
+          if (safe && rv.length() < 30) {
+            snprintf(cmd, sizeof(cmd), "region default %s", rv.c_str());
+            _mesh.handleCommand(0, cmd, reply);
+          }
+        }
       }
       req->redirect("/");
     });
