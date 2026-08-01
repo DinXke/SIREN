@@ -3698,6 +3698,10 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
   (void)ri;  // informational only
   peers[pi].last_syncend_ts = getRTCClock()->getCurrentTime();
   Serial.printf("[SYNC] SYNCEND from peer[%d] room[%d]\n", pi, ri);
+  // Trigger immediate reverse SYNCREQ so both directions complete in one round.
+  // Small delay (2 s) to let any in-flight SYNCDAT frames land first.
+  // Reset the periodic timer to avoid double-send.
+  peers[pi].next_sync_at = futureMillis(2000);
 }
 
 /* ------------------------------------------------------------------ */
