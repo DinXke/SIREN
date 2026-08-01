@@ -1554,10 +1554,10 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     const char* arg = command + 8;
     while (*arg == ' ') arg++;
     if (strcmp(arg, "on") == 0) {
-      char cmd[20] = "set fwd on";
+      char cmd[20] = "set repeat on";
       handleCommand(_active_slot, cmd, reply);
     } else if (strcmp(arg, "off") == 0) {
-      char cmd[20] = "set fwd off";
+      char cmd[20] = "set repeat off";
       handleCommand(_active_slot, cmd, reply);
     } else {
       // "repeater status" or just "repeater"
