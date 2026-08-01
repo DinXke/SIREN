@@ -1031,6 +1031,8 @@ String WebManager::buildStatusPage(const char* ip) {
             "showTab(1);"
             "document.getElementById('editIdx').value=i;"
             "document.getElementById('editName').value=n;"
+            "document.getElementById('editClearPass').checked=false;"
+            "document.getElementById('editClearGuest').checked=false;"
             "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
           "}"
           "</script>";
@@ -1146,8 +1148,14 @@ String WebManager::buildStatusPage(const char* ip) {
           "<form method='post' action='/api/room/set'>"
           "<div class='frow'><label>Idx</label><input id='editIdx' name='idx' type='number' min='0' max='15'></div>"
           "<div class='frow'><label>Naam</label><input id='editName' name='name' maxlength='23'></div>"
-          "<div class='frow'><label>Wachtwoord</label><input name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'></div>"
-          "<div class='frow'><label>Gast-ww</label><input name='guest' maxlength='15' placeholder='leeg laten = ongewijzigd'></div>"
+          "<div class='frow'><label>Wachtwoord</label>"
+          "<input name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
+          "<label style='font-size:0.85em;font-weight:normal'>"
+          "<input type='checkbox' id='editClearPass' name='clear_pass' value='1'> wissen</label></div>"
+          "<div class='frow'><label>Gast-ww</label>"
+          "<input name='guest' maxlength='15' placeholder='leeg laten = ongewijzigd'> "
+          "<label style='font-size:0.85em;font-weight:normal'>"
+          "<input type='checkbox' id='editClearGuest' name='clear_guest' value='1'> wissen</label></div>"
           "<button type='submit'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle
@@ -1723,12 +1731,18 @@ void WebManager::setupRoutes() {
                  req->getParam("name", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      if (req->hasParam("pass", true) && req->getParam("pass", true)->value().length()) {
+      if (req->hasParam("clear_pass", true) && req->getParam("clear_pass", true)->value() == "1") {
+        snprintf(cmd, sizeof(cmd), "room set %s pass ", idx.c_str());
+        _mesh.handleCommand(0, cmd, reply);
+      } else if (req->hasParam("pass", true) && req->getParam("pass", true)->value().length()) {
         snprintf(cmd, sizeof(cmd), "room set %s pass %s", idx.c_str(),
                  req->getParam("pass", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
       }
-      if (req->hasParam("guest", true) && req->getParam("guest", true)->value().length()) {
+      if (req->hasParam("clear_guest", true) && req->getParam("clear_guest", true)->value() == "1") {
+        snprintf(cmd, sizeof(cmd), "room set %s guest ", idx.c_str());
+        _mesh.handleCommand(0, cmd, reply);
+      } else if (req->hasParam("guest", true) && req->getParam("guest", true)->value().length()) {
         snprintf(cmd, sizeof(cmd), "room set %s guest %s", idx.c_str(),
                  req->getParam("guest", true)->value().c_str());
         _mesh.handleCommand(0, cmd, reply);
