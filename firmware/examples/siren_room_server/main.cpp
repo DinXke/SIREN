@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <Mesh.h>
+#ifdef ESP32
+  #include <esp_ota_ops.h>
+#endif
 
 #include "MyMesh.h"
 #include "SettingsMenu.h"
@@ -90,6 +93,12 @@ void setup() {
   command[0] = 0;
   board.onBootComplete();
 
+#ifdef ESP32
+  // Mark this image as valid so the bootloader cancels any pending rollback
+  // (rollback is triggered if the watchdog fires before this call is reached).
+  esp_ota_mark_app_valid_cancel_rollback();
+#endif
+
   Serial.println("[SIREN] Phase 3 — multi-room server with CLI + NVS persistence");
   Serial.println("Commands: menu");
   Serial.println("  room list | add | del <idx> | set <idx> name|pass|guest <v>");
@@ -101,6 +110,7 @@ void setup() {
   Serial.println("  wifi mode ap|sta | wifi ap ssid <n> | wifi ap pass <p>");
   Serial.println("  wifi ssid <n> | wifi pass <p> | wifi connect | wifi status");
   Serial.println("  mqtt status | enable | disable | set host|port|tls|user|pass|net_id ...");
+  Serial.println("  ota check | ota update | ota status");
 #endif
   Serial.println("Type 'menu' + Enter to open the interactive settings menu.");
 }
@@ -146,6 +156,12 @@ void loop() {
             (command[4] == 0 || command[4] == ' ')) {
           const char* mqtt_args = (command[4] == ' ') ? command + 5 : "status";
           mqtt_manager.handleMqttCommand(mqtt_args, reply);
+          handled = true;
+        }
+        if (!handled && memcmp(command, "ota", 3) == 0 &&
+            (command[3] == 0 || command[3] == ' ')) {
+          const char* ota_args = (command[3] == ' ') ? command + 4 : "status";
+          web_manager.handleOtaCommand(ota_args, reply);
           handled = true;
         }
 #endif

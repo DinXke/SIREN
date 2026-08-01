@@ -1363,8 +1363,11 @@ String WebManager::buildStatusPage(const char* ip) {
     page += _mqtt_mgr->buildWebSection();
   }
 
-  // OTA link
-  page += "<div class='card'><a href='/update'>OTA Firmware Update</a></div>";
+  // GitHub self-update (JES-774)
+  page += _ota_mgr.buildWebSection();
+
+  // Legacy ElegantOTA serial-upload link (fallback)
+  page += "<div class='card'><small><a href='/update'>Handmatige OTA upload (ElegantOTA)</a></small></div>";
 
   page += FPSTR(HTML_FOOT);
   return page;
@@ -2347,6 +2350,53 @@ void WebManager::setupRoutes() {
     resp->addHeader("Cache-Control", "no-store");
     req->send(resp);
   });
+
+  // ---------------------------------------------------------------------------
+  // OTA self-update (JES-774)
+  // ---------------------------------------------------------------------------
+
+  // POST /api/ota/check — trigger async version-manifest check
+  _server.on("/api/ota/check", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      _ota_mgr.startCheck();
+      req->redirect("/");
+    });
+
+  // POST /api/ota/update — trigger async OTA download+flash
+  // Only effective when an update is available (OtaManager enforces this).
+  _server.on("/api/ota/update", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      if (!_ota_mgr.startUpdate()) {
+        req->send(400, "text/plain",
+          "Geen update beschikbaar — voer eerst 'Controleer op update' uit");
+        return;
+      }
+      req->redirect("/");
+    });
+
+  // GET /api/ota/status — JSON status (progress, state, versions)
+  _server.on("/api/ota/status", HTTP_GET,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      String j = "{\"current_version\":\"" FIRMWARE_VERSION "\""
+                 ",\"hw_target\":\"" SIREN_HARDWARE_TARGET "\"";
+      j += ",\"available_version\":\"";
+      j += jsonEscape(_ota_mgr.getAvailableVersion());
+      j += "\",\"state\":";
+      j += (int)_ota_mgr.getState();
+      j += ",\"progress\":";
+      j += _ota_mgr.getProgress();
+      j += ",\"error\":\"";
+      j += jsonEscape(_ota_mgr.getErrorMsg());
+      j += "\"}";
+      AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", j);
+      resp->addHeader("Cache-Control", "no-store");
+      req->send(resp);
+    });
 
   // ---------------------------------------------------------------------------
   // Captive portal detection — respond to OS probes so device opens the UI

@@ -126,6 +126,52 @@ If the OLED is unreadable or unavailable, verify radio settings via:
 
 ---
 
+## GitHub Self-Update (JES-774)
+
+When the device is in **STA mode** (connected to the internet via WiFi), it can
+download and flash its own firmware directly from the GitHub repository.
+
+### Via Web UI
+
+1. Open the web management page → **Firmware Update** card (near the bottom).
+2. Click **Controleer op update** — the device fetches
+   `dist/version.json` from GitHub and shows whether an update is available.
+3. If a newer version is listed, click **Nu bijwerken**.
+4. A progress bar shows download progress.  The page auto-refreshes.
+5. The device reboots automatically after a successful flash.
+
+### Via CLI (serial or mesh)
+
+```
+ota check          # fetch manifest, report available version
+ota update         # download + flash (only works after 'ota check')
+ota status         # show current state / progress
+```
+
+### How it works
+
+| Step | Detail |
+|------|--------|
+| Manifest | Fetches `https://raw.githubusercontent.com/DinXke/SIREN/multiroom/dist/version.json` over HTTPS |
+| Version check | Compares manifest `version` field to compiled-in `FIRMWARE_VERSION` |
+| Download | Streams `dist/heltec_v3/SIREN_v3_room_server.bin` (or v4 on V4 hardware) |
+| Integrity | SHA-256 of downloaded bytes verified against manifest before any partition change |
+| Flash | Written to inactive OTA partition via `esp_ota_*` API |
+| Rollback | `esp_ota_mark_app_valid_cancel_rollback()` called in `setup()` — bad images auto-rollback |
+| Settings | SPIFFS and NVS are never touched — all channels/keys/prefs survive |
+
+### Failure modes
+
+| Error | Cause | Resolution |
+|-------|-------|------------|
+| `manifest HTTP 0` / DNS error | Device not in STA mode or no internet | Enable STA + connect WiFi |
+| `manifest HTTP 404` | Branch / path changed on GitHub | Check `dist/version.json` is on `multiroom` branch |
+| `SHA-256 mismatch` | Download corrupted or wrong file | Retry; check manifest matches committed binary |
+| `no inactive OTA partition` | Partition table has no second app slot | Should not occur with `partitions_siren.csv`; re-flash full image |
+| `esp_ota_write: 0x102` | Image too large for partition | Firmware grew beyond 3.1 MB — rebuild with size reduction |
+
+---
+
 ## OTA Update Checklist
 
 Before sending an OTA update to any device, especially Unit B (no USB):
