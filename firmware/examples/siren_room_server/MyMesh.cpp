@@ -95,7 +95,9 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
     peers[i].next_sync_at = 0;
   }
   _sync_req_sent = _sync_dat_recv = _sync_posts_recv = _sync_posts_sent = 0;
-  memset(_last_login_notify_ms, 0, sizeof(_last_login_notify_ms));
+  memset(_last_login_notify_ms,  0, sizeof(_last_login_notify_ms));
+  memset(_notify_targets,        0, sizeof(_notify_targets));
+  memset(_notify_target_count,   0, sizeof(_notify_target_count));
   memset(_hist_ring, 0, sizeof(_hist_ring));
   _hist_head      = 0;
   _hist_bucket_ts = 0;
@@ -199,8 +201,9 @@ void MultiRoomMesh::begin(FILESYSTEM* fs) {
     }
   }
   loadPostPool();      // restore persisted messages (JES-787)
-  loadTombstones();   // restore delete tombstones (JES-824)
-  loadNameTable();    // restore advertised-name cache (JES-798)
+  loadTombstones();     // restore delete tombstones (JES-824)
+  loadNameTable();      // restore advertised-name cache (JES-798)
+  loadNotifyTargets();  // restore login notification targets (JES-834)
 
   region_map.load(_fs);
 
@@ -555,10 +558,12 @@ void MultiRoomMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  _notifyAdminsLoginAttempt — DM to online admins on login (JES-834) */
-/* ------------------------------------------------------------------ */
+/*  _notifyAdminsLoginAttempt — P2P DM to configured notify targets on login (JES-834) */
+/* ------------------------------------------------------------------------------- */
 void MultiRoomMesh::_notifyAdminsLoginAttempt(
     int slot_idx, const uint8_t* caller_pubkey, bool success) {
+
+  if (_notify_target_count[slot_idx] == 0) return;
 
   uint32_t now_ms = millis();
   if ((now_ms - _last_login_notify_ms[slot_idx]) < 30000) return;  // rate limit
@@ -576,26 +581,31 @@ void MultiRoomMesh::_notifyAdminsLoginAttempt(
   int msg_len = strlen(msg);
 
   uint32_t now_rtc = getRTCClock()->getCurrentTimeUnique();
-  RoomSlot& slot = rooms[slot_idx];
 
-  for (int i = 0; i < slot.acl.getNumClients(); i++) {
-    ClientInfo* admin = slot.acl.getClientByIdx(i);
-    if (!admin || !admin->isAdmin()) continue;
-    // Skip admins whose shared_secret is all-zero (never completed ECDH)
-    if (admin->shared_secret[0] == 0 && admin->shared_secret[1] == 0 &&
-        admin->shared_secret[2] == 0 && admin->shared_secret[3] == 0) continue;
+  // Send as P2P DM from rooms[0].id (node identity) to each configured target.
+  // The companion can decrypt using ECDH(companion_priv, rooms[0].pub_key) and
+  // will show this as a direct message, not a room chat message.
+  for (int i = 0; i < _notify_target_count[slot_idx]; i++) {
+    const uint8_t* target_pub = _notify_targets[slot_idx][i];
+
+    uint8_t shared[PUB_KEY_SIZE];
+    rooms[0].id.calcSharedSecret(shared, target_pub);
+
+    mesh::Identity target_id;
+    memset(target_id.pub_key, 0, PUB_KEY_SIZE);
+    memcpy(target_id.pub_key, target_pub, PUB_KEY_SIZE);
 
     uint8_t buf[5 + 80];
     memcpy(buf, &now_rtc, 4);
     buf[4] = (TXT_TYPE_PLAIN << 2);
     memcpy(&buf[5], msg, msg_len);
 
-    self_id = slot.id;
-    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, admin->id, admin->shared_secret,
+    self_id = rooms[0].id;
+    auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, target_id, shared,
                               buf, 5 + msg_len);
     if (pkt) sendFloodScoped(default_scope, pkt, 500, _prefs.path_hash_mode + 1);
   }
-  // self_id stays as slot.id — onAnonDataRecv already had it set to rooms[_active_slot].id
+  self_id = rooms[slot_idx].id;  // restore for onAnonDataRecv continuation
 }
 
 /* ------------------------------------------------------------------ */
@@ -1469,6 +1479,64 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // ---- login notification target management (JES-834) ----
+  // notify <room_idx> list|add <hex64>|del <hex64>
+  if (memcmp(command, "notify ", 7) == 0) {
+    char* args = command + 7;
+    while (*args == ' ') args++;
+    int room_idx = atoi(args);
+    while (*args && *args != ' ') args++;
+    while (*args == ' ') args++;
+    // args now points to sub-command: list|add|del
+    if (room_idx < 0 || room_idx >= MAX_ROOMS || !isRoomActive(room_idx)) {
+      strcpy(reply, "Err - invalid or inactive room index"); return;
+    }
+    if (strcmp(args, "list") == 0) {
+      int cnt = getNotifyTargetCount(room_idx);
+      if (cnt == 0) {
+        snprintf(reply, 160, "notify room[%d]: no targets configured", room_idx);
+      } else {
+        int pos = snprintf(reply, 160, "notify room[%d] (%d):", room_idx, cnt);
+        for (int i = 0; i < cnt && pos < 155; i++) {
+          const uint8_t* k = getNotifyTarget(room_idx, i);
+          char hex[9];
+          snprintf(hex, sizeof(hex), " %02x%02x%02x%02x", k[0], k[1], k[2], k[3]);
+          pos += snprintf(reply + pos, 160 - pos, "%s", hex);
+        }
+      }
+      return;
+    }
+    if (memcmp(args, "add ", 4) == 0 || memcmp(args, "del ", 4) == 0) {
+      bool do_add = (args[0] == 'a');
+      char* hex = args + 4;
+      while (*hex == ' ') hex++;
+      int hexlen = strlen(hex);
+      if (hexlen < PUB_KEY_SIZE * 2) {
+        strcpy(reply, "Err - pubkey must be 64 hex chars"); return;
+      }
+      uint8_t pub_key[PUB_KEY_SIZE];
+      if (!mesh::Utils::fromHex(pub_key, PUB_KEY_SIZE, hex)) {
+        strcpy(reply, "Err - invalid hex pubkey"); return;
+      }
+      if (do_add) {
+        if (addNotifyTarget(room_idx, pub_key)) {
+          snprintf(reply, 160, "OK - notify target added to room[%d]", room_idx);
+        } else {
+          snprintf(reply, 160, "Err - target list full (max %d)", MAX_NOTIFY_TARGETS);
+        }
+      } else {
+        if (delNotifyTarget(room_idx, pub_key)) {
+          snprintf(reply, 160, "OK - notify target removed from room[%d]", room_idx);
+        } else {
+          strcpy(reply, "Err - target not found");
+        }
+      }
+      return;
+    }
+    strcpy(reply, "Err - usage: notify <room_idx> list|add <hex64>|del <hex64>");
+    return;
+  }
+
   // ---- advert interval [<seconds>] — global local advert period ----
   if (memcmp(command, "advert interval", 15) == 0) {
     const char* arg = command + 15;
@@ -1665,6 +1733,12 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  peer add <hex> <name>          Add peer node [serial only]");
       Serial.println("  peer del <idx>                 Remove peer node [serial only]");
       Serial.println("  peer sync                      Trigger manual anti-entropy sync");
+      Serial.println();
+      Serial.println("  NOTIFY");
+      Serial.println("  ------");
+      Serial.println("  notify <idx> list              List login-notification targets for room");
+      Serial.println("  notify <idx> add <hex64>       Add notification target pubkey");
+      Serial.println("  notify <idx> del <hex64>       Remove notification target pubkey");
       Serial.println();
       Serial.println("  WIFI");
       Serial.println("  ----");
@@ -2694,6 +2768,96 @@ void MultiRoomMesh::loadNameTable() {
   }
   f.close();
   _name_lru_ctr = max_seq;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Notify target persistence + management (JES-834)                   */
+/* ------------------------------------------------------------------ */
+#define NOTIFY_CFG_PATH   "/notify_cfg"
+#define NOTIFY_MAGIC_0    0x4E  // 'N'
+#define NOTIFY_MAGIC_1    0x54  // 'T'
+#define NOTIFY_VERSION    0x01
+
+void MultiRoomMesh::saveNotifyTargets() {
+  if (!_fs) return;
+  File f = _fs->open(NOTIFY_CFG_PATH, "w");
+  if (!f) return;
+  uint8_t hdr[4] = { NOTIFY_MAGIC_0, NOTIFY_MAGIC_1, NOTIFY_VERSION, (uint8_t)MAX_ROOMS };
+  f.write(hdr, 4);
+  for (int r = 0; r < MAX_ROOMS; r++) {
+    f.write(&_notify_target_count[r], 1);
+    for (int i = 0; i < _notify_target_count[r]; i++) {
+      f.write(_notify_targets[r][i], PUB_KEY_SIZE);
+    }
+  }
+  f.close();
+}
+
+void MultiRoomMesh::loadNotifyTargets() {
+  if (!_fs || !_fs->exists(NOTIFY_CFG_PATH)) return;
+  File f = _fs->open(NOTIFY_CFG_PATH);
+  if (!f) return;
+  uint8_t hdr[4];
+  if (f.read(hdr, 4) != 4 ||
+      hdr[0] != NOTIFY_MAGIC_0 || hdr[1] != NOTIFY_MAGIC_1 ||
+      hdr[2] != NOTIFY_VERSION) {
+    f.close(); return;  // corrupt or version mismatch — start empty
+  }
+  uint8_t rooms_saved = hdr[3];
+  if (rooms_saved > MAX_ROOMS) rooms_saved = MAX_ROOMS;
+  for (int r = 0; r < rooms_saved; r++) {
+    uint8_t cnt = 0;
+    if (f.read(&cnt, 1) != 1) break;
+    if (cnt > MAX_NOTIFY_TARGETS) cnt = MAX_NOTIFY_TARGETS;
+    _notify_target_count[r] = 0;
+    for (int i = 0; i < cnt; i++) {
+      if (f.read(_notify_targets[r][i], PUB_KEY_SIZE) != PUB_KEY_SIZE) {
+        f.close(); return;
+      }
+      _notify_target_count[r]++;
+    }
+  }
+  f.close();
+}
+
+bool MultiRoomMesh::addNotifyTarget(int room_idx, const uint8_t* pub_key) {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return false;
+  // Duplicate check
+  for (int i = 0; i < _notify_target_count[room_idx]; i++) {
+    if (memcmp(_notify_targets[room_idx][i], pub_key, PUB_KEY_SIZE) == 0) return true;
+  }
+  if (_notify_target_count[room_idx] >= MAX_NOTIFY_TARGETS) return false;
+  memcpy(_notify_targets[room_idx][_notify_target_count[room_idx]], pub_key, PUB_KEY_SIZE);
+  _notify_target_count[room_idx]++;
+  saveNotifyTargets();
+  return true;
+}
+
+bool MultiRoomMesh::delNotifyTarget(int room_idx, const uint8_t* pub_key) {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return false;
+  for (int i = 0; i < _notify_target_count[room_idx]; i++) {
+    if (memcmp(_notify_targets[room_idx][i], pub_key, PUB_KEY_SIZE) == 0) {
+      // Shift remaining entries down
+      for (int j = i + 1; j < _notify_target_count[room_idx]; j++) {
+        memcpy(_notify_targets[room_idx][j - 1], _notify_targets[room_idx][j], PUB_KEY_SIZE);
+      }
+      _notify_target_count[room_idx]--;
+      saveNotifyTargets();
+      return true;
+    }
+  }
+  return false;
+}
+
+int MultiRoomMesh::getNotifyTargetCount(int room_idx) const {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return 0;
+  return _notify_target_count[room_idx];
+}
+
+const uint8_t* MultiRoomMesh::getNotifyTarget(int room_idx, int i) const {
+  if (room_idx < 0 || room_idx >= MAX_ROOMS) return nullptr;
+  if (i < 0 || i >= _notify_target_count[room_idx]) return nullptr;
+  return _notify_targets[room_idx][i];
 }
 
 void MultiRoomMesh::onAdvertRecv(mesh::Packet* /*pkt*/, const mesh::Identity& id,
@@ -3782,6 +3946,14 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply, bool serial) {
 
   strcpy(reply, "Err - usage: peer list|add <hex> <name>|del <idx>|status|sync [<idx>]");
 }
+
+/* ------------------------------------------------------------------ */
+/*  Notify target CLI (JES-834)                                         */
+/* ------------------------------------------------------------------ */
+// Handled in handleCommand() at the top-level dispatch.
+// "notify <room_idx> add <hex64>"   — add notification target (web+serial)
+// "notify <room_idx> del <hex64>"   — remove notification target (web+serial)
+// "notify <room_idx> list"          — list targets (web+serial)
 
 /* ------------------------------------------------------------------ */
 /*  Peer management — web UI API (JES-816)                              */
