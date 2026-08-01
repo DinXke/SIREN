@@ -208,6 +208,39 @@ Manually trigger a synchronisation attempt with all configured peers (Phase 5 fe
 
 ---
 
+## Neighbour Discovery Commands
+
+The room server tracks direct-hop mesh neighbours (nodes heard with zero routing hops) and can actively probe for other repeaters and room servers within radio range (JES-869). Neighbours are learned passively from zero-hop adverts and actively from discovery responses.
+
+### `neighbors`
+
+List the currently known direct-hop neighbours, newest-heard first. Each entry shows the 4-byte pubkey prefix, the advertised name (falls back to hex), how many seconds ago it was last heard, and the last SNR in dB:
+
+```
+> neighbors
+aabbccdd(NoodpostWest):42s:snr-3.5
+1122eeff(a1122eeff):310s:snr-8.0
+```
+
+If no neighbours are known yet, `-none-` is returned. Run `discover.neighbors` first to populate the list quickly.
+
+### `discover.neighbors`
+
+Send a zero-hop discovery request. Nearby repeaters and room servers answer within ~60 seconds and are added to the neighbour list. Discovery responses are rate-limited (max 4 per 2 minutes) to protect shared airtime.
+
+```
+> discover.neighbors
+OK - Discover sent
+```
+
+### `neighbor.remove <hex_pubkey>`
+
+Remove a neighbour from the list by its pubkey (prefix accepted). The entry reappears if the node is heard again.
+
+The neighbour list and a **Discover** button are also available in the web UI on the **Netwerk** page, plus JSON at `GET /api/neighbors` (admin auth required).
+
+---
+
 ## IRC / Chat Commands
 
 These commands let operators inspect room messages and the user list, and post messages as the server operator. They work over both **serial CLI** and **mesh CLI** (Phase 4 admin DM).

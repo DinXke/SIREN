@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Mesh.h>
 #include "DebugLog.h"
+#include "RateLimiter.h"
 
 #if defined(NRF52_PLATFORM)
   #include <InternalFileSystem.h>
@@ -73,6 +74,11 @@
 /* Maximum virtual room servers hosted on one device. */
 #ifndef MAX_ROOMS
   #define MAX_ROOMS  16
+#endif
+
+/* Maximum direct-hop mesh neighbours tracked for discovery (JES-869). */
+#ifndef MAX_NEIGHBOURS
+  #define MAX_NEIGHBOURS 20
 #endif
 
 /* Maximum tombstones tracked for replicating post deletes (JES-824). Oldest evicted when full. */
@@ -216,6 +222,18 @@ struct RxLogEntry {
   uint8_t  plen;        // payload length
 };
 
+/* ---- Neighbour discovery (JES-869) ----
+ * One known direct-hop mesh neighbour, learned from zero-hop adverts or from
+ * NODE_DISCOVER responses. snr is stored ×4 (divide by 4.0 for dB).
+ * node_type: 2 = repeater, 3 = room server, 0 = unknown (advert-learned). */
+struct NeighbourInfo {
+  mesh::Identity id;
+  uint32_t advert_timestamp;
+  uint32_t heard_timestamp;
+  int8_t   snr;        // multiplied by 4; divide by 4.0 to get dB float
+  uint8_t  node_type;  // ADV_TYPE_* from discover RESP (0 = unknown)
+};
+
 /**
  * One virtual room server: owns its own keypair, name, passwords,
  * client ACL, and post ring-buffer.
@@ -311,6 +329,19 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   volatile bool _web_roomsync_pending;  // ROOMSYNC push requested from web
   volatile int  _web_roomsync_idx;
   volatile bool _web_advert_pending;    // manual flood advert requested from web (JES-868)
+  volatile bool _web_discover_pending;  // manual neighbour discover requested from web (JES-869)
+
+  /* ---- Neighbour discovery (JES-869) ---- */
+#if MAX_NEIGHBOURS
+  NeighbourInfo   _neighbours[MAX_NEIGHBOURS];
+#endif
+  uint32_t        _pending_discover_tag;
+  unsigned long   _pending_discover_until;
+  RateLimiter     _discover_limiter;
+
+  void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr,
+                    uint8_t node_type = 0);
+  void sendNodeDiscoverReq();
 
   /* ---- RX live-view ring (JES-868) ----
    * Written by onRecvPacket() on the mesh task (Core 1); read by the AsyncTCP
@@ -439,6 +470,9 @@ protected:
   void onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id, uint32_t ts,
                     const uint8_t* app_data, size_t app_data_len) override;
 
+  /* ---- Neighbour discovery control-data receive (JES-869) ---- */
+  void onControlDataRecv(mesh::Packet* packet) override;
+
   /* ---- Tuning overrides (unchanged from simple_room_server) ---- */
   float    getAirtimeBudgetFactor() const override { return _prefs.airtime_factor; }
   int      calcRxDelay(float score, uint32_t air_time) const override;
@@ -518,7 +552,8 @@ public:
                              int timeout_mins) override;
   bool formatFileSystem() override;
   void setTxPower(int8_t power_dbm) override;
-  void formatNeighborsReply(char* reply) override { strcpy(reply, "not supported"); }
+  void formatNeighborsReply(char* reply) override;
+  void removeNeighbor(const uint8_t* pubkey, int key_len) override;
   void formatStatsReply(char* reply) override;
   void formatRadioStatsReply(char* reply) override;
   void formatPacketStatsReply(char* reply) override;
@@ -710,6 +745,23 @@ public:
   }
   /** Index of the next slot to be written (oldest entry when ring is full). */
   int getRxLogHead() const { return _rxlog_head; }
+
+  /* ---- Neighbour discovery accessors (JES-869) ---- */
+  /** Number of neighbour ring slots (may include empty entries). */
+  int getNumNeighbours() const { return MAX_NEIGHBOURS; }
+  /** Neighbour at physical ring index i (nullptr if out of range). Check
+   *  heard_timestamp > 0 to skip empty slots. Safe read-only POD access. */
+  const NeighbourInfo* getNeighbour(int i) const {
+#if MAX_NEIGHBOURS
+    return (i >= 0 && i < MAX_NEIGHBOURS) ? &_neighbours[i] : nullptr;
+#else
+    (void)i; return nullptr;
+#endif
+  }
+  /** Request a neighbour discovery sweep from the web UI. Sets a pending flag;
+   *  the actual zero-hop TX runs on the mesh task in loop() (never on the
+   *  AsyncTCP task — cf JES-864). */
+  void triggerDiscoverFromWeb() { _web_discover_pending = true; }
 
   /* ---- Region / scope accessors for web UI (JES-852) ---- */
   int getRegionCount() const { return region_map.getCount(); }

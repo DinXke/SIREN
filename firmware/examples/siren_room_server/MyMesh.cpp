@@ -1,5 +1,6 @@
 #include "MyMesh.h"
 #include "DebugLog.h"
+#include <algorithm>  // std::sort — neighbour list ordering (JES-869)
 #ifdef ESP32
 #include <esp_system.h>  // esp_fill_random() — SEC-001 first-boot password CSPRNG
 #endif
@@ -46,7 +47,8 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, rooms[0].acl, &_prefs, this),
-      telemetry(MAX_PACKET_PAYLOAD - 4)
+      telemetry(MAX_PACKET_PAYLOAD - 4),
+      _discover_limiter(4, 120)  // max 4 discover-responses per 2 minutes (JES-869)
 {
   _fs = nullptr;
   _active_slot = 0;
@@ -59,6 +61,12 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   _web_syncreq_pending = _web_roomsync_pending = false;
   _web_syncreq_idx = _web_roomsync_idx = -1;
   _web_advert_pending = false;
+  _web_discover_pending = false;
+  _pending_discover_tag = 0;
+  _pending_discover_until = 0;
+#if MAX_NEIGHBOURS
+  memset(_neighbours, 0, sizeof(_neighbours));
+#endif
   memset((void*)_rxlog, 0, sizeof(_rxlog));
   _rxlog_head = 0;
   _rxlog_total = 0;
@@ -1504,6 +1512,13 @@ void MultiRoomMesh::loop() {
     sendSelfAdvertisement(0, true);   // flood; skips stealth rooms internally
   }
 
+  // Deferred web-triggered neighbour discovery (JES-869): zero-hop TX runs on the
+  // mesh task so it never races the AsyncTCP web callback (cf JES-864).
+  if (_web_discover_pending) {
+    _web_discover_pending = false;
+    sendNodeDiscoverReq();
+  }
+
   // Debounced post-pool persistence (JES-794): write SPIFFS ~5s after last new post
   if (_post_dirty_at && millisHasNowPassed(_post_dirty_at)) {
     _post_dirty_at = 0;
@@ -2164,6 +2179,20 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
              (unsigned long)getTotalPosts(),
              (int)getTotalContacts(),
              (unsigned long)(uptime_millis / 1000UL));
+    return;
+  }
+
+  // ---- neighbour discovery (JES-869) ----
+  // The 'neighbors' list command is handled by CommonCLI via formatNeighborsReply().
+  if (memcmp(command, "discover.neighbors", 18) == 0) {
+    const char* sub = command + 18;
+    while (*sub == ' ') sub++;
+    if (*sub != 0) {
+      strcpy(reply, "Err - discover.neighbors has no options");
+    } else {
+      sendNodeDiscoverReq();
+      strcpy(reply, "OK - Discover sent");
+    }
     return;
   }
 
@@ -3152,9 +3181,17 @@ const uint8_t* MultiRoomMesh::getNotifyTarget(int room_idx, int i) const {
   return _notify_targets[room_idx][i];
 }
 
-void MultiRoomMesh::onAdvertRecv(mesh::Packet* /*pkt*/, const mesh::Identity& id,
-                                  uint32_t /*ts*/,
+void MultiRoomMesh::onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id,
+                                  uint32_t ts,
                                   const uint8_t* app_data, size_t app_data_len) {
+  // Track direct-hop nodes (zero path hops) as neighbours (JES-869).
+  if (pkt && pkt->getPathHashCount() == 0) {
+    AdvertDataParser ap2(app_data, (uint8_t)app_data_len);
+    if (ap2.isValid()) {
+      putNeighbour(id, ts, pkt->getSNR());
+    }
+  }
+
   AdvertDataParser parser(app_data, (uint8_t)app_data_len);
   if (!parser.isValid() || !parser.hasName()) return;
   const char* adv_name = parser.getName();
@@ -3208,6 +3245,130 @@ const char* MultiRoomMesh::resolveName(const uint8_t* pubkey) {
   }
   hex_buf[8] = 0;
   return hex_buf;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Neighbour discovery (JES-869)                                       */
+/* ------------------------------------------------------------------ */
+
+#define CTL_TYPE_NODE_DISCOVER_REQ  0x80
+#define CTL_TYPE_NODE_DISCOVER_RESP 0x90
+
+void MultiRoomMesh::putNeighbour(const mesh::Identity& id, uint32_t timestamp,
+                                 float snr, uint8_t node_type) {
+#if MAX_NEIGHBOURS
+  // Find existing neighbour, else evict the least-recently-heard slot.
+  uint32_t oldest_ts = 0xFFFFFFFF;
+  NeighbourInfo* slot = &_neighbours[0];
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (id.matches(_neighbours[i].id)) { slot = &_neighbours[i]; break; }
+    if (_neighbours[i].heard_timestamp < oldest_ts) {
+      oldest_ts = _neighbours[i].heard_timestamp;
+      slot = &_neighbours[i];
+    }
+  }
+  slot->id = id;
+  slot->advert_timestamp = timestamp;
+  slot->heard_timestamp = getRTCClock()->getCurrentTime();
+  slot->snr = (int8_t)(snr * 4);
+  if (node_type) slot->node_type = node_type;  // keep prior type if unknown (0)
+#else
+  (void)id; (void)timestamp; (void)snr; (void)node_type;
+#endif
+}
+
+void MultiRoomMesh::formatNeighborsReply(char* reply) {
+  char* dp = reply;
+#if MAX_NEIGHBOURS
+  // Collect non-empty entries, sort newest-heard first.
+  int cnt = 0;
+  NeighbourInfo* sorted[MAX_NEIGHBOURS];
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (_neighbours[i].heard_timestamp > 0)
+      sorted[cnt++] = &_neighbours[i];
+  }
+  std::sort(sorted, sorted + cnt, [](const NeighbourInfo* a, const NeighbourInfo* b) {
+    return a->heard_timestamp > b->heard_timestamp;
+  });
+  uint32_t now = getRTCClock()->getCurrentTime();
+  for (int i = 0; i < cnt && dp - reply < (int)(MAX_PACKET_PAYLOAD - 40); i++) {
+    if (i > 0) *dp++ = '\n';
+    char hex[10];
+    mesh::Utils::toHex(hex, sorted[i]->id.pub_key, 4);
+    uint32_t ago = (now >= sorted[i]->heard_timestamp)
+                   ? now - sorted[i]->heard_timestamp : 0;
+    const char* nm = resolveName(sorted[i]->id.pub_key);
+    sprintf(dp, "%s(%s):%us:snr%.1f",
+            hex, nm, (unsigned)ago, sorted[i]->snr / 4.0f);
+    while (*dp) dp++;
+  }
+#endif
+  if (dp == reply) { strcpy(dp, "-none-"); dp += 6; }
+  *dp = 0;
+}
+
+void MultiRoomMesh::removeNeighbor(const uint8_t* pubkey, int key_len) {
+#if MAX_NEIGHBOURS
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (_neighbours[i].heard_timestamp > 0 &&
+        memcmp(_neighbours[i].id.pub_key, pubkey, key_len) == 0) {
+      memset(&_neighbours[i], 0, sizeof(NeighbourInfo));
+    }
+  }
+#else
+  (void)pubkey; (void)key_len;
+#endif
+}
+
+void MultiRoomMesh::sendNodeDiscoverReq() {
+  uint8_t data[10];
+  data[0] = CTL_TYPE_NODE_DISCOVER_REQ;      // prefix_only = 0
+  data[1] = (1 << 2) | (1 << 3);             // ADV_TYPE_REPEATER(2) | ADV_TYPE_ROOM(3)
+  getRNG()->random(&data[2], 4);             // random match tag
+  memcpy(&_pending_discover_tag, &data[2], 4);
+  _pending_discover_until = futureMillis(60000);
+  uint32_t since = 0;
+  memcpy(&data[6], &since, 4);
+  auto pkt = createControlData(data, sizeof(data));
+  if (pkt) sendZeroHop(pkt);
+}
+
+void MultiRoomMesh::onControlDataRecv(mesh::Packet* packet) {
+  if (packet->payload_len < 1) return;
+  uint8_t type = packet->payload[0] & 0xF0;
+
+  if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6) {
+    // Rate-limit our responses to protect shared airtime (JES-869).
+    if (!_discover_limiter.allow(getRTCClock()->getCurrentTime())) return;
+    uint8_t filter = packet->payload[1];
+    uint32_t tag;
+    memcpy(&tag, &packet->payload[2], 4);
+    // Respond only if the requester is looking for room servers (ADV_TYPE_ROOM = 3).
+    if (filter & (1 << 3)) {
+      uint8_t resp[6 + PUB_KEY_SIZE];
+      resp[0] = CTL_TYPE_NODE_DISCOVER_RESP | 3;  // low 4 bits = ADV_TYPE_ROOM
+      resp[1] = (uint8_t)packet->_snr;            // inbound SNR ×4, for the requester
+      memcpy(&resp[2], &tag, 4);                  // echo the tag so requester can match
+      memcpy(&resp[6], rooms[0].id.pub_key, PUB_KEY_SIZE);
+      auto r = createControlData(resp, sizeof(resp));
+      // widened random delay ×4 — many nodes may answer the same request.
+      if (r) sendZeroHop(r, getRetransmitDelay(r) * 4);
+    }
+
+  } else if (type == CTL_TYPE_NODE_DISCOVER_RESP &&
+             packet->payload_len >= 6 + PUB_KEY_SIZE) {
+    if (_pending_discover_tag == 0 || millisHasNowPassed(_pending_discover_until)) {
+      _pending_discover_tag = 0;
+      return;
+    }
+    uint32_t tag;
+    memcpy(&tag, &packet->payload[2], 4);
+    if (tag != _pending_discover_tag) return;
+    uint8_t node_type = packet->payload[0] & 0x0F;
+    mesh::Identity id(&packet->payload[6]);
+    if (id.matches(rooms[0].id)) return;  // skip ourselves
+    putNeighbour(id, getRTCClock()->getCurrentTime(), packet->getSNR(), node_type);
+  }
 }
 
 /**

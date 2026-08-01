@@ -1883,6 +1883,35 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
             "<p style='margin-top:8px'><a href='/rxlog'>&#128225; Live ontvangen verkeer &raquo;</a></p>"
             "</div>";
 
+    // Neighbour discovery (JES-869). Table populated client-side from /api/neighbors
+    // (keeps /network page heap low, cf JES-864). Names rendered via textContent (XSS-safe).
+    page += "<div class='card'><h2>Buren (neighbours)</h2>"
+            "<form method='post' action='/api/discover'>"
+            "<button type='submit'>Discover nu versturen</button></form>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "Stuurt een zero-hop discovery-request; buren antwoorden binnen ~60&nbsp;s. "
+            "CLI: <code>discover.neighbors</code> / <code>neighbors</code></p>"
+            "<table id='nbt' style='width:100%;border-collapse:collapse;font-size:0.88em'>"
+            "<thead><tr style='text-align:left;color:#aaa'>"
+            "<th>Hex</th><th>Naam</th><th>SNR</th><th>Gehoord</th><th>Type</th></tr></thead>"
+            "<tbody id='nbb'><tr><td colspan='5' style='color:#aaa'>laden&hellip;</td></tr></tbody>"
+            "</table>"
+            "<script>(function(){"
+            "function tn(t){return t==2?'Repeater':(t==3?'Room server':'?');}"
+            "function ld(){fetch('/api/neighbors').then(function(r){return r.json();})"
+            ".then(function(a){var b=document.getElementById('nbb');b.innerHTML='';"
+            "if(!a.length){var r=b.insertRow();var c=r.insertCell();c.colSpan=5;"
+            "c.style.color='#aaa';c.textContent='geen buren bekend';return;}"
+            "a.forEach(function(n){var r=b.insertRow();"
+            "r.insertCell().textContent=n.hex;"
+            "r.insertCell().textContent=n.name;"
+            "r.insertCell().textContent=n.snr_db+' dB';"
+            "r.insertCell().textContent=n.ago_s+' s';"
+            "r.insertCell().textContent=tn(n.type);});})"
+            ".catch(function(){});}"
+            "ld();setInterval(ld,5000);})();</script>"
+            "</div>";
+
     // Sync interval (JES-844)
     {
       char sync_sec_str[8];
@@ -3232,6 +3261,43 @@ void WebManager::setupRoutes() {
     if (!req->authenticate(user, pass)) return req->requestAuthentication();
     _mesh.triggerAdvertFromWeb();
     req->redirect("/network");
+  });
+
+  // POST /api/discover — manual neighbour discovery sweep (JES-869, admin-auth required).
+  // Sets a pending flag; the mesh loop performs the actual zero-hop TX (never here).
+  _server.on("/api/discover", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    _mesh.triggerDiscoverFromWeb();
+    req->redirect("/network");
+  });
+
+  // GET /api/neighbors — neighbour list JSON (JES-869, admin-auth required).
+  // Only 4-byte pubkey prefixes are exposed; never private keys.
+  _server.on("/api/neighbors", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    uint32_t now = (uint32_t)_mesh.getRTCClock()->getCurrentTime();
+    String j = "[";
+    bool first = true;
+    int n = _mesh.getNumNeighbours();
+    for (int i = 0; i < n; i++) {
+      const NeighbourInfo* nb = _mesh.getNeighbour(i);
+      if (!nb || nb->heard_timestamp == 0) continue;  // empty slot
+      char hex[9] = {};
+      for (int b = 0; b < 4; b++) snprintf(hex + b * 2, 3, "%02x", (unsigned int)nb->id.pub_key[b]);
+      uint32_t ago = (now >= nb->heard_timestamp) ? now - nb->heard_timestamp : 0;
+      if (!first) j += ",";
+      first = false;
+      j += "{\"hex\":\"";     j += hex; j += "\"";
+      j += ",\"name\":\"";    j += jsonEscape(_mesh.resolveName(nb->id.pub_key)); j += "\"";
+      j += ",\"snr_db\":";    j += String(nb->snr / 4.0f, 1);
+      j += ",\"ago_s\":";     j += (unsigned long)ago;
+      j += ",\"type\":";      j += (int)nb->node_type;
+      j += "}";
+    }
+    j += "]";
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", j);
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
   });
 
   // GET /rxlog — live view of all received packets (JES-868, admin-auth required)
