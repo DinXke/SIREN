@@ -771,6 +771,167 @@ String WebManager::buildAclPage() {
   return page;
 }
 
+/* ---- /api/stats JSON (JES-800) ----------------------------------------- */
+String WebManager::buildStatsJson() {
+  MultiRoomMesh& mesh = _mesh;
+  String j = "{";
+  // Totals
+  j += "\"uptime_s\":";      j += (unsigned long)(mesh.getUptimeMillis() / 1000UL);
+  j += ",\"total_posts\":";  j += (unsigned long)mesh.getTotalPosts();
+  j += ",\"total_contacts\":"; j += (int)mesh.getTotalContacts();
+  j += ",\"num_rooms\":";    j += mesh.getNumActiveRooms();
+
+  // Histogram (newest bucket = index 0)
+  j += ",\"hist\":[";
+  for (int b = 0; b < HIST_BUCKETS; b++) {
+    if (b) j += ",";
+    j += (unsigned)mesh.getHistBucket(b);
+  }
+  j += "]";
+
+  // Per-room array
+  j += ",\"rooms\":[";
+  bool first_room = true;
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!mesh.isRoomActive(i)) continue;
+    if (!first_room) j += ",";
+    first_room = false;
+    int nc = mesh.getRoomNumClients(i);
+    int adm = 0, rw = 0, ro = 0, guest = 0;
+    for (int k = 0; k < nc; k++) {
+      auto c = mesh.getRoomClient(i, k);
+      if (!c) continue;
+      switch (c->permissions & PERM_ACL_ROLE_MASK) {
+        case PERM_ACL_ADMIN:      adm++;   break;
+        case PERM_ACL_READ_WRITE: rw++;    break;
+        case PERM_ACL_READ_ONLY:  ro++;    break;
+        default:                  guest++; break;
+      }
+    }
+    j += "{\"idx\":"; j += i;
+    j += ",\"name\":\""; j += jsonEscape(mesh.getRoomName(i)); j += "\"";
+    j += ",\"posts\":"; j += mesh.getRoomPostCount(i);
+    j += ",\"clients\":"; j += nc;
+    j += ",\"admin\":"; j += adm;
+    j += ",\"rw\":"; j += rw;
+    j += ",\"ro\":"; j += ro;
+    j += ",\"guest\":"; j += guest;
+
+    // Per-client array (public info only — no private keys/passwords)
+    j += ",\"users\":[";
+    bool first_u = true;
+    for (int k = 0; k < nc; k++) {
+      auto c = mesh.getRoomClient(i, k);
+      if (!c) continue;
+      if (!first_u) j += ",";
+      first_u = false;
+      char hex[9];
+      mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+      const char* nm = mesh.resolveName(c->id.pub_key);
+      uint8_t role = c->permissions & PERM_ACL_ROLE_MASK;
+      j += "{\"pub\":\""; j += hex; j += "\"";
+      j += ",\"name\":\""; j += jsonEscape(nm); j += "\"";
+      j += ",\"role\":"; j += (int)role;
+      j += ",\"hops\":";
+      if (c->out_path_len == OUT_PATH_UNKNOWN) j += "-1";
+      else j += (int)c->out_path_len;
+      j += ",\"rssi\":"; j += (int)c->last_rssi;
+      j += ",\"snr\":";  j += (int)c->last_snr;
+      j += ",\"msgs\":"; j += (unsigned)c->msg_count;
+      j += "}";
+    }
+    j += "]}";
+  }
+  j += "]}";
+  return j;
+}
+
+/* ---- /stats HTML page (JES-800) ----------------------------------------- */
+String WebManager::buildStatsPage() {
+  MultiRoomMesh& mesh = _mesh;
+  String page = buildHead(mesh.getNodeName());
+
+  page += "<div class='card'><h2>Statistieken &mdash; ";
+  page += htmlEscape(mesh.getNodeName());
+  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
+
+  // Totals summary
+  unsigned long upSec = (unsigned long)(mesh.getUptimeMillis() / 1000UL);
+  unsigned long d = upSec / 86400, h = (upSec % 86400) / 3600;
+  unsigned long m = (upSec % 3600) / 60, s = upSec % 60;
+  page += "<table><tr><th>Uptime</th><td>";
+  char uptimeBuf[32];
+  snprintf(uptimeBuf, sizeof(uptimeBuf), "%lud %02lu:%02lu:%02lu", d, h, m, s);
+  page += uptimeBuf;
+  page += "</td></tr><tr><th>Actieve rooms</th><td>"; page += mesh.getNumActiveRooms();
+  page += "</td></tr><tr><th>Totaal berichten</th><td>"; page += (unsigned long)mesh.getTotalPosts();
+  page += "</td></tr><tr><th>Totaal contacts</th><td>"; page += (int)mesh.getTotalContacts();
+  page += "</td></tr></table></div>";
+
+  // Per-room tables
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (!mesh.isRoomActive(i)) continue;
+    int nc = mesh.getRoomNumClients(i);
+    page += "<div class='card'><h3>Room ";
+    page += i; page += " &mdash; "; page += htmlEscape(mesh.getRoomName(i));
+    page += " (";  page += nc; page += " clients, ";
+    page += mesh.getRoomPostCount(i); page += " berichten)</h3>";
+    if (nc == 0) {
+      page += "<p style='color:#aaa'>Geen verbonden clients.</p>";
+    } else {
+      page += "<table><tr><th>Pubkey</th><th>Naam</th><th>Rol</th><th>Hops</th>"
+              "<th>RSSI</th><th>SNR</th><th>Berichten</th></tr>";
+      for (int k = 0; k < nc; k++) {
+        auto c = mesh.getRoomClient(i, k);
+        if (!c) continue;
+        char hex[9];
+        mesh::Utils::toHex(hex, c->id.pub_key, 4); hex[8] = 0;
+        const char* nm = mesh.resolveName(c->id.pub_key);
+        uint8_t role = c->permissions & PERM_ACL_ROLE_MASK;
+        const char* role_s = (role == PERM_ACL_ADMIN) ? "admin"
+                           : (role == PERM_ACL_READ_WRITE) ? "rw"
+                           : (role == PERM_ACL_READ_ONLY)  ? "ro" : "guest";
+        page += "<tr><td><code>"; page += hex; page += "</code></td>";
+        page += "<td>"; page += htmlEscape(nm); page += "</td>";
+        page += "<td>"; page += role_s; page += "</td>";
+        page += "<td>";
+        if (c->out_path_len == OUT_PATH_UNKNOWN) page += "?";
+        else { page += (int)c->out_path_len; }
+        page += "</td><td>"; page += (int)c->last_rssi;
+        page += "</td><td>"; page += (int)c->last_snr;
+        page += "</td><td>"; page += (unsigned)c->msg_count;
+        page += "</td></tr>";
+      }
+      page += "</table>";
+    }
+    page += "</div>";
+  }
+
+  // 24-hour message histogram (CSS bar chart)
+  page += "<div class='card'><h3>Berichtenhistogram (24u)</h3>";
+  uint16_t maxVal = 1;
+  for (int b = 0; b < HIST_BUCKETS; b++) {
+    uint16_t v = mesh.getHistBucket(b);
+    if (v > maxVal) maxVal = v;
+  }
+  page += "<div style='display:flex;align-items:flex-end;gap:2px;height:80px;"
+          "background:#1a1a2e;padding:4px;border-radius:4px'>";
+  for (int b = HIST_BUCKETS - 1; b >= 0; b--) {
+    uint16_t v = mesh.getHistBucket(b);
+    int pct = (int)((uint32_t)v * 100 / maxVal);
+    page += "<div title='-"; page += b; page += "h: "; page += (unsigned)v;
+    page += "' style='flex:1;background:#00d4ff;height:";
+    page += pct; page += "%;min-height:2px'></div>";
+  }
+  page += "</div>";
+  page += "<p style='font-size:0.8em;color:#aaa'>"
+          "Elke balk = 1 uur. Links = 23 uur geleden, rechts = huidig uur.</p>";
+  page += "</div>";
+
+  page += FPSTR(HTML_FOOT);
+  return page;
+}
+
 String WebManager::buildStatusPage(const char* ip) {
   MultiRoomMesh& mesh = _mesh;
   WifiMode mode       = _mode;
@@ -802,6 +963,8 @@ String WebManager::buildStatusPage(const char* ip) {
           " &mdash; berichten per kanaal bekijken en posten als operator</p>"
           "<p><a href='/acl'><button>&#128100; ACL beheer</button></a>"
           " &mdash; rechten per gebruiker instellen (lees/schrijf/admin)</p>"
+          "<p><a href='/stats'><button>&#128200; Statistieken</button></a>"
+          " &mdash; rooms, gebruikers, RSSI/SNR, berichtenhistogram</p>"
           "</div>";
 
   // Rooms table
@@ -2050,6 +2213,20 @@ void WebManager::setupRoutes() {
     }
     j += "]}";
     req->send(200, "application/json", j);
+  });
+
+  // GET /stats — statistics page (JES-800)
+  _server.on("/stats", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    req->send(200, "text/html", buildStatsPage());
+  });
+
+  // GET /api/stats — statistics JSON (JES-800)
+  _server.on("/api/stats", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", buildStatsJson());
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
   });
 
   // ---------------------------------------------------------------------------
