@@ -474,7 +474,7 @@ String WebManager::buildChatPage() {
           "<button type='submit'>Post</button></form>";
   page += "</div>";
 
-  // Nicklist column
+  // Nicklist column — names are clickable to open DM
   page += "<div class='card' style='min-width:120px;width:140px'>"
           "<b style='color:#00d4ff'>Users</b>"
           "<div id='nicks' style='font-size:0.85em;margin-top:6px'></div>"
@@ -482,9 +482,23 @@ String WebManager::buildChatPage() {
 
   page += "</div>";  // flex pane
 
+  // DM pane (hidden until a user is clicked)
+  page += "<div id='dm-pane' class='card' style='display:none'>"
+          "<div style='display:flex;justify-content:space-between;align-items:center'>"
+          "<b id='dm-title' style='color:#ffcc00'>DM</b>"
+          "<button onclick='closeDm()' style='font-size:0.75em'>&#x2715; Sluiten</button>"
+          "</div>"
+          "<div id='dm-msgs' style='height:200px;overflow-y:auto;background:#0d0d1a;"
+          "border:1px solid #333;padding:6px;font-size:0.9em;margin-top:6px'></div>"
+          "<form id='dm-form' onsubmit='sendDm(event)' style='margin-top:6px'>"
+          "<input id='dm-txt' style='width:75%' maxlength='140' placeholder='Privébericht...'> "
+          "<button type='submit'>Stuur</button></form>"
+          "</div>";
+
   // Inline JS — uses textContent (not innerHTML) for safe display
   page += "<script>\n";
   page += "var room="; page += (_firstRoom >= 0 ? _firstRoom : 0); page += ",since=0,pollT=null,nickT=null;\n";
+  page += "var dmPub='',dmPollT=null;\n";
   page += "function selTab(btn,idx){\n"
           "  room=idx;since=0;\n"
           "  document.getElementById('msgs').innerHTML='';\n"
@@ -528,7 +542,10 @@ String WebManager::buildChatPage() {
           "    data.forEach(function(n){\n"
           "      var d=document.createElement('div');\n"
           "      d.style.color=(n.role>=3?'#ffcc00':(n.role>=2?'#00ff88':'#aaa'));\n"
+          "      d.style.cursor='pointer';\n"
+          "      d.title='Klik om te DM\\'en';\n"
           "      d.textContent=n.name+(n.role>=3?' [op]':(n.role>=2?' [rw]':(n.role>=1?' [ro]':'')));\n"
+          "      d.onclick=(function(pub,name){return function(){openDm(pub,name);};})(n.pub,n.name);\n"
           "      box.appendChild(d);\n"
           "    });\n"
           "  }).catch(function(){});\n"
@@ -542,6 +559,58 @@ String WebManager::buildChatPage() {
           "    headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
           "    body:'room='+encodeURIComponent(room)+'&text='+encodeURIComponent(txt)})\n"
           "  .then(function(r){if(r.ok)document.getElementById('post-txt').value='';});\n"
+          "}\n"
+          "function openDm(pub,name){\n"
+          "  dmPub=pub;\n"
+          "  document.getElementById('dm-title').textContent='DM: '+name;\n"
+          "  document.getElementById('dm-pane').style.display='';\n"
+          "  document.getElementById('dm-msgs').innerHTML='';\n"
+          "  clearTimeout(dmPollT);\n"
+          "  fetchDmThread();\n"
+          "}\n"
+          "function closeDm(){\n"
+          "  clearTimeout(dmPollT);\n"
+          "  dmPub='';\n"
+          "  document.getElementById('dm-pane').style.display='none';\n"
+          "}\n"
+          "function fetchDmThread(){\n"
+          "  if(!dmPub)return;\n"
+          "  fetch('/api/dm/thread?pub='+dmPub,{credentials:'include'})\n"
+          "  .then(function(r){return r.json();})\n"
+          "  .then(function(data){\n"
+          "    var box=document.getElementById('dm-msgs');\n"
+          "    var atBottom=(box.scrollHeight-box.scrollTop-box.clientHeight<30);\n"
+          "    box.innerHTML='';\n"
+          "    data.forEach(function(m){\n"
+          "      var row=document.createElement('div');\n"
+          "      row.style.marginBottom='3px';\n"
+          "      row.style.textAlign=(m.out?'right':'left');\n"
+          "      var ts=new Date(m.ts*1000).toLocaleTimeString();\n"
+          "      var s1=document.createElement('span');\n"
+          "      s1.style.color='#888';s1.style.fontSize='0.75em';\n"
+          "      s1.textContent='['+ts+'] ';\n"
+          "      var s2=document.createElement('span');\n"
+          "      s2.style.color=(m.out?'#ffcc00':'#00d4ff');\n"
+          "      s2.textContent=(m.out?'[jij] ':'')+m.text;\n"
+          "      row.appendChild(s1);row.appendChild(s2);\n"
+          "      box.appendChild(row);\n"
+          "    });\n"
+          "    if(atBottom)box.scrollTop=box.scrollHeight;\n"
+          "  }).catch(function(){});\n"
+          "  dmPollT=setTimeout(fetchDmThread,3000);\n"
+          "}\n"
+          "function sendDm(e){\n"
+          "  e.preventDefault();\n"
+          "  if(!dmPub)return;\n"
+          "  var txt=document.getElementById('dm-txt').value.trim();\n"
+          "  if(!txt)return;\n"
+          "  fetch('/api/dm/send',{method:'POST',credentials:'include',\n"
+          "    headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
+          "    body:'pub='+encodeURIComponent(dmPub)+'&text='+encodeURIComponent(txt)})\n"
+          "  .then(function(r){\n"
+          "    if(r.ok){document.getElementById('dm-txt').value='';fetchDmThread();}\n"
+          "    else r.text().then(function(t){alert('DM fout: '+t);});\n"
+          "  });\n"
           "}\n"
           "fetchMsgs();fetchNicks();\n"
           "</script>\n";
@@ -1347,6 +1416,45 @@ void WebManager::setupRoutes() {
     // Length clamp happens inside addServerPost -> addPost
     _mesh.addServerPost(room_idx, text.c_str());
     req->send(200, "text/plain", "OK");
+  });
+
+  // ---------------------------------------------------------------------------
+  // DM (direct message) API (JES-808) — all routes behind admin basic-auth
+  // ---------------------------------------------------------------------------
+
+  // GET /api/dm/convs — JSON list of active DM conversations
+  _server.on("/api/dm/convs", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    AsyncWebServerResponse* resp =
+      req->beginResponse(200, "application/json", _mesh.buildDmConvsJson());
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // GET /api/dm/thread?pub=XXXXXXXX — DM thread for one contact
+  _server.on("/api/dm/thread", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("pub")) { req->send(400, "application/json", "[]"); return; }
+    const String& pub = req->getParam("pub")->value();
+    if (pub.length() != 8) { req->send(400, "application/json", "[]"); return; }
+    AsyncWebServerResponse* resp =
+      req->beginResponse(200, "application/json", _mesh.buildDmThreadJson(pub.c_str()));
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // POST /api/dm/send (body: pub=XXXXXXXX&text=...) — send DM to a contact
+  _server.on("/api/dm/send", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!req->hasParam("pub", true) || !req->hasParam("text", true)) {
+      req->send(400, "text/plain", "missing pub or text"); return;
+    }
+    const String& pub  = req->getParam("pub",  true)->value();
+    const String& text = req->getParam("text", true)->value();
+    if (pub.length() != 8)  { req->send(400, "text/plain", "invalid pub"); return; }
+    if (text.length() == 0) { req->send(400, "text/plain", "empty text");  return; }
+    bool ok = _mesh.dmSend(pub.c_str(), text.c_str());
+    req->send(ok ? 200 : 404, "text/plain", ok ? "OK" : "contact not found");
   });
 
   // ---------------------------------------------------------------------------

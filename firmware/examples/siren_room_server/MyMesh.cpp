@@ -55,6 +55,9 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   memset(_names, 0, sizeof(_names));
   _name_lru_ctr = 0;
 
+  memset(_dm_convs, 0, sizeof(_dm_convs));
+  _dm_num_convs = 0;
+
   memset(&_prefs, 0, sizeof(_prefs));
   _prefs.airtime_factor       = 1.0f;
   _prefs.rx_delay_base        = 0.0f;
@@ -605,7 +608,10 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
         if ((client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) {
           temp[5] = 0;
         } else {
-          if (!is_retry) addPost(slot, client, (const char*)&data[5]);
+          if (!is_retry) {
+            addPost(slot, client, (const char*)&data[5]);
+            dmBuffer(client->id.pub_key, sender_timestamp, false, (const char*)&data[5]);
+          }
           temp[5] = 0;
           send_ack = true;
         }
@@ -1976,7 +1982,14 @@ String MultiRoomMesh::buildNickJson(int room_idx) {
     if (!first) json += ",";
     first = false;
     uint8_t role = ci->permissions & PERM_ACL_ROLE_MASK;
-    json += "{\"name\":\"";
+    // pubkey hex prefix (4 bytes = 8 hex chars) — used by DM feature
+    static const char hxn[] = "0123456789abcdef";
+    json += "{\"pub\":\"";
+    for (int b = 0; b < NAME_KEY_SIZE; b++) {
+      json += hxn[ci->id.pub_key[b] >> 4];
+      json += hxn[ci->id.pub_key[b] & 0x0f];
+    }
+    json += "\",\"name\":\"";
     // Escape name characters that could break JSON (names come from advert parser)
     const char* nm = resolveName(ci->id.pub_key);
     for (const char* c = nm; *c; c++) {
@@ -1991,6 +2004,155 @@ String MultiRoomMesh::buildNickJson(int room_idx) {
   }
   json += "]";
   return json;
+}
+
+/* ------------------------------------------------------------------ */
+/*  DM ring buffer (JES-808)                                           */
+/* ------------------------------------------------------------------ */
+
+static inline uint8_t hexNibble(char c) {
+  if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
+  if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
+  if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
+  return 0;
+}
+
+void MultiRoomMesh::dmBuffer(const uint8_t* pub_prefix, uint32_t ts,
+                             bool outgoing, const char* text) {
+  int ci = -1;
+  for (int i = 0; i < _dm_num_convs; i++) {
+    if (memcmp(_dm_convs[i].pub_prefix, pub_prefix, NAME_KEY_SIZE) == 0) {
+      ci = i; break;
+    }
+  }
+  if (ci < 0) {
+    if (_dm_num_convs >= DM_MAX_CONVS) return;  // table full — drop silently
+    ci = _dm_num_convs++;
+    memcpy(_dm_convs[ci].pub_prefix, pub_prefix, NAME_KEY_SIZE);
+    _dm_convs[ci].head  = 0;
+    _dm_convs[ci].count = 0;
+  }
+  DmConv& c = _dm_convs[ci];
+  DmMsg&  m = c.msgs[c.head];
+  m.ts       = ts;
+  m.outgoing = outgoing;
+  int tlen = strlen(text);
+  if (tlen >= DM_TEXT_LEN) tlen = DM_TEXT_LEN - 1;
+  memcpy(m.text, text, tlen);
+  m.text[tlen] = 0;
+  c.head = (c.head + 1) % DM_MAX_MSGS;
+  if (c.count < DM_MAX_MSGS) c.count++;
+}
+
+bool MultiRoomMesh::dmSend(const char* pub_hex, const char* text) {
+  if (!pub_hex || strlen(pub_hex) < NAME_KEY_SIZE * 2) return false;
+  if (!text || text[0] == 0) return false;
+
+  uint8_t prefix[NAME_KEY_SIZE];
+  for (int i = 0; i < NAME_KEY_SIZE; i++) {
+    prefix[i] = (uint8_t)((hexNibble(pub_hex[i * 2]) << 4) | hexNibble(pub_hex[i * 2 + 1]));
+  }
+
+  for (int r = 0; r < MAX_ROOMS; r++) {
+    if (!rooms[r].active) continue;
+    int nc = rooms[r].acl.getNumClients();
+    for (int i = 0; i < nc; i++) {
+      ClientInfo* ci = rooms[r].acl.getClientByIdx(i);
+      if (!ci || ci->permissions == 0) continue;
+      if (memcmp(ci->id.pub_key, prefix, NAME_KEY_SIZE) != 0) continue;
+
+      uint32_t now = getRTCClock()->getCurrentTimeUnique();
+      int tlen = strlen(text);
+      if (tlen > MAX_POST_TEXT_LEN) tlen = MAX_POST_TEXT_LEN;
+
+      int dlen = 0;
+      memcpy(&reply_data[dlen], &now, 4); dlen += 4;
+      reply_data[dlen++] = (TXT_TYPE_PLAIN << 2);
+      memcpy(&reply_data[dlen], text, tlen); dlen += tlen;
+
+      self_id = rooms[r].id;
+      auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, ci->id, ci->shared_secret,
+                                reply_data, dlen);
+      if (!pkt) return false;
+
+      if (ci->out_path_len == OUT_PATH_UNKNOWN) {
+        sendFloodScoped(default_scope, pkt, 0, _prefs.path_hash_mode + 1);
+      } else {
+        sendDirect(pkt, ci->out_path, ci->out_path_len, SERVER_RESPONSE_DELAY);
+      }
+      dmBuffer(prefix, now, true, text);
+      return true;
+    }
+  }
+  return false;  // client not found in any room
+}
+
+String MultiRoomMesh::buildDmConvsJson() {
+  static const char hx[] = "0123456789abcdef";
+  String j = "[";
+  bool first = true;
+  for (int i = 0; i < _dm_num_convs; i++) {
+    DmConv& c = _dm_convs[i];
+    if (c.count == 0) continue;
+    if (!first) j += ",";
+    first = false;
+    uint32_t last_ts = 0;
+    for (int m = 0; m < c.count; m++)
+      if (c.msgs[m].ts > last_ts) last_ts = c.msgs[m].ts;
+    j += "{\"pub\":\"";
+    for (int b = 0; b < NAME_KEY_SIZE; b++) {
+      j += hx[c.pub_prefix[b] >> 4];
+      j += hx[c.pub_prefix[b] & 0x0f];
+    }
+    j += "\",\"name\":\"";
+    const char* nm = resolveName(c.pub_prefix);
+    for (const char* p = nm; *p; p++) {
+      if (*p == '"' || *p == '\\') j += '\\';
+      j += *p;
+    }
+    j += "\",\"last\":"; j += (unsigned long)last_ts; j += "}";
+  }
+  j += "]";
+  return j;
+}
+
+String MultiRoomMesh::buildDmThreadJson(const char* pub_hex) {
+  if (!pub_hex || strlen(pub_hex) < NAME_KEY_SIZE * 2) return "[]";
+  uint8_t prefix[NAME_KEY_SIZE];
+  for (int i = 0; i < NAME_KEY_SIZE; i++) {
+    prefix[i] = (uint8_t)((hexNibble(pub_hex[i * 2]) << 4) | hexNibble(pub_hex[i * 2 + 1]));
+  }
+  int ci = -1;
+  for (int i = 0; i < _dm_num_convs; i++) {
+    if (memcmp(_dm_convs[i].pub_prefix, prefix, NAME_KEY_SIZE) == 0) {
+      ci = i; break;
+    }
+  }
+  if (ci < 0) return "[]";
+
+  DmConv& c = _dm_convs[ci];
+  // Walk ring from oldest to newest
+  int start = (c.head - c.count + DM_MAX_MSGS * 2) % DM_MAX_MSGS;
+  String j = "[";
+  bool first = true;
+  for (int i = 0; i < c.count; i++) {
+    int idx = (start + i) % DM_MAX_MSGS;
+    DmMsg& m = c.msgs[idx];
+    if (!first) j += ",";
+    first = false;
+    j += "{\"ts\":"; j += (unsigned long)m.ts;
+    j += ",\"out\":"; j += m.outgoing ? "1" : "0";
+    j += ",\"text\":\"";
+    for (const char* p = m.text; *p; p++) {
+      if (*p == '"')  j += "\\\"";
+      else if (*p == '\\') j += "\\\\";
+      else if (*p == '\n') j += "\\n";
+      else if ((unsigned char)*p >= 0x20) j += *p;
+    }
+    j += "\"}";
+  }
+  j += "]";
+  return j;
 }
 
 /* ------------------------------------------------------------------ */

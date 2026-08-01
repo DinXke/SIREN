@@ -93,6 +93,13 @@
 #define NAME_TABLE_SIZE 32
 #define NAME_KEY_SIZE    4   // first 4 bytes of pubkey used as lookup key
 
+/* DM (direct message) ring-buffer — web-UI admin ↔ companion node.
+   Capacity: DM_MAX_CONVS contacts × DM_MAX_MSGS messages each.
+   Total RAM: ~8×6×160 = ~7.7 KB (acceptable on no-PSRAM Heltec). */
+#define DM_MAX_CONVS  8    // max simultaneous DM conversations tracked
+#define DM_MAX_MSGS   6    // messages per conversation (ring buffer)
+#define DM_TEXT_LEN   (MAX_POST_TEXT_LEN + 1)
+
 #define FIRMWARE_ROLE        "siren_room"
 #define MAX_POST_TEXT_LEN    (160 - 9)
 
@@ -130,6 +137,21 @@ struct NameEntry {
   uint8_t  pub_prefix[NAME_KEY_SIZE];   // first 4 bytes of pubkey
   char     name[24];                    // advertised name (NUL-terminated)
   uint32_t lru_seq;                     // 0 = empty; higher = more recently seen
+};
+
+/** One message in a DM conversation (bidirectional). */
+struct DmMsg {
+  uint32_t ts;            // RTC timestamp
+  bool     outgoing;      // true = server→companion, false = companion→server
+  char     text[DM_TEXT_LEN];
+};
+
+/** DM conversation with one companion (ring buffer of last DM_MAX_MSGS messages). */
+struct DmConv {
+  uint8_t  pub_prefix[NAME_KEY_SIZE];  // first 4 bytes of companion's pubkey
+  DmMsg    msgs[DM_MAX_MSGS];
+  uint8_t  head;    // next-write index (ring)
+  uint8_t  count;   // messages stored (0..DM_MAX_MSGS)
 };
 
 struct PostInfo {
@@ -224,6 +246,13 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   void          saveNameTable();
   void          loadNameTable();
+
+  /* ---- DM ring buffer (JES-808) ---- */
+  DmConv        _dm_convs[DM_MAX_CONVS];
+  int           _dm_num_convs;
+
+  /** Buffer one DM message (incoming or outgoing) into the per-contact ring. */
+  void          dmBuffer(const uint8_t* pub_prefix, uint32_t ts, bool outgoing, const char* text);
 
   /* ---- MQTT publish callback (JES-792) ---- */
   typedef void (*PostPublishCallback)(int room_idx, uint32_t timestamp,
@@ -423,6 +452,16 @@ public:
   void addServerPost(int room_idx, const char* text);
   /** Build JSON array of nick objects for /api/chat/nicks. */
   String buildNickJson(int room_idx);
+
+  /* ---- DM API (JES-808) ---- */
+  /** Send a DM to the companion identified by 8-char hex pubkey prefix.
+   *  Finds the client in any active room and sends via mesh.
+   *  Returns true if the client was found and the packet was queued. */
+  bool   dmSend(const char* pub_hex, const char* text);
+  /** JSON array of active DM conversations: [{pub,name,last},...]. */
+  String buildDmConvsJson();
+  /** JSON array of DM thread messages for the contact with the given 8-char hex prefix. */
+  String buildDmThreadJson(const char* pub_hex);
 
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {
