@@ -168,6 +168,17 @@ static String htmlEscape(const char* s) {
   return r;
 }
 
+// CSRF mitigation: verify the Origin header matches our host.
+// Modern browsers always include Origin on cross-origin form POSTs.
+// If Origin is absent (curl, direct navigation) we allow through.
+// Returns false (= reject) only when Origin is present and does NOT match.
+static bool checkOrigin(AsyncWebServerRequest* req) {
+  String origin = req->header("Origin");
+  if (origin.length() == 0) return true;
+  String host = req->host();
+  return (origin == "http://" + host || origin == "https://" + host);
+}
+
 // ---------------------------------------------------------------------------
 //  Backup JSON builder
 // ---------------------------------------------------------------------------
@@ -696,7 +707,7 @@ String WebManager::buildStatusPage(const char* ip) {
     if (!mesh.isRoomActive(i)) continue;
     bool stealth_i = mesh.isRoomStealth(i);
     page += "<tr><td>"; page += i;
-    page += "</td><td>"; page += mesh.getRoomName(i);
+    page += "</td><td>"; page += htmlEscape(mesh.getRoomName(i));
     page += "</td><td>";
     page += stealth_i ? "<span class='warn'>STEALTH</span>" : "<span class='ok'>VISIBLE</span>";
     page += "</td><td>"; page += mesh.getRoomClientCount(i);
@@ -713,19 +724,21 @@ String WebManager::buildStatusPage(const char* ip) {
     // QR join code button
     page += " <a href='/api/room/qr?idx="; page += i;
     page += "' style='text-decoration:none'><button>QR</button></a>";
-    // Rekey button — double-confirm via JS prompt (type room name or REKEY for room 0)
+    // Rekey button — double-confirm via JS prompt (type room name or REKEY for room 0).
+    // Room name stored in data-exp attribute (htmlEscape covers & < > "); JS reads via
+    // dataset to avoid JS-string-literal injection (single-quote breakout).
     {
       const char* exp_name = (i == 0) ? "REKEY" : mesh.getRoomName(i);
       page += " <form method='post' action='/api/room/rekey' style='display:inline'>"
               "<input type='hidden' name='idx' value='"; page += i;
       page += "'><input type='hidden' name='confirm' value=''>"
-              "<button type='button' onclick=\""
-              "var e='"; page += htmlEscape(exp_name);
-      page += "';"
+              "<button type='button' data-exp=\""; page += htmlEscape(exp_name);
+      page += "\" onclick=\""
+              "var e=this.dataset.exp;"
               "var w="; page += (i == 0) ? "'Room 0 = node-identiteit. Alle peer-links verbreken!'" : "'Bestaande QR-codes en join-URIs worden ongeldig.'";
       page += ";"
               "var c=window.prompt('Rekey room "; page += i;
-      page += " (' + e + ')?\\n' + w + '\\nTyp \\'' + e + '\\' ter bevestiging:');"
+      page += " (\\'' + e + '\\')?\\n' + w + '\\nTyp \\'' + e + '\\' ter bevestiging:');"
               "if(c!==null){"
               "this.closest('form').elements.namedItem('confirm').value=c;"
               "this.closest('form').submit();}"
@@ -1141,6 +1154,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/del", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true)) { req->send(400, "text/plain", "missing idx"); return; }
       char cmd[32];
       snprintf(cmd, sizeof(cmd), "room del %s",
@@ -1154,6 +1168,7 @@ void WebManager::setupRoutes() {
   _server.on("/api/room/rekey", HTTP_POST,
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (!req->hasParam("idx", true) || !req->hasParam("confirm", true)) {
         req->send(400, "text/plain", "missing idx or confirm"); return;
       }
@@ -1340,6 +1355,7 @@ void WebManager::setupRoutes() {
     // onRequest — called after all upload chunks are received
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
       if (_restore_buf.length() == 0) {
         req->send(400, "text/plain", "No backup data received");
         return;
