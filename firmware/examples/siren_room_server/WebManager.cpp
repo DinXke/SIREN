@@ -1027,6 +1027,12 @@ String WebManager::buildStatusPage(const char* ip) {
             "for(var i=0;i<ps.length;i++){ps[i].classList.remove('act');bs[i].classList.remove('act');}"
             "ps[n].classList.add('act');bs[n].classList.add('act');"
           "}"
+          "function editRoom(i,n){"
+            "showTab(1);"
+            "document.getElementById('editIdx').value=i;"
+            "document.getElementById('editName').value=n;"
+            "document.getElementById('editCard').scrollIntoView({behavior:'smooth'});"
+          "}"
           "</script>";
 
   // ================================================================
@@ -1088,6 +1094,12 @@ String WebManager::buildStatusPage(const char* ip) {
     page += "</td><td>"; page += mesh.getRoomClientCount(i);
     page += "</td><td>"; page += mesh.getRoomPostCount(i);
     page += "</td><td><div class='btngrp'>";
+    // Edit button — pre-fills the edit form below and scrolls to it
+    {
+      page += "<button type='button' data-idx='"; page += i;
+      page += "' data-name=\""; page += htmlEscape(mesh.getRoomName(i));
+      page += "\" onclick=\"editRoom(this.dataset.idx,this.dataset.name)\">Bewerken</button>";
+    }
     // Stealth toggle
     page += "<form method='post' action='/api/room/stealth'>"
             "<input type='hidden' name='idx' value='"; page += i;
@@ -1130,12 +1142,12 @@ String WebManager::buildStatusPage(const char* ip) {
           "<button type='submit'>+ Room toevoegen</button></form></div>";
 
   // Edit room form
-  page += "<div class='card'><h2>Room bewerken</h2>"
+  page += "<div class='card' id='editCard'><h2>Room bewerken</h2>"
           "<form method='post' action='/api/room/set'>"
-          "<div class='frow'><label>Idx</label><input name='idx' type='number' min='0' max='15'></div>"
-          "<div class='frow'><label>Naam</label><input name='name' maxlength='23'></div>"
-          "<div class='frow'><label>Wachtwoord</label><input name='pass' maxlength='15'></div>"
-          "<div class='frow'><label>Gast-ww</label><input name='guest' maxlength='15'></div>"
+          "<div class='frow'><label>Idx</label><input id='editIdx' name='idx' type='number' min='0' max='15'></div>"
+          "<div class='frow'><label>Naam</label><input id='editName' name='name' maxlength='23'></div>"
+          "<div class='frow'><label>Wachtwoord</label><input name='pass' maxlength='15' placeholder='leeg laten = ongewijzigd'></div>"
+          "<div class='frow'><label>Gast-ww</label><input name='guest' maxlength='15' placeholder='leeg laten = ongewijzigd'></div>"
           "<button type='submit'>Opslaan</button></form></div>";
 
   // Visibility (stealth) — global toggle
