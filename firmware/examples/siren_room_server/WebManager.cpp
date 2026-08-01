@@ -1228,6 +1228,33 @@ String WebManager::buildStatusPage(const char* ip) {
             "</div>";
   }
 
+  // Repeater modus (JES-855) — independent of stealth
+  {
+    const NodePrefs* p = mesh.getNodePrefs();
+    bool rep_on = (p->disable_fwd == 0);
+    page += "<div class='card'><h2>Repeater modus</h2>";
+    if (rep_on) {
+      page += "<p>Status: <b class='ok'>AAN</b> &mdash; node stuurt LoRa-berichten van andere nodes door.</p>";
+    } else {
+      page += "<p>Status: <b class='warn'>UIT</b> &mdash; node stuurt alleen eigen berichten.</p>";
+    }
+    page += "<p style='font-size:0.84em;color:#aaa;margin:4px 0 10px'>"
+            "Onafhankelijk van stealth: stealth regelt zichtbaarheid van rooms, "
+            "repeater regelt doorsturen van mesh-pakketten.</p>"
+            "<div style='display:flex;gap:8px;flex-wrap:wrap'>"
+            "<form method='post' action='/api/repeater'>"
+            "<button name='repeater' value='on'";
+    if (rep_on) page += " class='ok-btn'";
+    page += ">Repeater AAN</button></form>"
+            "<form method='post' action='/api/repeater'>"
+            "<button name='repeater' value='off'";
+    if (!rep_on) page += " class='warn-btn'";
+    page += ">Repeater UIT</button></form>"
+            "</div>"
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>"
+            "CLI: <code>repeater on|off|status</code></p></div>";
+  }
+
   // Login notification targets (JES-834)
   {
     page += "<div class='card'><h2>Login Notificaties</h2>"
@@ -1925,6 +1952,18 @@ void WebManager::setupRoutes() {
       if (!req->hasParam("stealth", true)) { req->send(400, "text/plain", "missing stealth"); return; }
       bool s = (req->getParam("stealth", true)->value() == "on");
       _mesh.setRoomStealth(-1, s);  // -1 = all rooms
+      req->redirect("/");
+    });
+
+  // API: repeater toggle (JES-855) — independent of stealth
+  _server.on("/api/repeater", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("repeater", true)) { req->send(400, "text/plain", "missing repeater"); return; }
+      char cmd[20], reply[80];
+      bool on = (req->getParam("repeater", true)->value() == "on");
+      snprintf(cmd, sizeof(cmd), "set fwd %s", on ? "on" : "off");
+      _mesh.handleCommand(0, cmd, reply);
       req->redirect("/");
     });
 
