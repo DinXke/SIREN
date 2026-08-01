@@ -919,6 +919,68 @@ String WebManager::buildStatusPage(const char* ip) {
             "<code>peer del &lt;idx&gt;</code> &nbsp; "
             "<code>peer sync</code></p>"
             "</div>";
+
+    // Sync diagnostics panel (JES-833) — fetches /api/sync/status every 10 s
+    page += "<div class='card'><h2>Sync Diagnostiek</h2>"
+            "<div id='sync-panel'><p>Laden...</p></div>"
+            "<p style='font-size:0.8em;color:#aaa'>Auto-refresh 10s &bull; RAM-counters (reset bij reboot) &bull; "
+            "<code>sync status</code> voor serial CLI</p></div>"
+            "<script>"
+            "function renderSync(d){"
+              "var el=document.getElementById('sync-panel');"
+              "if(!el)return;"
+              "while(el.firstChild)el.removeChild(el.firstChild);"
+              // Counters paragraph
+              "var cp=document.createElement('p');"
+              "cp.textContent='SYNCREQ: '+d.counters.sync_req_sent"
+                "+'  |  SYNCDAT: '+d.counters.sync_dat_recv"
+                "+'  |  Posts ontvangen: '+d.counters.sync_posts_recv"
+                "+'  |  Posts verzonden: '+d.counters.sync_posts_sent;"
+              "el.appendChild(cp);"
+              // Room hashes paragraph
+              "if(d.rooms&&d.rooms.length){"
+                "var rp=document.createElement('p');"
+                "var rb=document.createElement('b');rb.textContent='Room hashes: ';rp.appendChild(rb);"
+                "d.rooms.forEach(function(r){"
+                  "var s=document.createElement('span');"
+                  "s.textContent='['+r.idx+'] '+r.name+' ('+r.hash+'...)  ';"
+                  "rp.appendChild(s);"
+                "});"
+                "el.appendChild(rp);"
+              "}"
+              // Peers table
+              "if(!d.peers||!d.peers.length){"
+                "var np=document.createElement('p');np.textContent='Geen peers.';el.appendChild(np);return;"
+              "}"
+              "var tbl=document.createElement('table');"
+              "var hr=document.createElement('tr');"
+              "['#','Naam','Status','SYNCREQ ts','SYNCDAT ts','SYNCEND ts','Recv','Sent'].forEach(function(h){"
+                "var th=document.createElement('th');th.textContent=h;hr.appendChild(th);"
+              "});"
+              "tbl.appendChild(hr);"
+              "d.peers.forEach(function(p){"
+                "var tr=document.createElement('tr');"
+                "[p.idx,p.name,p.status,"
+                  "p.last_syncreq_ts||'-',p.last_syncdat_ts||'-',p.last_syncend_ts||'-',"
+                  "p.sync_posts_recv,p.sync_posts_sent"
+                "].forEach(function(v){"
+                  "var td=document.createElement('td');td.textContent=v;tr.appendChild(td);"
+                "});"
+                "tbl.appendChild(tr);"
+              "});"
+              "el.appendChild(tbl);"
+            "}"
+            "function loadSync(){"
+              "fetch('/api/sync/status')"
+                ".then(function(r){return r.json();})"
+                ".then(renderSync)"
+                ".catch(function(){"
+                  "var el=document.getElementById('sync-panel');"
+                  "if(el){var e=document.createElement('p');e.textContent='Fout bij ophalen.';el.appendChild(e);}"
+                "});"
+            "}"
+            "loadSync();setInterval(loadSync,10000);"
+            "</script>";
   }
 
   // Edit room form
@@ -1923,6 +1985,65 @@ void WebManager::setupRoutes() {
     }
     _mesh.triggerPeerSync(idx);
     req->redirect("/");
+  });
+
+  // GET /api/sync/status — sync diagnostics (JES-833, admin-auth required)
+  // Returns JSON: global counters + per-room hash info + per-peer timestamps.
+  // No private keys, passwords or message content in output.
+  _server.on("/api/sync/status", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    String j = "{";
+    // Global counters
+    j += "\"counters\":{";
+    j += "\"sync_req_sent\":";   j += _mesh.getSyncReqSent();   j += ",";
+    j += "\"sync_dat_recv\":";   j += _mesh.getSyncDatRecv();   j += ",";
+    j += "\"sync_posts_recv\":"; j += _mesh.getSyncPostsRecv(); j += ",";
+    j += "\"sync_posts_sent\":"; j += _mesh.getSyncPostsSent(); j += "},";
+    // Room hashes
+    j += "\"rooms\":[";
+    bool rf = true;
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (!_mesh.isRoomActive(i)) continue;
+      if (!rf) j += ",";
+      rf = false;
+      const uint8_t* pub = _mesh.getRoomPubKey(i);
+      char hash[9] = {};
+      if (pub) {
+        for (int b = 0; b < 4; b++) snprintf(hash + b * 2, 3, "%02x", (unsigned int)pub[b]);
+      }
+      j += "{\"idx\":";      j += i;
+      j += ",\"name\":\"";   j += jsonEscape(_mesh.getRoomName(i)); j += "\"";
+      j += ",\"hash\":\"";   j += hash; j += "\"}";
+    }
+    j += "],";
+    // Per-peer sync state
+    j += "\"peers\":[";
+    bool pf = true;
+    for (int i = 0; i < MAX_PEERS; i++) {
+      const PeerInfo* p = _mesh.getPeer(i);
+      if (!p || !p->active) continue;
+      if (!pf) j += ",";
+      pf = false;
+      char pfx[9] = {};
+      for (int b = 0; b < 4; b++) snprintf(pfx + b * 2, 3, "%02x", (unsigned int)p->pub_key[b]);
+      // Derive status string (no user-controlled content)
+      const char* status;
+      if (p->last_syncend_ts > 0 || p->last_syncdat_ts > 0) status = "OK";
+      else if (p->last_syncreq_ts > 0)                       status = "geen_response";
+      else                                                    status = "wacht";
+      j += "{\"idx\":";             j += i;
+      j += ",\"name\":\"";          j += jsonEscape(p->name); j += "\"";
+      j += ",\"pub_prefix\":\"";    j += pfx; j += "\"";
+      j += ",\"last_syncreq_ts\":"; j += (unsigned long)p->last_syncreq_ts;
+      j += ",\"last_syncdat_ts\":"; j += (unsigned long)p->last_syncdat_ts;
+      j += ",\"last_syncend_ts\":"; j += (unsigned long)p->last_syncend_ts;
+      j += ",\"sync_posts_recv\":"; j += (unsigned long)p->sync_posts_recv;
+      j += ",\"sync_posts_sent\":"; j += (unsigned long)p->sync_posts_sent;
+      j += ",\"status\":\"";        j += status; j += "\"";
+      j += "}";
+    }
+    j += "]}";
+    req->send(200, "application/json", j);
   });
 
   // ---------------------------------------------------------------------------

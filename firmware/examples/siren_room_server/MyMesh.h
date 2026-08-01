@@ -140,6 +140,12 @@ struct PeerInfo {
   uint8_t  shared_secret[PUB_KEY_SIZE]; // ECDH(rooms[0].priv, pub_key)
   bool     secret_valid;                // true once calcPeerSecret() called
   unsigned long next_sync_at;           // millis() deadline for next SYNCREQ
+  /* SYNC DIAGNOSTICS (JES-833) — not persisted, reset on reboot */
+  uint32_t last_syncreq_ts;  // RTC epoch of last SYNCREQ sent to this peer (0 = never)
+  uint32_t last_syncdat_ts;  // RTC epoch of last SYNCDAT received from this peer (0 = never)
+  uint32_t last_syncend_ts;  // RTC epoch of last SYNCEND received from this peer (0 = never)
+  uint32_t sync_posts_recv;  // posts received from this peer via sync (since boot)
+  uint32_t sync_posts_sent;  // posts sent to this peer via sync (since boot)
 };
 
 struct NameEntry {
@@ -262,6 +268,12 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Tombstone log (JES-824) ---- */
   Tombstone _tombstones[MAX_TOMBSTONES];
   uint8_t   _tombstone_count;
+
+  /* ---- Sync diagnostics counters (JES-833) — RAM only, reset on reboot ---- */
+  uint32_t  _sync_req_sent;    // total SYNCREQ frames sent
+  uint32_t  _sync_dat_recv;    // total SYNCDAT frames received
+  uint32_t  _sync_posts_recv;  // total posts ingested via sync
+  uint32_t  _sync_posts_sent;  // total posts pushed to peers
 
   void saveTombstones();
   void loadTombstones();
@@ -474,6 +486,12 @@ public:
       }
     return n;
   }
+
+  /* ---- Sync diagnostics accessors (JES-833) ---- */
+  uint32_t getSyncReqSent()   const { return _sync_req_sent; }
+  uint32_t getSyncDatRecv()   const { return _sync_dat_recv; }
+  uint32_t getSyncPostsRecv() const { return _sync_posts_recv; }
+  uint32_t getSyncPostsSent() const { return _sync_posts_sent; }
 
   /* ---- Post pool backup / restore (JES-790) ---- */
   /** Serialise active posts as flat JSON key-value pairs for inclusion in backup. */

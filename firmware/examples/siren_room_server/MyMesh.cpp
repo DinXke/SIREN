@@ -94,6 +94,7 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
     peers[i].secret_valid = false;
     peers[i].next_sync_at = 0;
   }
+  _sync_req_sent = _sync_dat_recv = _sync_posts_recv = _sync_posts_sent = 0;
   _advert_interval_sec = 120;
 
   for (int i = 0; i < MAX_ROOMS; i++) {
@@ -1609,6 +1610,32 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
     return;
   }
 
+  // "sync status" — sync diagnostics counters + per-peer timestamps (JES-833)
+  if (memcmp(command, "sync status", 11) == 0 && (command[11] == 0 || command[11] == ' ')) {
+    if (is_serial) {
+      Serial.printf("[SYNC] Globaal: req_sent=%lu dat_recv=%lu posts_recv=%lu posts_sent=%lu\n",
+                    (unsigned long)_sync_req_sent, (unsigned long)_sync_dat_recv,
+                    (unsigned long)_sync_posts_recv, (unsigned long)_sync_posts_sent);
+      for (int i = 0; i < MAX_PEERS; i++) {
+        if (!peers[i].active) continue;
+        Serial.printf("  peer[%d] '%s': req_ts=%lu dat_ts=%lu end_ts=%lu recv=%lu sent=%lu\n",
+                      i, peers[i].name,
+                      (unsigned long)peers[i].last_syncreq_ts,
+                      (unsigned long)peers[i].last_syncdat_ts,
+                      (unsigned long)peers[i].last_syncend_ts,
+                      (unsigned long)peers[i].sync_posts_recv,
+                      (unsigned long)peers[i].sync_posts_sent);
+      }
+      reply[0] = 0;
+    } else {
+      snprintf(reply, 160, "sync req=%lu recv=%lu sent=%lu",
+               (unsigned long)_sync_req_sent,
+               (unsigned long)_sync_posts_recv,
+               (unsigned long)_sync_posts_sent);
+    }
+    return;
+  }
+
   // Fall through to shared CommonCLI
   _cli.handleCommand(sender_timestamp, command, reply);
 }
@@ -2208,7 +2235,12 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     return;
   }
 
-  strcpy(reply, "Err - usage: room list|add|del <idx>|delpost <idx> <origin_id_hex8> <post_ts>|rekey <idx>|export <idx>|import <idx> <hex128>|set <idx> name|pass|guest <val>|stealth <idx> on|off|qr <idx>|read <idx|name> [n]|clients <idx>|setperm <idx> <hex> <perms>|status <idx>");
+  if (serial) {
+    Serial.println("Err - unknown room sub-command. Valid: list|add|del|set|stealth|qr|clients|setperm|status|read|export|import|rekey|delpost");
+    reply[0] = 0;
+  } else {
+    strcpy(reply, "Err - bad room command");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2971,7 +3003,11 @@ void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
   self_id = rooms[0].id;
   auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, peer_id,
                              peers[pi].shared_secret, reply_data, len);
-  if (pkt) sendFlood(pkt, (uint32_t)0, (uint8_t)(_prefs.path_hash_mode + 1));
+  if (pkt) {
+    sendFlood(pkt, (uint32_t)0, (uint8_t)(_prefs.path_hash_mode + 1));
+    peers[pi].sync_posts_sent++;
+    _sync_posts_sent++;
+  }
 }
 
 /**
@@ -3027,6 +3063,8 @@ void MultiRoomMesh::sendSyncReq(int pi) {
 
   Serial.printf("[SYNC] SYNCREQ → peer[%d] '%s' (%d room(s))\n",
                 pi, peers[pi].name, rooms_synced);
+  peers[pi].last_syncreq_ts = getRTCClock()->getCurrentTime();
+  _sync_req_sent++;
 }
 
 /**
@@ -3049,7 +3087,15 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
       ri = i; break;
     }
   }
-  if (ri < 0) return;  // room not known locally — ignore
+  // Fallback: if no exact hash match, sync into first active room.
+  // This allows cross-node sync when both nodes have different room keys (JES-723).
+  // The SYNCDAT will echo back the requesting room_hash, so the peer can ingest correctly.
+  if (ri < 0) {
+    for (int i = 0; i < MAX_ROOMS; i++) {
+      if (rooms[i].active) { ri = i; break; }
+    }
+  }
+  if (ri < 0) return;  // no active rooms at all
 
   // Parse peer's VV
   struct { uint8_t orig[4]; uint32_t seq; } peer_vv[MAX_VV_ORIGINS];
@@ -3177,10 +3223,15 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   }
   if (ri < 0) return;  // room not known locally
 
+  peers[pi].last_syncdat_ts = getRTCClock()->getCurrentTime();
+  _sync_dat_recv++;
+
   bool added = ingestSyncPost((uint8_t)ri, origin_id, post_ts, author_pub, text);
   if (added) {
     Serial.printf("[SYNC] SYNCDAT from peer[%d]: +post ts=%lu → room[%d]\n",
                   pi, (unsigned long)post_ts, ri);
+    peers[pi].sync_posts_recv++;
+    _sync_posts_recv++;
   }
 }
 
@@ -3199,6 +3250,7 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
     }
   }
   (void)ri;  // informational only
+  peers[pi].last_syncend_ts = getRTCClock()->getCurrentTime();
   Serial.printf("[SYNC] SYNCEND from peer[%d] room[%d]\n", pi, ri);
 }
 
