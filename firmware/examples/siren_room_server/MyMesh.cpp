@@ -1191,27 +1191,21 @@ bool MultiRoomMesh::processAckForSlot(RoomSlot& slot, const uint8_t* data) {
 /*  Advertisement helpers                                               */
 /* ------------------------------------------------------------------ */
 mesh::Packet* MultiRoomMesh::createRoomAdvert(RoomSlot& slot) {
-  // Build advert data using the room's own name + location
+  // Build advert data using the canonical MeshCore wire format (AdvertDataBuilder).
+  // The old hand-rolled layout never set ADV_NAME_MASK, so remote parsers
+  // (companion app) saw no name and displayed only the pubkey (JES-868). It also
+  // encoded lat/lon as raw floats after the name instead of int32 (*1E6) before
+  // it, so locations never decoded either. Delegating to AdvertDataBuilder fixes
+  // both by setting the correct flags/offsets.
   uint8_t app_data[MAX_ADVERT_DATA_SIZE];
-  uint8_t app_data_len = 0;
+  uint8_t app_data_len;
 
-  // Use the standard ADV_TYPE_ROOM format
-  app_data[app_data_len++] = ADV_TYPE_ROOM;
-
-  // Encode name (null-terminated, up to 20 chars)
-  int name_len = strlen(slot.name);
-  if (name_len > 20) name_len = 20;
-  app_data[app_data_len++] = (uint8_t)name_len;
-  memcpy(&app_data[app_data_len], slot.name, name_len);
-  app_data_len += name_len;
-
-  // Optionally encode lat/lon if non-zero
   if (slot.lat != 0.0f || slot.lon != 0.0f) {
-    // encode as 4-byte floats
-    if (app_data_len + 8 <= MAX_ADVERT_DATA_SIZE) {
-      memcpy(&app_data[app_data_len], &slot.lat, 4); app_data_len += 4;
-      memcpy(&app_data[app_data_len], &slot.lon, 4); app_data_len += 4;
-    }
+    AdvertDataBuilder builder(ADV_TYPE_ROOM, slot.name, slot.lat, slot.lon);
+    app_data_len = builder.encodeTo(app_data);
+  } else {
+    AdvertDataBuilder builder(ADV_TYPE_ROOM, slot.name);
+    app_data_len = builder.encodeTo(app_data);
   }
 
   // Swap self_id to this room before creating the advert (which signs with priv_key)
