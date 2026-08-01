@@ -16,9 +16,9 @@ This is called **anti-entropy replication** in distributed systems: the "entropy
 
 ## Status of Replication in SIREN
 
-> **Phase 5 (JES-723) and Phase 6 (JES-724) are not yet fully implemented.** The data structures and peer configuration are in place (Phase 1 groundwork), but the SYNCREQ/SYNCDAT/SYNCEND wire protocol is not yet active.
+> **Implemented and active.** The SYNCREQ/SYNCDAT/SYNCEND anti-entropy protocol is live, and since **JES-816** it is **multi-room**: every active room is replicated (not just `rooms[0]`). Each sync frame carries a 4-byte `room_hash` (the first 4 bytes of the room's public key) so the receiving node routes posts to the correct room.
 >
-> This document describes the **planned design**, based on the architecture decisions recorded in JES-723 and JES-724. Implementors should verify against the actual firmware code once Phase 5 is complete.
+> Peer management is available from both the **web UI** (Peer-koppeling card, behind admin auth) and the **serial CLI** (`peer add|del|list|sync`). See [Coupling nodes](#coupling-nodes-in-practice) below.
 
 ---
 
@@ -203,15 +203,40 @@ Peer configuration is stored in `/peer_cfg` on SPIFFS and survives reboots.
 
 ---
 
-## Wire Format (Planned)
+## Wire Format (JES-816, multi-room)
 
-SYNCREQ, SYNCDAT, and SYNCEND are sent as encrypted direct messages over MeshCore, using the same DM encryption path as user messages. This means:
+SYNCREQ, SYNCDAT, and SYNCEND are sent as encrypted direct messages over MeshCore, using the same DM encryption path as user messages. All frames are sent **from** the node transport identity (`rooms[0].id`) and addressed to the peer's public key.
 
-- Both nodes must have each other's public key in their peer list
-- The channel is encrypted end-to-end (no cleartext on the LoRa channel)
-- Replay protection is inherited from MeshCore's packet de-dup mechanism
+Every frame carries a 4-byte `room_hash` = the first 4 bytes of the relevant room's public key. The receiver matches this against its own active rooms and ignores the frame if it knows no room with that hash.
+
+```
+SYNCREQ : [4:ts][1:flags][4:room_hash][1:num_vv][N × 8: VVEntry{origin[4], seq[4]}]
+SYNCDAT : [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][text]
+SYNCEND : [4:ts][1:flags][4:room_hash][1:num_vv][N × 8: VVEntry{origin[4], seq[4]}]
+```
+
+- One **SYNCREQ per active room** is sent to each peer, staggered by 1 s to respect the 1% LoRa duty cycle.
+- All parsers are length-guarded (`SYNCREQ`/`SYNCEND` min 10 bytes, `SYNCDAT` min 21 bytes) and the VV count is clamped to `MAX_VV_ORIGINS`.
+- Both nodes must have each other's public key in their peer list.
+- The channel is encrypted end-to-end (no cleartext on the LoRa channel); replay protection is inherited from MeshCore's packet de-dup.
 
 Packet type codes are distinct from user message codes to avoid misinterpretation.
+
+---
+
+## Coupling Nodes in Practice
+
+Two SIREN nodes replicate once they are **mutual peers** and share **rooms with the same key**. There is no separate "link this virtual room to that one" step — replication happens automatically per room, matched by `room_hash`.
+
+**Step 1 — exchange node public keys.** Each node shows its own transport public key on the web UI *Peer-koppeling* card ("Eigen node pubkey"). Copy node A's pubkey into node B, and node B's into node A.
+
+**Step 2 — add the peer.** Web UI: paste the 64-hex pubkey + a name into the *Peer toevoegen* form (`POST /api/peer/add`). Or serial CLI: `peer add <hex64> <name>`. Peer entries persist in `/peer_cfg` and are included in backup/restore.
+
+**Step 3 — share the rooms.** A room replicates between two nodes only if **both nodes have a room with the same key**. Share a room's key/QR (see [wifi-webui.md](wifi-webui.md)) and import it on the other node. Rooms with matching keys have matching `room_hash` and sync automatically.
+
+**Step 4 — sync.** Sync runs automatically on the pull schedule. To force it immediately, press *Sync* / *Sync All Nu* in the web UI (`POST /api/peer/sync`) or run `peer sync` on serial.
+
+> **Answering the board's question:** you do not select and couple individual virtual rooms manually. You (1) couple the two *nodes* by exchanging public keys, and (2) give the rooms the same key on both nodes. Any room present with the same key on both nodes is then kept in sync automatically.
 
 ---
 
@@ -259,3 +284,4 @@ See `docs/mqtt.md` for the full MQTT specification and encryption details.
 - **JES-724**: Phase 6 — three-node triangle test
 - **JES-732**: Dest-hash collision fix (prerequisite for correct multi-room replication)
 - **JES-792**: MQTT transport + dual-path sync
+- **JES-812 / JES-816**: multi-node coupling — web-UI peer management + multi-room replication (`room_hash` per frame)
