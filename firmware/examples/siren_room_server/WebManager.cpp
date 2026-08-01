@@ -457,10 +457,13 @@ static String base64Encode(const uint8_t* data, size_t len) {
 // ---------------------------------------------------------------------------
 //  HTML page builders
 // ---------------------------------------------------------------------------
-static const char HTML_HEAD[] PROGMEM =
+static const char HTML_HEAD_PRE[] PROGMEM =
   "<!DOCTYPE html><html><head>"
   "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-  "<title>SIREN Room Server</title>"
+  "<title>";
+
+static const char HTML_HEAD_POST[] PROGMEM =
+  "</title>"
   "<style>"
   "body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:12px;}"
   "h2{color:#00d4ff;margin:0 0 8px}"
@@ -475,10 +478,19 @@ static const char HTML_HEAD[] PROGMEM =
   "a{color:#00d4ff}"
   "</style></head><body>";
 
+// Build the HTML <head> with the node name in the <title>.
+static String buildHead(const char* node_name) {
+  String h = FPSTR(HTML_HEAD_PRE);
+  h += htmlEscape(node_name);
+  h += F(" Room Server");
+  h += FPSTR(HTML_HEAD_POST);
+  return h;
+}
+
 static const char HTML_FOOT[] PROGMEM = "</body></html>";
 
 String WebManager::buildChatPage() {
-  String page = FPSTR(HTML_HEAD);
+  String page = buildHead(_mesh.getNodeName());
 
   // Tab CSS (scoped to this page)
   page += "<style>.tab{background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;"
@@ -486,8 +498,9 @@ String WebManager::buildChatPage() {
           ".tab.act{background:#00d4ff;color:#000}</style>";
 
   // Nav back to management UI
-  page += "<div class='card'><h2>Rooms &mdash; "
-          "<a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
+  page += "<div class='card'><h2>Rooms &mdash; ";
+  page += htmlEscape(_mesh.getNodeName());
+  page += " <a href='/' style='font-size:0.75em'>&#8592; Beheer</a></h2>";
 
   // Tab bar — one tab per active room; htmlEscape ensures XSS safety for labels
   int _firstRoom = -1;
@@ -684,10 +697,12 @@ String WebManager::buildStatusPage(const char* ip) {
   const char* ap_ssid = _ap_ssid;
   const char* sta_ssid = _sta_ssid;
 
-  String page = FPSTR(HTML_HEAD);
+  String page = buildHead(mesh.getNodeName());
 
   // Node info
-  page += "<div class='card'><h2>SIREN Room Server</h2>";
+  page += "<div class='card'><h2>";
+  page += htmlEscape(mesh.getNodeName());
+  page += " Room Server</h2>";
   page += "<table>";
   page += "<tr><th>Node</th><td>"; page += mesh.getNodeName(); page += "</td></tr>";
   page += "<tr><th>WiFi Mode</th><td>"; page += (mode == MODE_AP ? "AP (hotspot)" : "STA (client)"); page += "</td></tr>";
@@ -696,6 +711,13 @@ String WebManager::buildStatusPage(const char* ip) {
   page += "<tr><th>Active Rooms</th><td>"; page += mesh.getNumActiveRooms();
   page += " / "; page += MAX_ROOMS; page += "</td></tr>";
   page += "</table>";
+  // Server name edit form (JES-828)
+  page += "<form method='post' action='/api/node/name' style='margin:6px 0'>"
+          "Server naam: <input name=\"name\" value=\"";
+  page += htmlEscape(mesh.getNodeName());
+  page += "\" maxlength='31' size='20'> "
+          "<button type='submit'>Opslaan</button></form>"
+          "<p style='font-size:0.85em;color:#aaa'>CLI: <code>set name &lt;naam&gt;</code></p>";
   page += "<p><a href='/chat'><button>&#128172; Rooms</button></a>"
           " &mdash; berichten per kanaal bekijken en posten als operator</p>"
           "</div>";
@@ -1004,7 +1026,7 @@ String WebManager::buildStatusPage(const char* ip) {
 //  QR code page — per-room join QR rendered via inline canvas JS
 // ---------------------------------------------------------------------------
 static String buildQrPage(MultiRoomMesh& mesh, int idx) {
-  String page = FPSTR(HTML_HEAD);
+  String page = buildHead(mesh.getNodeName());
 
   if (idx < 0 || idx >= MAX_ROOMS || !mesh.isRoomActive(idx)) {
     page += "<div class='card'><p class='err'>Room ";
@@ -1140,6 +1162,22 @@ void WebManager::setupRoutes() {
       : WiFi.localIP().toString();
     req->send(200, "text/html", buildStatusPage(ip.c_str()));
   });
+
+  // API: set server (node) name (JES-828)
+  _server.on("/api/node/name", HTTP_POST,
+    [this, user, pass](AsyncWebServerRequest* req) {
+      if (!req->authenticate(user, pass)) return req->requestAuthentication();
+      if (!req->hasParam("name", true)) { req->send(400, "text/plain", "missing name"); return; }
+      String n = req->getParam("name", true)->value();
+      n.trim();
+      if (!n.length() || n.length() > 31) {
+        req->send(400, "text/plain", "name leeg of te lang (max 31 tekens)"); return;
+      }
+      char cmd[64], reply[160];
+      snprintf(cmd, sizeof(cmd), "set name %.*s", 31, n.c_str());
+      _mesh.handleCommand(0, cmd, reply);
+      req->redirect("/");
+    });
 
   // API: add room
   _server.on("/api/room/add", HTTP_POST,
@@ -1363,7 +1401,7 @@ void WebManager::setupRoutes() {
       bool ok = applyRestore(_restore_buf);
       _restore_buf = "";
       if (ok) {
-        String pg = FPSTR(HTML_HEAD);
+        String pg = buildHead(_mesh.getNodeName());
         pg += "<div class='card'><h2>Restore OK</h2>"
               "<p class='ok'>Settings applied. Rebooting in 2 seconds...</p>"
               "<p><a href='/'>Back</a></p></div>";
@@ -1372,7 +1410,7 @@ void WebManager::setupRoutes() {
         delay(2000);
         ESP.restart();
       } else {
-        String pg = FPSTR(HTML_HEAD);
+        String pg = buildHead(_mesh.getNodeName());
         pg += "<div class='card'><h2>Restore Failed</h2>"
               "<p class='err'>Invalid or incompatible backup file (version mismatch?).</p>"
               "<p><a href='/'>Back</a></p></div>";
