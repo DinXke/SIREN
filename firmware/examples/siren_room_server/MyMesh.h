@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Mesh.h>
+#include "DebugLog.h"
 
 #if defined(NRF52_PLATFORM)
   #include <InternalFileSystem.h>
@@ -612,6 +613,21 @@ public:
   void triggerPeerSync(int idx);
   /** Push all active rooms (1+) to one peer (idx >= 0) or all peers (idx == -1). */
   void triggerRoomSync(int idx);
+
+  /* ---- Region / scope accessors for web UI (JES-852) ---- */
+  int getRegionCount() const { return region_map.getCount(); }
+  const RegionEntry* getRegionByIdx(int i) const {
+    if (i < 0 || i >= region_map.getCount()) return nullptr;
+    return region_map.getByIdx(i);
+  }
+  const RegionEntry* getDefaultRegion() {
+    return region_map.getDefaultRegion();
+  }
+
+  /* ---- Debug log accessors (JES-852) ---- */
+  bool     isDebugLogEnabled() const { return g_dbglog.isEnabled(); }
+  void     enableDebugLog(bool on)   { g_dbglog.enable(on); }
+  void     clearDebugLog()           { g_dbglog.clear(); }
 
   /* ---- Backup / restore accessors (JES-766) ---- */
   const char* getRoomPassword(int i) const {

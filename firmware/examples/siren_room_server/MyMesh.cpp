@@ -1,7 +1,12 @@
 #include "MyMesh.h"
+#include "DebugLog.h"
 #ifdef ESP32
 #include <esp_system.h>  // esp_fill_random() — SEC-001 first-boot password CSPRNG
 #endif
+
+/* JES-852: RAM debug log singleton — 200 entries × 88 B = ~17.6 KB DRAM.
+   Enable via web UI (Systeem > Debug Log) or serial CLI: debug on */
+DebugLog g_dbglog;
 
 /* ------------------------------------------------------------------ */
 /*  Timing constants                                                    */
@@ -681,6 +686,13 @@ void MultiRoomMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
   memcpy(&sender_sync_since, &data[4],   4);
   data[len] = 0;
 
+  DLOG(sender_timestamp,
+       "RX anon room=%d sender=%02x%02x%02x%02x since=%lu len=%d",
+       (int)_active_slot,
+       (unsigned)sender.pub_key[0], (unsigned)sender.pub_key[1],
+       (unsigned)sender.pub_key[2], (unsigned)sender.pub_key[3],
+       (unsigned long)sender_sync_since, (int)len);
+
   ClientInfo* client = nullptr;
 
   if (data[8] == 0) {
@@ -774,6 +786,9 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
     peers[pi].last_contact = getRTCClock()->getCurrentTime();
     if (type == PAYLOAD_TYPE_TXT_MSG && len > 4) {
       uint8_t flags = (data[4] >> 2);
+      DLOG(peers[pi].last_contact,
+           "RX peer[%d] type=%d flags=%d len=%d",
+           pi, (int)type, (int)flags, (int)len);
       if      (flags == TXT_TYPE_SYNCREQ)  handleSyncReq(pi, data, len);
       else if (flags == TXT_TYPE_SYNCDAT)  handleSyncDat(pi, data, len);
       else if (flags == TXT_TYPE_SYNCEND)  handleSyncEnd(pi, data, len);
@@ -1010,6 +1025,13 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   // Phase 5: tag with this room-server as origin
   memcpy(free_slot->origin_id, slot.id.pub_key, 4);
 
+  DLOG(free_slot->post_timestamp,
+       "RX post room=%d auth=%02x%02x%02x%02x ts=%lu txt=%.30s",
+       (int)ridx,
+       (unsigned)free_slot->author.pub_key[0], (unsigned)free_slot->author.pub_key[1],
+       (unsigned)free_slot->author.pub_key[2], (unsigned)free_slot->author.pub_key[3],
+       (unsigned long)free_slot->post_timestamp, text);
+
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
   slot.num_posted++;
   _post_dirty_at = futureMillis(5000);  // debounced persist (JES-794)
@@ -1059,6 +1081,12 @@ void MultiRoomMesh::histAdvance(uint32_t now_ts) {
 }
 
 void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post) {
+  DLOG(post.post_timestamp,
+       "TX push→client room=%d client=%02x%02x%02x%02x ts=%lu",
+       (int)(uint8_t)(&slot - rooms),
+       (unsigned)client->id.pub_key[0], (unsigned)client->id.pub_key[1],
+       (unsigned)client->id.pub_key[2], (unsigned)client->id.pub_key[3],
+       (unsigned long)post.post_timestamp);
   int len = 0;
   memcpy(&reply_data[len], &post.post_timestamp, 4); len += 4;
 
@@ -1534,6 +1562,29 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       strcpy(reply, "Err - repeater settings only available on management room");
       return;
     }
+  }
+
+  // ---- debug log toggle (JES-852) ----
+  if (memcmp(command, "debug ", 6) == 0) {
+    const char* arg = command + 6;
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "on") == 0) {
+      g_dbglog.enable(true);
+      strcpy(reply, "OK - debug logging ON");
+    } else if (strcmp(arg, "off") == 0) {
+      g_dbglog.enable(false);
+      strcpy(reply, "OK - debug logging OFF");
+    } else if (strcmp(arg, "clear") == 0) {
+      g_dbglog.clear();
+      strcpy(reply, "OK - debug log cleared");
+    } else if (strcmp(arg, "status") == 0) {
+      snprintf(reply, 160, "debug log: %s  entries=%d/%d",
+               g_dbglog.isEnabled() ? "ON" : "OFF",
+               (int)g_dbglog.count(), (int)DEBUG_LOG_MAX_ENTRIES);
+    } else {
+      strcpy(reply, "debug on|off|clear|status");
+    }
+    return;
   }
 
   // ---- peer management commands (Phase 5 ground work) ----
@@ -2948,6 +2999,11 @@ void MultiRoomMesh::onAdvertRecv(mesh::Packet* /*pkt*/, const mesh::Identity& id
   if (!parser.isValid() || !parser.hasName()) return;
   const char* adv_name = parser.getName();
   if (!adv_name || adv_name[0] == 0) return;
+  DLOG((uint32_t)(millis()/1000),
+       "RX advert id=%02x%02x%02x%02x name=%.30s",
+       (unsigned)id.pub_key[0], (unsigned)id.pub_key[1],
+       (unsigned)id.pub_key[2], (unsigned)id.pub_key[3],
+       adv_name);
 
   // Find existing entry or lowest-seq victim
   int victim = 0;
@@ -3468,6 +3524,11 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
  */
 void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
   if (post.room_idx == 0) return;  // JES-846: room 0 is identity-only, never sync its posts
+  DLOG(post.post_timestamp,
+       "SYNC DAT→peer[%d] room=%d ts=%lu orig=%02x%02x%02x%02x",
+       pi, (int)post.room_idx, (unsigned long)post.post_timestamp,
+       (unsigned)post.origin_id[0], (unsigned)post.origin_id[1],
+       (unsigned)post.origin_id[2], (unsigned)post.origin_id[3]);
   calcPeerSecret(pi);
 
   int len = 0;
@@ -3564,6 +3625,9 @@ void MultiRoomMesh::sendSyncReq(int pi) {
   Serial.printf("[SYNC] SYNCREQ → peer[%d] '%s' (%d room(s))\n",
                 pi, peers[pi].name, rooms_synced);
   peers[pi].last_syncreq_ts = getRTCClock()->getCurrentTime();
+  DLOG(peers[pi].last_syncreq_ts,
+       "SYNC REQ→peer[%d] '%s' rooms=%d",
+       pi, peers[pi].name, rooms_synced);
   _sync_req_sent++;
 }
 
@@ -3579,6 +3643,12 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
   memcpy(room_hash, &data[5], 4);
   uint8_t num_vv = data[9];
   if ((size_t)(10 + (int)num_vv * 8) > len) return;
+  DLOG((uint32_t)(millis()/1000),
+       "SYNC REQ←peer[%d] hash=%02x%02x%02x%02x vv=%d",
+       pi,
+       (unsigned)room_hash[0], (unsigned)room_hash[1],
+       (unsigned)room_hash[2], (unsigned)room_hash[3],
+       (int)num_vv);
 
   // Find local room matching hash (first 4 bytes of pub_key); skip room 0 (JES-846)
   int ri = -1;
@@ -3755,6 +3825,12 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   _sync_dat_recv++;
 
   bool added = ingestSyncPost((uint8_t)ri, origin_id, post_ts, author_pub, text);
+  DLOG(post_ts,
+       "SYNC DAT←peer[%d] orig=%02x%02x%02x%02x ts=%lu room=%d %s",
+       pi,
+       (unsigned)origin_id[0], (unsigned)origin_id[1],
+       (unsigned)origin_id[2], (unsigned)origin_id[3],
+       (unsigned long)post_ts, ri, added ? "added" : "dup/tomb");
   if (added) {
     Serial.printf("[SYNC] SYNCDAT from peer[%d]: +post ts=%lu → room[%d]\n",
                   pi, (unsigned long)post_ts, ri);
@@ -3785,6 +3861,12 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
   if (num_vv > MAX_VV_ORIGINS) num_vv = MAX_VV_ORIGINS;
   // Bounds-check: each VV entry is 8 bytes; truncate if frame is too short.
   while (num_vv > 0 && (size_t)(10 + (int)num_vv * 8) > len) num_vv--;
+  DLOG((uint32_t)(millis()/1000),
+       "SYNC END←peer[%d] hash=%02x%02x%02x%02x vv=%d",
+       pi,
+       (unsigned)room_hash[0], (unsigned)room_hash[1],
+       (unsigned)room_hash[2], (unsigned)room_hash[3],
+       (int)num_vv);
 
   // Find matching local room (fallback to first active room, same as handleSyncReq); skip room 0 (JES-846).
   int ri = -1;
@@ -4024,6 +4106,12 @@ void MultiRoomMesh::handleSyncDel(int pi, uint8_t* data, size_t len) {
   memcpy(room_hash,  &data[5],  4);
   memcpy(origin_id,  &data[9],  4);
   memcpy(&post_ts,   &data[13], 4);
+  DLOG(post_ts,
+       "SYNC DEL←peer[%d] orig=%02x%02x%02x%02x ts=%lu",
+       pi,
+       (unsigned)origin_id[0], (unsigned)origin_id[1],
+       (unsigned)origin_id[2], (unsigned)origin_id[3],
+       (unsigned long)post_ts);
 
   // Find matching local room
   int ri = -1;
@@ -4343,6 +4431,13 @@ void MultiRoomMesh::sendRoomSync(int pi) {
  */
 void MultiRoomMesh::handleRoomSync(int pi, uint8_t* data, size_t len) {
   // Minimum: ts[4] + flags[1] + room_idx[1] + prv[64] + pub[32] + NUL[1] = 103
+  DLOG((uint32_t)(millis()/1000),
+       "SYNC ROOM←peer[%d] len=%d pub=%02x%02x%02x%02x",
+       pi, (int)len,
+       len >= 103 ? (unsigned)data[70] : 0u,
+       len >= 103 ? (unsigned)data[71] : 0u,
+       len >= 103 ? (unsigned)data[72] : 0u,
+       len >= 103 ? (unsigned)data[73] : 0u);
   if (len < 103) {
     Serial.printf("[ROOMSYNC] ignored — frame too short (%u < 103)\n", (unsigned)len);
     return;
