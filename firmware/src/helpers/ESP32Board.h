@@ -161,14 +161,21 @@ class ESP32RTCClock : public mesh::RTCClock {
 public:
   ESP32RTCClock() { }
   void begin() {
-    esp_reset_reason_t reason = esp_reset_reason();
-    if (reason == ESP_RST_POWERON) {
-      // start with some date/time in the recent past
+    // Apply the floor epoch whenever the system clock is obviously wrong.
+    // Using a floor (not power-on-only) ensures that OTA updates from old
+    // firmware (which had a 2024 fallback) don't leave the clock 2 years in
+    // the past on reboot — esp_reset_reason() is ESP_RST_SW after OTA, so a
+    // power-on-only check would miss that case.
+    // 2026-01-01 00:00:00 UTC — same floor as WebManager::CLOCK_EPOCH_FLOOR
+    static const time_t FLOOR_EPOCH = 1767225600L;
+    time_t _now;
+    time(&_now);
+    if (_now < FLOOR_EPOCH) {
       struct timeval tv;
       tv.tv_sec = 1785542400;  // 2026-08-01 00:00:00 UTC
-    tv.tv_usec = 0;
-    settimeofday(&tv, NULL);
-  }
+      tv.tv_usec = 0;
+      settimeofday(&tv, NULL);
+    }
   }
   uint32_t getCurrentTime() override {
     time_t _now;
