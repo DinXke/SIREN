@@ -14,7 +14,7 @@ Welcome. This is the documentation index for SIREN. If you are completely new to
 |---|---|
 | [Introduction](introduction.md) | What SIREN is, what LoRa radio is, what MeshCore is — with plain-language analogies |
 | [System Overview](system-overview.md) | The complete system structure in diagrams: all hardware, software, and communication paths shown schematically |
-| [Hardware Guide](hardware.md) | The physical device (Heltec LoRa32 V3), antennas, and known constraints of the board units |
+| [Hardware Guide](hardware.md) | The physical devices (Heltec LoRa32 V3 and V4), antennas, and deployment units |
 
 ### Level 2 — Getting the System Running
 
@@ -52,7 +52,7 @@ Welcome. This is the documentation index for SIREN. If you are completely new to
 
 **Have a new Heltec device and want to get it running in 10 minutes?**
 
-1. Download `dist/SIREN_v3_room_server-full-flash.bin` from this repository.
+1. Download the full-flash binary for your hardware from this repository: `dist/heltec_v3/SIREN_v3_room_server-full-flash.bin` (V3) or `dist/heltec_v4/SIREN_v4_room_server-full-flash.bin` (V4).
 2. Open [espressif.github.io/esptool-js](https://espressif.github.io/esptool-js) in Chrome or Edge.
 3. Connect your Heltec via USB, flash at offset `0x0`.
 4. The device reboots, creates a WiFi hotspot named `SIREN-<name>`.
@@ -67,15 +67,19 @@ See [Getting Started](getting-started.md) for full step-by-step instructions.
 
 ```
 SIREN repo (branch: multiroom)
-├── firmware/                   # MeshCore-based firmware for Heltec LoRa32 V3
+├── firmware/                   # MeshCore-based firmware for Heltec LoRa32 V3 and V4
 │   └── examples/siren_room_server/   # SIREN-specific room server code
 ├── web-client/                 # Browser-based chat interfaces
 │   ├── siren-standalone.html   # Zero-dependency single-file client
 │   ├── frontend/               # React + TypeScript SPA
 │   └── server/                 # Python Flask bridge (serial/BLE → REST/WS)
-├── dist/                       # Pre-built firmware binaries
-│   ├── SIREN_v3_room_server.bin        # OTA update image
-│   └── SIREN_v3_room_server-full-flash.bin  # Initial flash image (offset 0x0)
+├── dist/
+│   ├── heltec_v3/
+│   │   ├── SIREN_v3_room_server.bin          # OTA update image (V3)
+│   │   └── SIREN_v3_room_server-full-flash.bin  # Initial flash image (V3, offset 0x0)
+│   └── heltec_v4/
+│       ├── SIREN_v4_room_server.bin          # OTA update image (V4)
+│       └── SIREN_v4_room_server-full-flash.bin  # Initial flash image (V4, offset 0x0)
 ├── docs/                       # This documentation
 └── scripts/                    # Helper scripts (key generation, MeshCore upgrade)
 ```

@@ -214,7 +214,7 @@ A message stored in a SIREN room. Contains: author identity, timestamp, and text
 The global array of `PostInfo` structures shared across all rooms (`_post_pool[128]`). Each entry's `room_idx` field identifies which room it belongs to.
 
 **PRG button**
-The "Program" button on the Heltec board (GPIO0). Press to wake the OLED from auto-off. Hold during boot to enter download mode (for USB flashing). May be glued down on some deployed units.
+The "Program" button on the Heltec board (GPIO0). Press to wake the OLED from auto-off. Hold during boot to enter download mode (for USB flashing).
 
 **Public key**
 The shareable half of an Ed25519 keypair. A room's public key is 32 bytes (64 hex characters). It serves as the room's address on the mesh. Included in the join URI/QR code.

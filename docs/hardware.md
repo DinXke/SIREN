@@ -27,7 +27,7 @@ SIREN firmware targets the **Heltec LoRa32 V3** (sometimes written as "Heltec Wi
 
 You do not need to wire anything for a standard SIREN room server installation. All connections are internal. The only external connections are:
 
-- **USB-C** — power and (on devices with working USB) serial console
+- **USB-C** — power and serial console
 - **SMA antenna port** — connect the LoRa antenna here (**required**, see warning below)
 - **Battery connector** — optional, for untethered operation
 
@@ -56,7 +56,6 @@ The Heltec V3's display is 0.96 inches measured diagonally — physically very s
 **Important display limitations:**
 
 - The display **turns off automatically after 20 seconds** of inactivity to save power. Press the PRG button (GPIO0) to wake it.
-- On hardware units where buttons are glued or unusable, the OLED will go dark after 20 seconds and cannot be woken. Use the web UI or radio observation to verify settings instead.
 - The text is small on this 0.96" screen; a close-up photo is useful for reading it.
 
 ---
@@ -65,22 +64,23 @@ The Heltec V3's display is 0.96 inches measured diagonally — physically very s
 
 There are currently two Heltec units in use:
 
-### Unit A — Development/New Unit (MAC: 9c:13:9e:a3:e4:c0)
+### Unit A — Heltec LoRa32 V3 (MAC: 9c:13:9e:a3:e4:c0)
 
+- Hardware: Heltec LoRa32 V3 (ESP32-S3FN8, SX1262)
 - USB-C port working normally
-- Can be flashed via USB serial (COM3 on the development machine, Silicon Labs CP210x)
-- Can also receive OTA updates over WiFi
-- Buttons accessible
+- Can be flashed via USB serial (COM3 on the development machine, Silicon Labs CP210x) or via OTA
+- Buttons accessible; OLED readable
+- Runs firmware environment `SIREN_v3_room_server`
 
-### Unit B — Board's "Glued" Unit (older, USB broken)
+### Unit B — Heltec LoRa32 V4
 
-- USB port non-functional (glued to enclosure)
-- **Serial console unavailable** — no command-line access via USB
-- OLED readable only briefly at boot (text too small to read easily, buttons glued shut = no wake)
-- **OTA over WiFi is the only way to update firmware** — a bad OTA image = unrecoverable brick
-- Must be tested with extreme care before sending any OTA update
+- Hardware: Heltec LoRa32 V4
+- USB-C port working normally
+- Can be flashed via USB serial or via OTA
+- Buttons accessible; OLED readable
+- Runs firmware environment `SIREN_v4_room_server`
 
-**Implication for Unit B**: All configuration must be done via the Web UI (port 80 on the AP IP address 192.168.4.1) or via CLI-over-mesh (sending commands from another SIREN node or the companion radio). Test every build on Unit A (serial available) before OTA-flashing Unit B.
+Both units are fully functional and can be updated via either USB serial or OTA. Configuration is available via USB serial CLI, CLI-over-mesh, or the Web UI.
 
 ---
 
