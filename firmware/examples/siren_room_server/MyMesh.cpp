@@ -1870,7 +1870,8 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  room export <idx>              Print private key hex [serial only]");
       Serial.println("  room import <idx> <hex128>     Import private key from another node [serial only]");
       Serial.println("  room set <idx> name <val>      Set room name");
-      Serial.println("  room set <idx> pass <val>      Set room password");
+      Serial.println("  room set <idx> pass <val>      Show password-change warning (step 1)");
+      Serial.println("  room set <idx> pass <val> confirm  Set room password (2-step confirm)");
       Serial.println("  room set <idx> guest <val>     Set guest access password");
       Serial.println("  room stealth <idx> on|off      Toggle room visibility");
       Serial.println("  room qr <idx>                  Print join URI");
@@ -2128,7 +2129,33 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
       triggerRoomSync(-1);  // JES-856: propagate name change to all peers
       strcpy(reply, "OK");
     } else if (memcmp(p, "pass ", 5) == 0) {
-      StrHelper::strncpy(rooms[idx].password, p + 5, sizeof(rooms[idx].password));
+      const char* val = p + 5;
+      // Two-step confirmation: require trailing " confirm" (or bare "confirm" for empty password).
+      // Serial CLI: run without confirm to see warning, then re-run with confirm.
+      // Web path: /api/room/set appends " confirm" after server-side name verification (JES-857).
+      size_t vlen = strlen(val);
+      bool has_confirm = (vlen == 7 && memcmp(val, "confirm", 7) == 0) ||
+                         (vlen > 7 && memcmp(val + vlen - 8, " confirm", 8) == 0);
+      if (!has_confirm) {
+        if (serial) {
+          Serial.printf("\n*** WAARSCHUWING: wachtwoord wijzigen room[%d] '%s' ***\n",
+                        idx, rooms[idx].name);
+          Serial.println("  Alle companions met het huidige wachtwoord verliezen toegang.");
+          Serial.println("  Dit kan niet ongedaan worden gemaakt.");
+          Serial.printf("  Voer uit ter bevestiging: room set %d pass %s confirm\n\n",
+                        idx, val);
+        }
+        strcpy(reply, "Aborted - bevestiging vereist (voeg 'confirm' toe aan het einde)");
+        return;
+      }
+      // Strip " confirm" / "confirm" suffix to extract actual password.
+      // bare "confirm" (vlen==7) → empty password (clear_pass path).
+      // "<val> confirm" (vlen>7) → strip trailing " confirm" (8 chars).
+      char pw[sizeof(rooms[idx].password)] = {};
+      size_t pw_len = (vlen >= 8) ? vlen - 8 : 0;
+      if (pw_len > sizeof(pw) - 1) pw_len = sizeof(pw) - 1;
+      memcpy(pw, val, pw_len);
+      StrHelper::strncpy(rooms[idx].password, pw, sizeof(rooms[idx].password));
       saveRoomConfig();
       strcpy(reply, "OK");
     } else if (memcmp(p, "guest ", 6) == 0) {
