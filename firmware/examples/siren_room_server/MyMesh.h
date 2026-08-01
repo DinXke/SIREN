@@ -91,9 +91,9 @@
 /* Phase 5: version-vector replication constants. */
 #define MAX_VV_ORIGINS  8    // per-room VV entries (one per known origin server)
 #define MAX_SYNC_POSTS  8    // SYNCDAT frames per SYNCREQ response (airtime guard)
-/* Periodic anti-entropy pull interval. 45 s (JES-840); boot delay is 45 s per peer. */
-#define PEER_SYNC_INTERVAL_MS   (45UL * 1000)
-#define PEER_SYNC_BOOT_DELAY_MS 45000UL
+/* Periodic anti-entropy pull interval. 3 min (JES-723 board verzoek); boot delay 60 s. */
+#define PEER_SYNC_INTERVAL_MS   (180UL * 1000)
+#define PEER_SYNC_BOOT_DELAY_MS 60000UL
 
 /* Server-to-server sync TXT sub-types (data[4] >> 2).
    Range 4-6 is free above the existing SIGNED_PLAIN=2, CLI_DATA=1, PLAIN=0. */
