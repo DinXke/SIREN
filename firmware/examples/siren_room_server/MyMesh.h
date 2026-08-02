@@ -232,6 +232,9 @@ struct NeighbourInfo {
   uint32_t heard_timestamp;
   int8_t   snr;        // multiplied by 4; divide by 4.0 to get dB float
   uint8_t  node_type;  // ADV_TYPE_* from discover RESP (0 = unknown)
+  bool     has_loc;    // JES-868: advert carried a lat/lon (ADV_LATLON_MASK)
+  int32_t  lat;        // JES-868: latitude  * 1E6 (valid only when has_loc)
+  int32_t  lon;        // JES-868: longitude * 1E6 (valid only when has_loc)
 };
 
 /**
@@ -340,7 +343,8 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   RateLimiter     _discover_limiter;
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr,
-                    uint8_t node_type = 0);
+                    uint8_t node_type = 0, bool has_loc = false,
+                    int32_t lat = 0, int32_t lon = 0);
   void sendNodeDiscoverReq();
 
   /* ---- RX live-view ring (JES-868) ----

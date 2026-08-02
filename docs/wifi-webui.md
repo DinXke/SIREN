@@ -145,14 +145,15 @@ The RX ring keeps the last 32 packets in RAM (reset on reboot); `total` in the J
 On the **Netwerk** page, the **Buren (neighbours)** card shows the direct-hop mesh neighbours this node knows about and lets you probe for more:
 
 - **Discover nu versturen**: sends a zero-hop discovery request. Nearby repeaters and room servers answer within ~60 s and appear in the table. Like the advert button, this only queues the request — the actual radio transmit runs on the mesh task, never on the web task (cf JES-864). Responses are rate-limited (max 4 per 2 minutes) to protect airtime.
-- The table lists each neighbour's 4-byte pubkey prefix (`Hex`), advertised `Naam` (falls back to hex), last `SNR`, seconds since last `Gehoord`, and `Type` (Repeater / Room server / ?). It refreshes every 5 s from `/api/neighbors`.
+- The table lists each neighbour's 4-byte pubkey prefix (`Hex`), advertised `Naam` (falls back to hex), last `SNR`, seconds since last `Gehoord`, `Type` (Repeater / Room server / ?), and `Locatie`. It refreshes every 5 s from `/api/neighbors`.
+- **Locatie** (JES-868): if a neighbour's advert carried coordinates (`ADV_LATLON_MASK`), the decoded `lat, lon` is shown as a link that opens OpenStreetMap centred on that node; otherwise a dash (`–`). The last known location is retained even if a later advert from the same node omits it.
 
 Neighbours are also learned passively from every zero-hop advert received, so the list fills over time even without an explicit discover.
 
 | Route | Method | Purpose |
 |---|---|---|
 | `/api/discover` | POST | Queue a zero-hop neighbour-discovery request |
-| `/api/neighbors` | GET | JSON neighbour list (`hex`, `name`, `snr_db`, `ago_s`, `type`) |
+| `/api/neighbors` | GET | JSON neighbour list (`hex`, `name`, `snr_db`, `ago_s`, `type`, and `lat`/`lon` when the advert carried a location) |
 
 Only 4-byte pubkey prefixes are exposed — never private keys. Equivalent CLI commands: `neighbors`, `discover.neighbors`, `neighbor.remove <hex>`.
 

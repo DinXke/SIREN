@@ -3178,15 +3178,20 @@ const uint8_t* MultiRoomMesh::getNotifyTarget(int room_idx, int i) const {
 void MultiRoomMesh::onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id,
                                   uint32_t ts,
                                   const uint8_t* app_data, size_t app_data_len) {
-  // Track direct-hop nodes (zero path hops) as neighbours (JES-869).
-  if (pkt && pkt->getPathHashCount() == 0) {
-    AdvertDataParser ap2(app_data, (uint8_t)app_data_len);
-    if (ap2.isValid()) {
+  AdvertDataParser parser(app_data, (uint8_t)app_data_len);
+
+  // Track direct-hop nodes (zero path hops) as neighbours (JES-869), recording
+  // the advertised location if present (JES-868) so the web neighbour view can
+  // show where each node is.
+  if (pkt && pkt->getPathHashCount() == 0 && parser.isValid()) {
+    if (parser.hasLatLon()) {
+      putNeighbour(id, ts, pkt->getSNR(), 0, true,
+                   parser.getIntLat(), parser.getIntLon());
+    } else {
       putNeighbour(id, ts, pkt->getSNR());
     }
   }
 
-  AdvertDataParser parser(app_data, (uint8_t)app_data_len);
   if (!parser.isValid() || !parser.hasName()) return;
   const char* adv_name = parser.getName();
   if (!adv_name || adv_name[0] == 0) return;
@@ -3249,25 +3254,34 @@ const char* MultiRoomMesh::resolveName(const uint8_t* pubkey) {
 #define CTL_TYPE_NODE_DISCOVER_RESP 0x90
 
 void MultiRoomMesh::putNeighbour(const mesh::Identity& id, uint32_t timestamp,
-                                 float snr, uint8_t node_type) {
+                                 float snr, uint8_t node_type,
+                                 bool has_loc, int32_t lat, int32_t lon) {
 #if MAX_NEIGHBOURS
   // Find existing neighbour, else evict the least-recently-heard slot.
   uint32_t oldest_ts = 0xFFFFFFFF;
   NeighbourInfo* slot = &_neighbours[0];
+  bool found = false;
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
-    if (id.matches(_neighbours[i].id)) { slot = &_neighbours[i]; break; }
+    if (id.matches(_neighbours[i].id)) { slot = &_neighbours[i]; found = true; break; }
     if (_neighbours[i].heard_timestamp < oldest_ts) {
       oldest_ts = _neighbours[i].heard_timestamp;
       slot = &_neighbours[i];
     }
   }
+  if (!found) { slot->has_loc = false; slot->lat = 0; slot->lon = 0; }
   slot->id = id;
   slot->advert_timestamp = timestamp;
   slot->heard_timestamp = getRTCClock()->getCurrentTime();
   slot->snr = (int8_t)(snr * 4);
   if (node_type) slot->node_type = node_type;  // keep prior type if unknown (0)
+  if (has_loc) {  // JES-868: keep last known location if this advert carried none
+    slot->has_loc = true;
+    slot->lat = lat;
+    slot->lon = lon;
+  }
 #else
   (void)id; (void)timestamp; (void)snr; (void)node_type;
+  (void)has_loc; (void)lat; (void)lon;
 #endif
 }
 

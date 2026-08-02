@@ -1893,21 +1893,26 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
             "CLI: <code>discover.neighbors</code> / <code>neighbors</code></p>"
             "<table id='nbt' style='width:100%;border-collapse:collapse;font-size:0.88em'>"
             "<thead><tr style='text-align:left;color:#aaa'>"
-            "<th>Hex</th><th>Naam</th><th>SNR</th><th>Gehoord</th><th>Type</th></tr></thead>"
-            "<tbody id='nbb'><tr><td colspan='5' style='color:#aaa'>laden&hellip;</td></tr></tbody>"
+            "<th>Hex</th><th>Naam</th><th>SNR</th><th>Gehoord</th><th>Type</th><th>Locatie</th></tr></thead>"
+            "<tbody id='nbb'><tr><td colspan='6' style='color:#aaa'>laden&hellip;</td></tr></tbody>"
             "</table>"
             "<script>(function(){"
             "function tn(t){return t==2?'Repeater':(t==3?'Room server':'?');}"
             "function ld(){fetch('/api/neighbors').then(function(r){return r.json();})"
             ".then(function(a){var b=document.getElementById('nbb');b.innerHTML='';"
-            "if(!a.length){var r=b.insertRow();var c=r.insertCell();c.colSpan=5;"
+            "if(!a.length){var r=b.insertRow();var c=r.insertCell();c.colSpan=6;"
             "c.style.color='#aaa';c.textContent='geen buren bekend';return;}"
             "a.forEach(function(n){var r=b.insertRow();"
             "r.insertCell().textContent=n.hex;"
             "r.insertCell().textContent=n.name;"
             "r.insertCell().textContent=n.snr_db+' dB';"
             "r.insertCell().textContent=n.ago_s+' s';"
-            "r.insertCell().textContent=tn(n.type);});})"
+            "r.insertCell().textContent=tn(n.type);"
+            "var lc=r.insertCell();"
+            "if(n.lat!==undefined){var a2=document.createElement('a');"
+            "a2.href='https://www.openstreetmap.org/?mlat='+n.lat+'&mlon='+n.lon+'#map=15/'+n.lat+'/'+n.lon;"
+            "a2.target='_blank';a2.rel='noopener';a2.textContent=n.lat.toFixed(5)+', '+n.lon.toFixed(5);"
+            "lc.appendChild(a2);}else{lc.textContent='\\u2013';}});})"
             ".catch(function(){});}"
             "ld();setInterval(ld,5000);})();</script>"
             "</div>";
@@ -3292,6 +3297,10 @@ void WebManager::setupRoutes() {
       j += ",\"snr_db\":";    j += String(nb->snr / 4.0f, 1);
       j += ",\"ago_s\":";     j += (unsigned long)ago;
       j += ",\"type\":";      j += (int)nb->node_type;
+      if (nb->has_loc) {  // JES-868: advertised location, if any
+        j += ",\"lat\":";     j += String(nb->lat / 1000000.0, 6);
+        j += ",\"lon\":";     j += String(nb->lon / 1000000.0, 6);
+      }
       j += "}";
     }
     j += "]";
