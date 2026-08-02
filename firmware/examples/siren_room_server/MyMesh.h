@@ -37,6 +37,15 @@
 #ifndef FIRMWARE_VERSION
   #define FIRMWARE_VERSION     "v1.9.0"
 #endif
+#ifndef FIRMWARE_NAME
+  #define FIRMWARE_NAME        "SIREN by DinX"
+#endif
+// Human-facing version string, e.g. "SIREN by DinX v1.10.0".
+// NOTE: FIRMWARE_VERSION stays a bare semver so the OTA version compare
+// (OtaManager, version.json) keeps matching — only the display is branded.
+#ifndef FIRMWARE_DISPLAY_VERSION
+  #define FIRMWARE_DISPLAY_VERSION  FIRMWARE_NAME " " FIRMWARE_VERSION
+#endif
 #ifndef LORA_FREQ
   #define LORA_FREQ            869.618
 #endif
@@ -537,7 +546,7 @@ public:
 #endif
 
   /* ---- CommonCLICallbacks ---- */
-  const char*          getFirmwareVer()  override { return FIRMWARE_VERSION; }
+  const char*          getFirmwareVer()  override { return FIRMWARE_DISPLAY_VERSION; }
   const char*          getBuildDate()    override { return FIRMWARE_BUILD_DATE; }
   const char*          getRole()         override { return FIRMWARE_ROLE; }
   const char*          getNodeName()              { return _prefs.node_name; }

@@ -394,6 +394,8 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 #### View this node's firmware version
 **Usage:** `ver`
 
+Returns the branded firmware name and version, e.g. `SIREN by DinX v1.10.0 (Build: 2026-08-02)`. This is the same string the MeshCore app shows for a Version request.
+
 ---
 
 #### View this node's configured role

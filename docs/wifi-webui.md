@@ -72,9 +72,12 @@ The web management interface has a **WiFi Settings** page where you can switch m
 
 Shows:
 - Node name and current status
+- Firmware version — displayed with the product branding, e.g. `SIREN by DinX v1.10.0`
 - Number of active rooms
 - Current WiFi mode and IP address
 - Uptime
+
+> The branded name (`SIREN by DinX <version>`) is shown consistently everywhere the version appears: the web dashboard, the OTA update card, and the `ver` command / Version request over the MeshCore app. The bare semantic version (`v1.10.0`) is still used internally for OTA update comparison against `dist/version.json`.
 
 ### Rooms
 

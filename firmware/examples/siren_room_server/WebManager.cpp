@@ -1241,7 +1241,7 @@ void WebManager::buildStatusPageStream(AsyncResponseStream& out, const char* ip)
   // Node summary card
   page += "<div class='card'>";
   page += "<table>";
-  page += "<tr><th>Firmware</th><td>" FIRMWARE_VERSION "</td></tr>";
+  page += "<tr><th>Firmware</th><td>" FIRMWARE_DISPLAY_VERSION "</td></tr>";
   page += "<tr><th>Build</th><td>" FIRMWARE_BUILD_DATE "</td></tr>";
   page += "<tr><th>WiFi</th><td>"; page += (mode == MODE_AP ? "AP (hotspot)" : "STA (client)");
   page += "</td></tr><tr><th>IP</th><td>"; page += ip;

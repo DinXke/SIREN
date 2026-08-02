@@ -352,7 +352,7 @@ bool OtaManager::startUpdate() {
 
 String OtaManager::buildWebSection() const {
   String s = "<div class='card'><h2>Firmware Update</h2>";
-  s += "<p>Huidige versie: <strong>" FIRMWARE_VERSION "</strong>"
+  s += "<p>Huidige versie: <strong>" FIRMWARE_DISPLAY_VERSION "</strong>"
        " &nbsp; Doel: <strong>" SIREN_HARDWARE_TARGET "</strong></p>";
 
   switch (_state) {

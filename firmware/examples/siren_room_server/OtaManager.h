@@ -24,6 +24,14 @@
 #ifndef FIRMWARE_VERSION
   #define FIRMWARE_VERSION "unknown"
 #endif
+#ifndef FIRMWARE_NAME
+  #define FIRMWARE_NAME "SIREN by DinX"
+#endif
+// Branded display version, e.g. "SIREN by DinX v1.10.0" (FIRMWARE_VERSION
+// stays bare semver for the OTA version compare against version.json).
+#ifndef FIRMWARE_DISPLAY_VERSION
+  #define FIRMWARE_DISPLAY_VERSION FIRMWARE_NAME " " FIRMWARE_VERSION
+#endif
 
 // FreeRTOS task stack for HTTPS download (TLS needs ~40 KB heap, not stack)
 #define OTA_TASK_STACK  8192
