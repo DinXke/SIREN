@@ -993,6 +993,14 @@ String WebManager::buildStatsJson() {
   j += ",\"total_contacts\":"; j += (int)mesh.getTotalContacts();
   j += ",\"num_rooms\":";    j += mesh.getNumActiveRooms();
 
+  // Heap telemetry (JES-876) — lets the board diagnose the "slower and slower" /
+  // reboot-at-/network symptoms without serial access. free_heap trending down
+  // over time = leak; max_alloc_heap (largest contiguous block) far below
+  // free_heap = fragmentation (the cause of the /network cbuf bad_alloc reboot).
+  j += ",\"free_heap\":";     j += (unsigned long)ESP.getFreeHeap();
+  j += ",\"min_free_heap\":"; j += (unsigned long)ESP.getMinFreeHeap();
+  j += ",\"max_alloc_heap\":"; j += (unsigned long)ESP.getMaxAllocHeap();
+
   // Histogram (newest bucket = index 0)
   j += ",\"hist\":[";
   for (int b = 0; b < HIST_BUCKETS; b++) {
@@ -1084,6 +1092,34 @@ String WebManager::buildStatsPage() {
   page += "</td></tr><tr><th>Totaal berichten</th><td>"; page += (unsigned long)mesh.getTotalPosts();
   page += "</td></tr><tr><th>Totaal contacts</th><td>"; page += (int)mesh.getTotalContacts();
   page += "</td></tr></table></div>";
+
+  // Heap (geheugen) card — live diagnose voor JES-876 zonder seriële toegang.
+  // Ververst elke 5s via /api/stats zodat het bestuur de trend kan volgen:
+  //  - vrij geheugen daalt gestaag  -> geheugenlek ("trager en trager")
+  //  - grootste blok << vrij        -> fragmentatie (reboot bij /netwerk)
+  page += "<div class='card'><h3>&#129504; Geheugen (heap)</h3>"
+          "<table>"
+          "<tr><th>Vrij nu</th><td><span id='hp-free'>";
+  page += (unsigned long)ESP.getFreeHeap();
+  page += "</span> bytes</td></tr>"
+          "<tr><th>Laagste ooit</th><td><span id='hp-min'>";
+  page += (unsigned long)ESP.getMinFreeHeap();
+  page += "</span> bytes</td></tr>"
+          "<tr><th>Grootste blok</th><td><span id='hp-blk'>";
+  page += (unsigned long)ESP.getMaxAllocHeap();
+  page += "</span> bytes</td></tr></table>"
+          "<p style='font-size:0.8em;color:#aaa'>Vrij nu daalt gestaag = mogelijk "
+          "geheugenlek. Grootste blok veel kleiner dan vrij = fragmentatie "
+          "(oorzaak van reboot bij /netwerk). Laat deze pagina open om de trend "
+          "te volgen.</p>"
+          "<script>setInterval(function(){"
+          "fetch('/api/stats',{credentials:'include'}).then(function(r){return r.json();})"
+          ".then(function(s){"
+          "document.getElementById('hp-free').textContent=s.free_heap;"
+          "document.getElementById('hp-min').textContent=s.min_free_heap;"
+          "document.getElementById('hp-blk').textContent=s.max_alloc_heap;"
+          "}).catch(function(){});"
+          "},5000);</script></div>";
 
   // Per-room tables — lock rooms[] against concurrent ROOMSYNC writes (JES-865).
   if (!mesh.lockRooms(50)) {

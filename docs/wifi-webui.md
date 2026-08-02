@@ -295,6 +295,29 @@ and the two can exhaust heap and stall the flash partway.
   3. Optionally `mqtt disable` via CLI/serial to guarantee the TLS heap is free.
   4. Trigger the update immediately: CLI `ota update` or web **Nu bijwerken**.
 
+### Diagnosing "slower and slower" / reboot at `/network` — heap card (v1.10.5+)
+
+The board's unit has no serial access, so heap health is exposed in the browser
+instead. Open **Statistieken** (`/stats`) — the **Geheugen (heap)** card shows three
+live values (auto-refreshing every 5 s via `/api/stats`):
+
+- **Vrij nu** (`free_heap`) — free bytes right now.
+- **Laagste ooit** (`min_free_heap`) — lowest free level since boot.
+- **Grootste blok** (`max_alloc_heap`) — largest single contiguous block that can
+  still be allocated.
+
+How to read it:
+
+- **Vrij nu drops steadily** while the node runs (especially after loading pages) →
+  a **memory leak** — this is the "web UI gets slower and slower" symptom.
+- **Grootste blok much smaller than Vrij nu** → **fragmentation** — plenty of total
+  free heap but no single block large enough for the `/network` page buffer, which is
+  what triggers the `std::bad_alloc` reboot at `/network`.
+
+Leave the page open for a minute or two and note the trend; that tells us whether the
+next fix should target a leak or the contiguous-buffer allocation. The same three
+values are in the `/api/stats` JSON (`free_heap`, `min_free_heap`, `max_alloc_heap`).
+
 ---
 
 ## WiFi Configuration File

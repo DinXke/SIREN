@@ -1,10 +1,10 @@
 {
-  "version": "v1.10.4",
+  "version": "v1.10.5",
   "date": "2026-08-02",
   "v3": {
-    "sha256": "d17f845f4aaf80f77ab6df01357f6e93f80f038bdcbb3e0a694da37fa2e6cba3"
+    "sha256": "8ca0ce5f5796affddcd6b8691ce1f1e8ffde1102bab7fc57850f0d9f79e23039"
   },
   "v4": {
-    "sha256": "3bca0253d8c8118127f732f4915482c2e40ed36f38c25d777f551f4ee0f3bd28"
+    "sha256": "dd98aacaf60c8ebedd0bf1404a9acc7c5fad0b34eca1044c9ab6a07c72f8c2e0"
   }
 }
