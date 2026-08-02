@@ -39,6 +39,23 @@ A **version vector** is a compact data structure that says: "For each room I kno
 
 When two nodes compare version vectors, they can determine exactly which posts each is missing from the other — without listing every individual post.
 
+### Origin identity (why the per-node key matters)
+
+Within each room, the version vector is keyed by **origin server**, not just by
+room. Every post carries a 4-byte `origin_id` identifying the room-server that
+first accepted it, and the vector tracks the highest timestamp seen *per origin*.
+
+The `origin_id` **must be the node's own identity** (`rooms[0]`), never the
+shared room key. Coupled nodes deliberately share the same room key so their
+rooms replicate to each other — so the room key is *not* unique per node. If
+posts were stamped with the room key, both nodes would author under an
+identical origin, and the per-origin high-watermark would collapse: once a
+node's watermark for that shared origin advanced, it could never pull older
+posts the peer had authored under the same origin. Operator (`[OP]`) posts were
+especially affected, since each node produces them independently. Stamping with
+the per-node identity keeps every room-server a distinct origin, which is what
+the version-vector model requires (JES-874).
+
 ---
 
 ## Visual Overview

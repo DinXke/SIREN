@@ -1060,8 +1060,15 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   StrHelper::strncpy(free_slot->text, text, MAX_POST_TEXT_LEN);
   free_slot->post_timestamp = getRTCClock()->getCurrentTimeUnique();
   free_slot->room_idx       = ridx;
-  // Phase 5: tag with this room-server as origin
-  memcpy(free_slot->origin_id, slot.id.pub_key, 4);
+  // Phase 5: tag with this room-server as origin.
+  // JES-874: origin MUST be the NODE identity (rooms[0]), not the room key.
+  // Coupled nodes share the same room key, so using slot.id here made both
+  // nodes stamp posts with an identical origin_id. The anti-entropy VV is a
+  // per-origin high-watermark, so a node whose watermark had advanced could
+  // never pull older posts the peer authored under that same shared origin
+  // (e.g. operator/[OP] posts). Using the per-node identity makes each
+  // room-server a distinct origin, which is what the VV model requires.
+  memcpy(free_slot->origin_id, rooms[0].id.pub_key, 4);
 
   DLOG(free_slot->post_timestamp,
        "RX post room=%d auth=%02x%02x%02x%02x ts=%lu txt=%.30s",
