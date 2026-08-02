@@ -131,9 +131,7 @@ public:
    * Handle "ota ..." CLI commands (check / update / status).
    * Returns true if the command was consumed.
    */
-  bool handleOtaCommand(const char* args, char* reply) {
-    return _ota_mgr.handleCommand(args, reply);
-  }
+  bool handleOtaCommand(const char* args, char* reply);
 };
 
 #endif // ESP32

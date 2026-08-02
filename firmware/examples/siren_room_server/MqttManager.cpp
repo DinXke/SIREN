@@ -10,7 +10,8 @@
 /* ------------------------------------------------------------------ */
 MqttManager::MqttManager(MultiRoomMesh& mesh)
   : _mesh(mesh), _mqtt(_wifi_client),
-    _started(false), _last_connect_attempt(0), _last_vv_publish(0)
+    _started(false), _last_connect_attempt(0), _last_vv_publish(0),
+    _ota_suspend(false)
 {
   memset(&_cfg, 0, sizeof(_cfg));
   _cfg.enable          = false;
@@ -424,8 +425,29 @@ void MqttManager::begin() {
   }
 }
 
+void MqttManager::setOtaSuspend(bool s) {
+  _ota_suspend = s;
+  if (s) {
+    // Drop the broker connection now so WiFiClientSecure frees its TLS heap
+    // (~40 KB) before the OTA HTTPS download opens its own TLS context.
+    if (_mqtt.connected()) _mqtt.disconnect();
+    _wifi_client.stop();
+    Serial.println("[MQTT] Suspended for OTA (TLS freed)");
+  } else {
+    _last_connect_attempt = 0;  // reconnect promptly once OTA is done/aborted
+    Serial.println("[MQTT] Resumed after OTA");
+  }
+}
+
 void MqttManager::loop() {
   if (!_cfg.enable) return;
+
+  // JES-876: while an OTA download is in progress the broker stays disconnected
+  // so its TLS heap is available to the OTA HTTPS client.
+  if (_ota_suspend) {
+    if (_mqtt.connected()) _mqtt.disconnect();
+    return;
+  }
 
   // Guard: skip MQTT entirely when WiFi is not up (JES-864).
   // connectBroker() makes a blocking TLS call that can hang the loop for

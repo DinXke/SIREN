@@ -515,9 +515,13 @@ static String base64Encode(const uint8_t* data, size_t len) {
 
 // ---------------------------------------------------------------------------
 //  PrintSink — forwards String-like += calls to an AsyncResponseStream.
-//  Avoids allocating a single large contiguous heap block for the full page.
-//  AsyncResponseStream internally uses a linked list of 1460-byte chunks,
-//  so even a 40KB+ page never needs more than ~2KB of contiguous heap. (JES-854)
+//  It avoids building the page in one giant String, but note (JES-864/JES-876):
+//  AsyncResponseStream still buffers the WHOLE response in a single growing
+//  contiguous cbuf (it calls cbuf::resizeAdd — a realloc+copy — not a linked
+//  chunk list). Under heap fragmentation that resize can throw std::bad_alloc
+//  and reboot the node (seen on /network). The real fix is a true chunked
+//  response (beginChunkedResponse) generated incrementally; until then large
+//  pages are guarded by an ESP.getMaxAllocHeap() check before they are built.
 // ---------------------------------------------------------------------------
 struct PrintSink {
   Print& _p;
@@ -3623,7 +3627,12 @@ void WebManager::setupRoutes() {
     [this, user, pass](AsyncWebServerRequest* req) {
       if (!req->authenticate(user, pass)) return req->requestAuthentication();
       if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+      // JES-876: free the MQTT TLS heap (~40 KB) BEFORE the OTA HTTPS download
+      // opens its own TLS context, so the two do not exhaust heap and stall the
+      // flash partway on the no-PSRAM ESP32.
+      if (_mqtt_mgr && _mqtt_mgr->isEnabled()) _mqtt_mgr->setOtaSuspend(true);
       if (!_ota_mgr.startUpdate()) {
+        if (_mqtt_mgr) _mqtt_mgr->setOtaSuspend(false);  // nothing to do — resume MQTT
         req->send(400, "text/plain",
           "Geen update beschikbaar — voer eerst 'Controleer op update' uit");
         return;
@@ -3695,6 +3704,21 @@ void WebManager::setupRoutes() {
 }
 
 // ---------------------------------------------------------------------------
+//  OTA CLI ("ota check|update|status") — mirrors the web route (JES-876)
+// ---------------------------------------------------------------------------
+bool WebManager::handleOtaCommand(const char* args, char* reply) {
+  const char* a = args;
+  while (*a == ' ') a++;
+  // Free the MQTT TLS heap before an OTA download starts (see /api/ota/update).
+  if (_mqtt_mgr && _mqtt_mgr->isEnabled() &&
+      strncmp(a, "update", 6) == 0 &&
+      _ota_mgr.getState() == OtaState::UPDATE_AVAILABLE) {
+    _mqtt_mgr->setOtaSuspend(true);
+  }
+  return _ota_mgr.handleCommand(args, reply);
+}
+
+// ---------------------------------------------------------------------------
 //  Public API
 // ---------------------------------------------------------------------------
 void WebManager::begin() {
@@ -3738,6 +3762,16 @@ void WebManager::begin() {
 
 void WebManager::loop() {
   AsyncElegantOTA.loop();
+
+  // JES-876: if an OTA download was suspended MQTT but then failed (ERROR) or
+  // never started (IDLE/UP_TO_DATE), resume MQTT. On DONE the node reboots.
+  if (_mqtt_mgr && _mqtt_mgr->isOtaSuspended()) {
+    OtaState st = _ota_mgr.getState();
+    if (st == OtaState::ERROR || st == OtaState::IDLE ||
+        st == OtaState::UP_TO_DATE || st == OtaState::UPDATE_AVAILABLE) {
+      _mqtt_mgr->setOtaSuspend(false);
+    }
+  }
 
   if (_dns_started) {
     _dns.processNextRequest();

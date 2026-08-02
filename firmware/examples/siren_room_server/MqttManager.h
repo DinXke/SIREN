@@ -80,6 +80,7 @@ private:
   unsigned long     _last_connect_attempt;
   unsigned long     _last_vv_publish;
   char              _last_error[64];
+  volatile bool     _ota_suspend;   // JES-876: while true, drop TLS + skip reconnect (frees ~40KB for OTA)
 
   static const uint32_t RECONNECT_INTERVAL_MS = 30000UL;
 
@@ -120,6 +121,16 @@ public:
 
   bool isEnabled()   const { return _cfg.enable; }
   bool isConnected()       { return _mqtt.connected(); }
+
+  /**
+   * JES-876: suspend/resume MQTT during an OTA download. When suspended, the
+   * broker connection is dropped (freeing the ~40 KB WiFiClientSecure TLS heap)
+   * and loop() will not reconnect. This prevents two concurrent TLS contexts
+   * (MQTT + OTA HTTPS download) from exhausting heap on the no-PSRAM ESP32,
+   * which otherwise stalls the OTA flash partway ("hangs at X%").
+   */
+  void setOtaSuspend(bool s);
+  bool isOtaSuspended() const { return _ota_suspend; }
   const Config& getConfig() const { return _cfg; }
   const char*   getLastError() const { return _last_error; }
 

@@ -268,9 +268,32 @@ After a successful restore, the device reboots automatically to apply all settin
 5. Wait approximately 30 seconds. The device reboots into the new firmware.
 6. Reconnect to the web UI and verify the firmware version shown matches what you uploaded.
 
-### Self-Update from GitHub (JES-774, planned)
+### Self-Update from GitHub (JES-774)
 
-A future firmware version will allow the device to fetch the latest firmware directly from GitHub and update itself, without manually downloading the file. This feature is in development.
+The device can fetch the latest firmware directly from GitHub and flash itself:
+
+1. Web UI → **System → Firmware Update** → **Controleer op update** (or CLI `ota check`).
+2. If a newer version is available, click **Nu bijwerken** (or CLI `ota update`).
+3. The image is downloaded over HTTPS, SHA-256 verified against `dist/version.json`,
+   flashed to the inactive OTA partition, then the node reboots. Channels, keys and
+   settings (SPIFFS/NVS) are preserved.
+
+### OTA hangs partway ("loopt vast na x %") — heap contention (JES-876)
+
+The HTTPS download needs ~40 KB of contiguous heap for its TLS context. On the
+no-PSRAM ESP32, if MQTT is also connected it holds a *second* ~40 KB TLS context,
+and the two can exhaust heap and stall the flash partway.
+
+- **Automatic mitigation (v1.10.4+):** starting an OTA update now automatically
+  suspends MQTT (drops its broker connection and frees the TLS heap) for the
+  duration of the download. MQTT reconnects automatically if the update fails; on
+  success the node reboots. This applies to both the web button and CLI `ota update`.
+- **If an OTA still stalls** (e.g. heap already fragmented by heavy web-UI use):
+  1. Reboot the node (fresh boot = maximum free, least-fragmented heap).
+  2. Do **not** open the `/network` page before flashing (it allocates a large
+     contiguous buffer that fragments the heap).
+  3. Optionally `mqtt disable` via CLI/serial to guarantee the TLS heap is free.
+  4. Trigger the update immediately: CLI `ota update` or web **Nu bijwerken**.
 
 ---
 
