@@ -1851,6 +1851,9 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
         page += "<form method='post' action='/api/peer/sync'>"
                 "<input type='hidden' name='idx' value='"; page += i;
         page += "'><button type='submit'>Sync</button></form>";
+        page += "<form method='post' action='/api/peer/fullsync'>"
+                "<input type='hidden' name='idx' value='"; page += i;
+        page += "'><button type='submit' title='Volledige resync: haalt ook oude/gemiste berichten op'>Full</button></form>";
         page += "<form method='post' action='/api/peer/roomsync'>"
                 "<input type='hidden' name='idx' value='"; page += i;
         page += "'><button type='submit'>Rooms</button></form>";
@@ -1869,10 +1872,14 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
             "<button type='submit'>Toevoegen</button></form>";
     page += "<form method='post' action='/api/peer/sync' style='margin-top:8px'>"
             "<button type='submit'>Sync All Nu</button></form>"
+            "<form method='post' action='/api/peer/fullsync' style='margin-top:4px'>"
+            "<button type='submit'>Volledige sync (haal oude/gemiste berichten op)</button></form>"
             "<form method='post' action='/api/peer/roomsync' style='margin-top:4px'>"
             "<button type='submit'>Rooms Sync (stuur rooms naar peers)</button></form>"
-            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>CLI: "
-            "<code>peer add &lt;hex64&gt; &lt;naam&gt;</code></p></div>";
+            "<p style='font-size:0.82em;color:#aaa;margin-top:8px'>Gebruik "
+            "<b>Volledige sync</b> op beide nodes om berichten van v&oacute;&oacute;r een upgrade "
+            "alsnog te repliceren. CLI: <code>peer add &lt;hex64&gt; &lt;naam&gt;</code> / "
+            "<code>peer fullsync</code></p></div>";
 
     // Manual flood advert + RX live-view (JES-868). Kept compact to limit /network heap use.
     page += "<div class='card'><h2>Advert &amp; Verkeer</h2>"
@@ -3289,6 +3296,20 @@ void WebManager::setupRoutes() {
       idx = req->getParam("idx", true)->value().toInt();
     }
     _mesh.triggerPeerSync(idx);
+    req->redirect("/network");
+  });
+
+  // POST /api/peer/fullsync (body: idx=<n> optional — omit for all peers) (JES-874)
+  // Full anti-entropy resync: advertises an empty version vector so the peer resends
+  // every post; dedup by (origin_id,ts) fills gaps. Recovers pre-upgrade posts stranded
+  // under the old shared room-key origin. Sets a pending flag; loop() performs the TX.
+  _server.on("/api/peer/fullsync", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    int idx = -1;  // -1 = all peers
+    if (req->hasParam("idx", true) && req->getParam("idx", true)->value().length() > 0) {
+      idx = req->getParam("idx", true)->value().toInt();
+    }
+    _mesh.triggerFullSync(idx);
     req->redirect("/network");
   });
 

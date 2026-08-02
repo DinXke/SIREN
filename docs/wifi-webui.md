@@ -115,9 +115,10 @@ Shows and allows editing:
 Couples this node with another SIREN node so their rooms replicate. All routes are behind admin basic-auth.
 
 - **Eigen node pubkey**: the 64-hex public key of this node. Give it to the operator of the other node so they can add you as a peer.
-- **Peers table**: name, pubkey prefix, and last-contact for each configured peer, with per-peer **Sync** and **Del** buttons.
+- **Peers table**: name, pubkey prefix, and last-contact for each configured peer, with per-peer **Sync**, **Full**, and **Del** buttons.
 - **Peer toevoegen**: paste the other node's full 64-hex pubkey + an optional name. Input is validated (exactly 64 hex chars) and rejected on duplicate or when the peer list is full.
-- **Sync All Nu**: force an immediate sync round to every peer.
+- **Sync All Nu**: force an immediate incremental sync round to every peer.
+- **Volledige sync** (per-peer **Full**): force a *full* resync that resends every post so messages from **before** a firmware upgrade replicate again. Normal incremental sync can leave those older posts stranded (stuck per-origin watermark); duplicates are dropped by dedup. Run it on **both** coupled nodes (JES-874).
 
 | Route | Method | Purpose |
 |---|---|---|
@@ -125,8 +126,9 @@ Couples this node with another SIREN node so their rooms replicate. All routes a
 | `/api/peer/add` | POST | `pub=<64hex>&name=<name>` |
 | `/api/peer/del` | POST | `idx=<n>` |
 | `/api/peer/sync` | POST | `idx=<n>` (omit for all peers) |
+| `/api/peer/fullsync` | POST | `idx=<n>` (omit for all peers) — full resync, empty VV |
 
-Two nodes only sync a given room when **both** hold a room with the **same key** (matched by `room_hash`). Coupling nodes ≠ coupling individual rooms — see [replication-protocol.md](replication-protocol.md#coupling-nodes-in-practice). Equivalent serial CLI: `peer add <hex64> <name>`, `peer del <idx>`, `peer list`, `peer sync`.
+Two nodes only sync a given room when **both** hold a room with the **same key** (matched by `room_hash`). Coupling nodes ≠ coupling individual rooms — see [replication-protocol.md](replication-protocol.md#coupling-nodes-in-practice). Equivalent serial CLI: `peer add <hex64> <name>`, `peer del <idx>`, `peer list`, `peer sync`, `peer fullsync`.
 
 ### Advert & Verkeer (Manual advert + live traffic) — JES-868
 

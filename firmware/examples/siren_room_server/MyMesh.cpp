@@ -60,6 +60,8 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
   set_radio_at = revert_radio_at = 0;
   _web_syncreq_pending = _web_roomsync_pending = false;
   _web_syncreq_idx = _web_roomsync_idx = -1;
+  _web_fullsync_pending = false;
+  _web_fullsync_idx = -1;
   _web_advert_pending = false;
   _web_discover_pending = false;
   _pending_discover_tag = 0;
@@ -1494,6 +1496,15 @@ void MultiRoomMesh::loop() {
       if (idx < MAX_PEERS && peers[idx].active) sendSyncReq(idx);
     } else {
       for (int i = 0; i < MAX_PEERS; i++) if (peers[i].active) sendSyncReq(i);
+    }
+  }
+  if (_web_fullsync_pending) {
+    _web_fullsync_pending = false;
+    int idx = _web_fullsync_idx;
+    if (idx >= 0) {
+      if (idx < MAX_PEERS && peers[idx].active) sendSyncReq(idx, true);
+    } else {
+      for (int i = 0; i < MAX_PEERS; i++) if (peers[i].active) sendSyncReq(i, true);
     }
   }
   if (_web_roomsync_pending) {
@@ -4046,7 +4057,7 @@ void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
  * One SYNCREQ is sent per active room, staggered by 1 s to respect 1% duty cycle.
  * All packets use rooms[0].id as sender (node transport identity).
  */
-void MultiRoomMesh::sendSyncReq(int pi) {
+void MultiRoomMesh::sendSyncReq(int pi, bool full) {
   if (!peers[pi].active) return;
   calcPeerSecret(pi);
 
@@ -4071,11 +4082,17 @@ void MultiRoomMesh::sendSyncReq(int pi) {
     int vv_count_pos = len;
     reply_data[len++] = 0;   // placeholder for num_vv
 
-    for (int i = 0; i < MAX_VV_ORIGINS && len + 8 <= (int)sizeof(reply_data); i++) {
-      if (slot.vv[i].seq == 0) continue;
-      memcpy(&reply_data[len], slot.vv[i].origin_id, 4); len += 4;
-      memcpy(&reply_data[len], &slot.vv[i].seq,      4); len += 4;
-      num_vv++;
+    // JES-874: a full resync advertises an EMPTY version vector so the peer treats
+    // us as knowing nothing and resends every post it has (dedup by (origin_id,ts)
+    // fills any gaps). This recovers pre-upgrade posts stranded under the old shared
+    // room-key origin whose high-watermark blocked normal incremental pulls.
+    if (!full) {
+      for (int i = 0; i < MAX_VV_ORIGINS && len + 8 <= (int)sizeof(reply_data); i++) {
+        if (slot.vv[i].seq == 0) continue;
+        memcpy(&reply_data[len], slot.vv[i].origin_id, 4); len += 4;
+        memcpy(&reply_data[len], &slot.vv[i].seq,      4); len += 4;
+        num_vv++;
+      }
     }
     reply_data[vv_count_pos] = num_vv;
 
@@ -4734,7 +4751,31 @@ void MultiRoomMesh::handlePeerCommand(char* args, char* reply, bool serial) {
     return;
   }
 
-  strcpy(reply, "Err - usage: peer list|add <hex> <name>|del <idx>|status|sync [<idx>]");
+  // "peer fullsync [<idx>]" — full resync (empty VV) to recover pre-upgrade posts (JES-874)
+  if (memcmp(args, "fullsync", 8) == 0 && (args[8] == ' ' || args[8] == 0)) {
+    const char* p = args + 8;
+    while (*p == ' ') p++;
+    if (*p >= '0' && *p <= '9') {
+      int idx = atoi(p);
+      if (idx < 0 || idx >= MAX_PEERS || !peers[idx].active) {
+        strcpy(reply, "Err - peer not active or invalid idx");
+        return;
+      }
+      sendSyncReq(idx, true);
+      sprintf(reply, "OK - full SYNCREQ sent to peer[%d] '%s'", idx, peers[idx].name);
+    } else {
+      int sent = 0;
+      for (int i = 0; i < MAX_PEERS; i++) {
+        if (!peers[i].active) continue;
+        sendSyncReq(i, true);
+        sent++;
+      }
+      sprintf(reply, "OK - full SYNCREQ sent to %d peer(s)", sent);
+    }
+    return;
+  }
+
+  strcpy(reply, "Err - usage: peer list|add <hex> <name>|del <idx>|status|sync [<idx>]|fullsync [<idx>]");
 }
 
 /* ------------------------------------------------------------------ */
@@ -4828,6 +4869,18 @@ void MultiRoomMesh::triggerPeerSync(int idx) {
   if (_web_syncreq_pending && _web_syncreq_idx != idx) idx = -1;
   _web_syncreq_idx = idx;
   _web_syncreq_pending = true;
+}
+
+/**
+ * JES-874: request a FULL anti-entropy resync (empty VV) to one peer (idx >= 0)
+ * or all peers (idx == -1). Deferred to loop() like triggerPeerSync — never TX
+ * from the AsyncTCP web task. Used to recover pre-upgrade posts that normal
+ * incremental sync can no longer pull because of a stuck per-origin watermark.
+ */
+void MultiRoomMesh::triggerFullSync(int idx) {
+  if (_web_fullsync_pending && _web_fullsync_idx != idx) idx = -1;
+  _web_fullsync_idx = idx;
+  _web_fullsync_pending = true;
 }
 
 /* ------------------------------------------------------------------ */

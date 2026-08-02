@@ -202,9 +202,15 @@ Remove a peer entry.
 
 Show last-contact timestamps for all peers.
 
-### `peer sync`
+### `peer sync [<idx>]`
 
-Manually trigger a synchronisation attempt with all configured peers (Phase 5 feature, requires replication to be implemented).
+Manually trigger an incremental synchronisation attempt with all configured peers, or with one peer when an index is given. This is the normal anti-entropy pull: each side only exchanges posts newer than the other's per-origin high-watermark.
+
+### `peer fullsync [<idx>]`
+
+Trigger a **full** resync with all peers (or one peer by index). The request advertises an *empty* version vector, so the peer resends **every** post it holds; duplicates are dropped by `(origin_id, post_timestamp)` dedup.
+
+Use this to recover posts that predate a firmware upgrade. Such posts were authored under the old shared room-key origin, and a stuck per-origin high-watermark can prevent the normal `peer sync` from ever pulling them. Run `peer fullsync` on **both** coupled nodes so gaps are filled in each direction (JES-874).
 
 ---
 

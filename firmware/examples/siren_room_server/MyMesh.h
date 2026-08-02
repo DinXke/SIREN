@@ -342,6 +342,8 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   volatile int  _web_syncreq_idx;
   volatile bool _web_roomsync_pending;  // ROOMSYNC push requested from web
   volatile int  _web_roomsync_idx;
+  volatile bool _web_fullsync_pending;  // full anti-entropy resync (empty VV) requested from web (JES-874)
+  volatile int  _web_fullsync_idx;
   volatile bool _web_advert_pending;    // manual flood advert requested from web (JES-868)
   volatile bool _web_discover_pending;  // manual neighbour discover requested from web (JES-869)
 
@@ -452,7 +454,7 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   /* ---- Phase 5 anti-entropy helpers ---- */
   void          calcPeerSecret(int pi);
   bool          vvUpdate(RoomSlot& slot, const uint8_t* origin_id, uint32_t ts);
-  void          sendSyncReq(int pi);
+  void          sendSyncReq(int pi, bool full = false);
   void          handleSyncReq(int pi, uint8_t* data, size_t len);
   void          handleSyncDat(int pi, uint8_t* data, size_t len);
   void          handleSyncEnd(int pi, uint8_t* data, size_t len);
@@ -754,6 +756,7 @@ public:
   bool delPeerFromWeb(int idx);
   /** Trigger immediate SYNCREQ: idx >= 0 = one peer, idx == -1 = all peers. */
   void triggerPeerSync(int idx);
+  void triggerFullSync(int idx);   // JES-874: empty-VV resync to recover pre-upgrade posts
   /** Push all active rooms (1+) to one peer (idx >= 0) or all peers (idx == -1). */
   void triggerRoomSync(int idx);
 

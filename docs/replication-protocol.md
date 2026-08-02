@@ -56,6 +56,21 @@ especially affected, since each node produces them independently. Stamping with
 the per-node identity keeps every room-server a distinct origin, which is what
 the version-vector model requires (JES-874).
 
+#### Recovering pre-upgrade posts (full resync)
+
+The origin fix only changes how *new* posts are stamped. Posts that were already
+stored before a node upgraded still carry the old shared room-key origin, and the
+per-origin high-watermark can keep the normal incremental pull from ever fetching
+them (each side already believes it is "up to date" for that origin). To repair
+this, a node can send a **full SYNCREQ** that advertises an *empty* version
+vector: the peer then treats it as knowing nothing and resends every post it
+holds, and `(origin_id, post_timestamp)` dedup silently discards the ones the
+requester already has, filling only the gaps. This is exposed as the web button
+**"Volledige sync"** / per-peer **Full**, and the CLI `peer fullsync [<idx>]`.
+Run it on both coupled nodes to repair gaps in each direction. It is bounded by
+`MAX_SYNC_POSTS` per room per request, so very large backlogs may need it pressed
+more than once (JES-874).
+
 ---
 
 ## Visual Overview
