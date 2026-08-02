@@ -2042,6 +2042,9 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       Serial.println("  stats-core                     Show core stats [serial only]");
       Serial.println("  stats-radio                    Show radio stats [serial only]");
       Serial.println("  neighbors                      List mesh neighbors");
+      Serial.println("  name list                      List name<->pubkey entries (*=manual)");
+      Serial.println("  name set <8hex> <name>         Pin a name for a 4-byte pubkey prefix");
+      Serial.println("  name del <8hex>                Remove a name-table entry");
       Serial.println();
       Serial.println("+---------------------------------------------------------------+");
       Serial.println();
@@ -2194,6 +2197,67 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+    return;
+  }
+
+  // ---- manual name table (JES-875) ----
+  // name list                — show all known name↔pubkey-prefix entries
+  // name set <8hex> <name>   — pin a name for a 4-byte pubkey prefix
+  // name del <8hex>          — remove a name-table entry
+  if (memcmp(command, "name", 4) == 0 && (command[4] == ' ' || command[4] == 0)) {
+    const char* sub = command + 4;
+    while (*sub == ' ') sub++;
+    if (memcmp(sub, "list", 4) == 0) {
+      int pos = 0;
+      for (int i = 0; i < NAME_TABLE_SIZE && pos < 150; i++) {
+        const NameEntry* e = &_names[i];
+        if (e->lru_seq == 0) continue;
+        char hex[9];
+        mesh::Utils::toHex(hex, e->pub_prefix, NAME_KEY_SIZE);
+        pos += snprintf(reply + pos, 160 - pos, "%s%s=%s%s",
+                        pos ? "\n" : "", hex, e->name, e->manual ? "*" : "");
+      }
+      if (pos == 0) strcpy(reply, "no names");
+      return;
+    }
+    if (memcmp(sub, "set", 3) == 0 && (sub[3] == ' ' || sub[3] == 0)) {
+      const char* a = sub + 3;
+      while (*a == ' ') a++;
+      // 8 hex chars, a space, then the name
+      char hexbuf[9] = {};
+      int hn = 0;
+      while (hn < 8 && a[hn] &&
+             ((a[hn] >= '0' && a[hn] <= '9') ||
+              (a[hn] >= 'a' && a[hn] <= 'f') ||
+              (a[hn] >= 'A' && a[hn] <= 'F'))) { hexbuf[hn] = a[hn]; hn++; }
+      const char* nm = a + hn;
+      while (*nm == ' ') nm++;
+      uint8_t pfx[NAME_KEY_SIZE];
+      if (hn != 8 || !mesh::Utils::fromHex(pfx, NAME_KEY_SIZE, hexbuf)) {
+        strcpy(reply, "Err - usage: name set <8hex> <name>");
+      } else if (*nm == 0) {
+        strcpy(reply, "Err - name required");
+      } else if (setNameManual(pfx, nm)) {
+        snprintf(reply, 160, "OK - %s = %s", hexbuf, nm);
+      } else {
+        strcpy(reply, "Err - name table full");
+      }
+      return;
+    }
+    if (memcmp(sub, "del", 3) == 0 && (sub[3] == ' ' || sub[3] == 0)) {
+      const char* a = sub + 3;
+      while (*a == ' ') a++;
+      uint8_t pfx[NAME_KEY_SIZE];
+      if (strlen(a) < 8 || !mesh::Utils::fromHex(pfx, NAME_KEY_SIZE, a)) {
+        strcpy(reply, "Err - usage: name del <8hex>");
+      } else if (delName(pfx)) {
+        strcpy(reply, "OK - removed");
+      } else {
+        strcpy(reply, "Err - not found");
+      }
+      return;
+    }
+    strcpy(reply, "Err - usage: name list | name set <8hex> <name> | name del <8hex>");
     return;
   }
 
@@ -3052,7 +3116,7 @@ void MultiRoomMesh::loadPostPool() {
 #define NAMES_PATH "/names"
 #define NAMES_MAGIC_0 0x4E   // 'N'
 #define NAMES_MAGIC_1 0x4D   // 'M'
-#define NAMES_VERSION    2   // v2: pub_prefix reduced from 8 to 4 bytes (NAME_KEY_SIZE)
+#define NAMES_VERSION    3   // v3: added manual flag (JES-875); v2 = 4-byte prefix, no flag
 
 void MultiRoomMesh::saveNameTable() {
   if (!_fs) return;
@@ -3065,6 +3129,7 @@ void MultiRoomMesh::saveNameTable() {
     f.write(_names[i].pub_prefix, NAME_KEY_SIZE);
     f.write((const uint8_t*)_names[i].name, sizeof(_names[i].name));
     f.write((const uint8_t*)&_names[i].lru_seq, 4);
+    f.write((uint8_t)(_names[i].manual ? 1 : 0));   // JES-875
   }
   f.close();
 }
@@ -3077,14 +3142,25 @@ void MultiRoomMesh::loadNameTable() {
   uint8_t hdr[4];
   if (f.read(hdr, 4) != 4 ||
       hdr[0] != NAMES_MAGIC_0 || hdr[1] != NAMES_MAGIC_1 ||
-      hdr[2] != NAMES_VERSION || hdr[3] != (uint8_t)NAME_TABLE_SIZE) {
+      hdr[3] != (uint8_t)NAME_TABLE_SIZE) {
     f.close(); return;
   }
+  // Accept current (v3) and prior (v2) layouts; v2 lacks the per-entry manual
+  // flag (JES-875) — migrate in place by defaulting manual=false, so
+  // advert-learned names survive a firmware upgrade instead of being wiped.
+  uint8_t ver = hdr[2];
+  if (ver != NAMES_VERSION && ver != 2) { f.close(); return; }
   uint32_t max_seq = 0;
   for (int i = 0; i < NAME_TABLE_SIZE; i++) {
     if (f.read(_names[i].pub_prefix, NAME_KEY_SIZE) != NAME_KEY_SIZE) break;
     if (f.read((uint8_t*)_names[i].name, sizeof(_names[i].name)) != sizeof(_names[i].name)) break;
     if (f.read((uint8_t*)&_names[i].lru_seq, 4) != 4) break;
+    _names[i].manual = false;
+    if (ver >= 3) {
+      uint8_t m = 0;
+      if (f.read(&m, 1) != 1) break;
+      _names[i].manual = (m != 0);
+    }
     _names[i].name[sizeof(_names[i].name) - 1] = 0;  // ensure NUL
     if (_names[i].lru_seq > max_seq) max_seq = _names[i].lru_seq;
   }
@@ -3208,30 +3284,35 @@ void MultiRoomMesh::onAdvertRecv(mesh::Packet* pkt, const mesh::Identity& id,
        (unsigned)id.pub_key[2], (unsigned)id.pub_key[3],
        adv_name);
 
-  // Find existing entry or lowest-seq victim
-  int victim = 0;
+  // Find existing entry or lowest-seq victim. Manual entries (JES-875) are
+  // pinned: never overwritten by an advert, never chosen as eviction victim.
+  int victim = -1;
   uint32_t min_seq = UINT32_MAX;
   for (int i = 0; i < NAME_TABLE_SIZE; i++) {
     if (_names[i].lru_seq == 0) {
       // Empty slot — use immediately
       victim = i;
-      min_seq = 0;
       break;
     }
     if (memcmp(_names[i].pub_prefix, id.pub_key, NAME_KEY_SIZE) == 0) {
+      if (_names[i].manual) return;   // operator-set name wins; leave it alone
       // Update existing entry
       StrHelper::strncpy(_names[i].name, adv_name, sizeof(_names[i].name));
       _names[i].lru_seq = ++_name_lru_ctr;
       saveNameTable();
       return;
     }
-    if (_names[i].lru_seq < min_seq) { min_seq = _names[i].lru_seq; victim = i; }
+    if (!_names[i].manual && _names[i].lru_seq < min_seq) {
+      min_seq = _names[i].lru_seq; victim = i;
+    }
   }
 
+  if (victim < 0) return;  // table full of manual entries — nothing to evict
   // Fill victim slot
   memcpy(_names[victim].pub_prefix, id.pub_key, NAME_KEY_SIZE);
   StrHelper::strncpy(_names[victim].name, adv_name, sizeof(_names[victim].name));
   _names[victim].lru_seq = ++_name_lru_ctr;
+  _names[victim].manual = false;
   saveNameTable();
 }
 
@@ -3393,27 +3474,77 @@ void MultiRoomMesh::onControlDataRecv(mesh::Packet* packet) {
  */
 void MultiRoomMesh::storeName(const uint8_t* pub4, const char* name) {
   if (!name || name[0] == '\0') return;
-  // Find existing entry or LRU victim
-  int victim = 0;
+  // Find existing entry or LRU victim. Manual entries (JES-875) are pinned:
+  // never overwritten by a learned name, never evicted.
+  int victim = -1;
   uint32_t min_seq = UINT32_MAX;
   for (int i = 0; i < NAME_TABLE_SIZE; i++) {
     if (_names[i].lru_seq == 0) {
       victim = i;
-      min_seq = 0;
       break;
     }
     if (memcmp(_names[i].pub_prefix, pub4, NAME_KEY_SIZE) == 0) {
+      if (_names[i].manual) return;   // operator-set name wins
       StrHelper::strncpy(_names[i].name, name, sizeof(_names[i].name));
       _names[i].lru_seq = ++_name_lru_ctr;
       saveNameTable();
       return;
     }
-    if (_names[i].lru_seq < min_seq) { min_seq = _names[i].lru_seq; victim = i; }
+    if (!_names[i].manual && _names[i].lru_seq < min_seq) {
+      min_seq = _names[i].lru_seq; victim = i;
+    }
   }
+  if (victim < 0) return;  // table full of manual entries
   memcpy(_names[victim].pub_prefix, pub4, NAME_KEY_SIZE);
   StrHelper::strncpy(_names[victim].name, name, sizeof(_names[victim].name));
   _names[victim].lru_seq = ++_name_lru_ctr;
+  _names[victim].manual = false;
   saveNameTable();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Manual name-table management (JES-875)                              */
+/* ------------------------------------------------------------------ */
+bool MultiRoomMesh::setNameManual(const uint8_t* pub4, const char* name) {
+  if (!pub4 || !name || name[0] == '\0') return false;
+  int empty = -1;         // first empty slot
+  int lru_victim = -1;    // lowest-lru non-manual slot (fallback)
+  uint32_t min_seq = UINT32_MAX;
+  for (int i = 0; i < NAME_TABLE_SIZE; i++) {
+    if (_names[i].lru_seq == 0) { if (empty < 0) empty = i; continue; }
+    if (memcmp(_names[i].pub_prefix, pub4, NAME_KEY_SIZE) == 0) {
+      // Update existing entry, promote to manual (pinned).
+      StrHelper::strncpy(_names[i].name, name, sizeof(_names[i].name));
+      _names[i].lru_seq = ++_name_lru_ctr;
+      _names[i].manual = true;
+      saveNameTable();
+      return true;
+    }
+    if (!_names[i].manual && _names[i].lru_seq < min_seq) {
+      min_seq = _names[i].lru_seq; lru_victim = i;
+    }
+  }
+  int victim = (empty >= 0) ? empty : lru_victim;
+  if (victim < 0) return false;  // table full of manual entries
+  memcpy(_names[victim].pub_prefix, pub4, NAME_KEY_SIZE);
+  StrHelper::strncpy(_names[victim].name, name, sizeof(_names[victim].name));
+  _names[victim].lru_seq = ++_name_lru_ctr;
+  _names[victim].manual = true;
+  saveNameTable();
+  return true;
+}
+
+bool MultiRoomMesh::delName(const uint8_t* pub4) {
+  if (!pub4) return false;
+  for (int i = 0; i < NAME_TABLE_SIZE; i++) {
+    if (_names[i].lru_seq != 0 &&
+        memcmp(_names[i].pub_prefix, pub4, NAME_KEY_SIZE) == 0) {
+      memset(&_names[i], 0, sizeof(NameEntry));  // lru_seq=0 marks empty
+      saveNameTable();
+      return true;
+    }
+  }
+  return false;
 }
 
 void MultiRoomMesh::addServerPost(int room_idx, const char* text) {

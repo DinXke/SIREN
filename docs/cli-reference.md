@@ -241,6 +241,60 @@ The neighbour list and a **Discover** button are also available in the web UI on
 
 ---
 
+## Name Table Commands (JES-875)
+
+The room server keeps a name table that maps a node's 4-byte pubkey prefix to a
+display name. It is populated automatically from received adverts and from author
+names carried in sync frames, and is used everywhere a node is shown (rooms/chat,
+nick list, neighbour list). Nodes that never send an advert (for example plain
+repeaters) only show up as a hex prefix — these commands let an operator assign a
+name manually.
+
+Manual entries are **pinned**: they are marked with `*` in `name list`, are never
+overwritten by a later advert, and are never evicted when the table fills up.
+
+### `name list`
+
+List all name-table entries. Manual (operator-set) entries are marked with `*`:
+
+```
+> name list
+aabbccdd=NoodpostWest
+1122eeff=Repeater Zaal 3*
+```
+
+Returns `no names` if the table is empty.
+
+### `name set <8hex> <name>`
+
+Pin a name for a 4-byte pubkey prefix (8 hex characters). Overwrites any existing
+entry for that prefix and promotes it to a manual entry.
+
+```
+> name set 1122eeff Repeater Zaal 3
+OK - 1122eeff = Repeater Zaal 3
+```
+
+Returns an error if the hex prefix is malformed, the name is empty, or the table is
+full of other manual entries.
+
+### `name del <8hex>`
+
+Remove a name-table entry by its 4-byte pubkey prefix:
+
+```
+> name del 1122eeff
+OK - removed
+```
+
+Returns `Err - not found` if there is no entry for that prefix.
+
+The name table is also editable in the web UI on the **Netwerk** page (card
+**Namen**), plus JSON at `GET /api/names` and endpoints `POST /api/name/set`
+(`hex`, `name`) / `POST /api/name/del` (`hex`) — all admin auth required.
+
+---
+
 ## IRC / Chat Commands
 
 These commands let operators inspect room messages and the user list, and post messages as the server operator. They work over both **serial CLI** and **mesh CLI** (Phase 4 admin DM).

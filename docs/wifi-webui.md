@@ -160,6 +160,34 @@ Neighbours are also learned passively from every zero-hop advert received, so th
 
 Only 4-byte pubkey prefixes are exposed — never private keys. Equivalent CLI commands: `neighbors`, `discover.neighbors`, `neighbor.remove <hex>`.
 
+### Namen / name table (JES-875)
+
+The node keeps a **name table** mapping each known 4-byte pubkey prefix to a display
+name. It is filled automatically from received adverts and from author names in sync
+frames, and is used everywhere a node is shown: the rooms/chat view, the nick list,
+and the neighbour list. Nodes that never send an advert (for example plain repeaters)
+show up only as a hex prefix — so on the **Netwerk** page the **Namen** card lets an
+operator label them by hand:
+
+- **Naam opslaan**: enter the node's 8-hex pubkey prefix (as shown in the neighbour
+  or rooms view) and a name (max 23 chars) to pin it. Manual entries are marked with a
+  star (★) and are **never overwritten by a later advert** and **never evicted** when
+  the table fills.
+- The table lists each entry's `Hex` prefix and `Naam`, with a delete (✕) button per
+  row. It refreshes every 10 s from `/api/names`.
+- Once set, the name immediately appears when someone opens the room and in the nick
+  list.
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/names` | GET | JSON name table (`hex`, `name`, `manual`) |
+| `/api/name/set` | POST | Pin a name (`hex` = 8 hex chars, `name`) |
+| `/api/name/del` | POST | Remove an entry (`hex` = 8 hex chars) |
+
+All endpoints require admin auth; the POST routes are CSRF-guarded. Only 4-byte pubkey
+prefixes are exposed — never private keys. Equivalent CLI commands: `name list`,
+`name set <8hex> <name>`, `name del <8hex>`.
+
 ### Advert intervals (JES-868)
 
 On the **Rooms** page the advert-interval card has **two separate settings, both in hours**:

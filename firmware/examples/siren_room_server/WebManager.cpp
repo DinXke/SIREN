@@ -1917,6 +1917,49 @@ void WebManager::buildNetworkPageStream(AsyncResponseStream& out, const char* ip
             "ld();setInterval(ld,5000);})();</script>"
             "</div>";
 
+    // Manual name table (JES-875). Operator can label nodes (e.g. repeaters that
+    // never sent an advert) so they show up by name in the rooms. Table is
+    // populated client-side from /api/names; names rendered via textContent
+    // (XSS-safe). Manual entries are pinned (marked with a badge).
+    page += "<div class='card'><h2>Namen</h2>"
+            "<p style='font-size:0.82em;color:#aaa'>"
+            "Geef nodes een naam op basis van hun pubkey-prefix (eerste 4 bytes, 8 hex). "
+            "Handig voor repeaters die nooit een advert stuurden. Deze naam wordt getoond "
+            "in de rooms en burenlijst. Handmatige namen (&#9733;) worden niet overschreven "
+            "door adverts. CLI: <code>name list</code> / <code>name set &lt;8hex&gt; &lt;naam&gt;</code> / "
+            "<code>name del &lt;8hex&gt;</code></p>"
+            "<form method='post' action='/api/name/set' style='margin-bottom:10px'>"
+            "<div class='frow'><label>Pubkey (8 hex)</label>"
+            "<input name='hex' maxlength='8' minlength='8' pattern='[0-9a-fA-F]{8}' "
+            "placeholder='a1b2c3d4' required></div>"
+            "<div class='frow'><label>Naam</label>"
+            "<input name='name' maxlength='23' placeholder='bv. Repeater Zaal 3' required></div>"
+            "<button type='submit'>Naam opslaan</button></form>"
+            "<table id='nmt' style='width:100%;border-collapse:collapse;font-size:0.88em'>"
+            "<thead><tr style='text-align:left;color:#aaa'>"
+            "<th>Hex</th><th>Naam</th><th></th></tr></thead>"
+            "<tbody id='nmb'><tr><td colspan='3' style='color:#aaa'>laden&hellip;</td></tr></tbody>"
+            "</table>"
+            "<script>(function(){"
+            "function ld(){fetch('/api/names').then(function(r){return r.json();})"
+            ".then(function(a){var b=document.getElementById('nmb');b.innerHTML='';"
+            "if(!a.length){var r=b.insertRow();var c=r.insertCell();c.colSpan=3;"
+            "c.style.color='#aaa';c.textContent='geen namen';return;}"
+            "a.forEach(function(n){var r=b.insertRow();"
+            "r.insertCell().textContent=n.hex;"
+            "var nc=r.insertCell();nc.textContent=n.name;"
+            "if(n.manual){var s=document.createElement('span');s.textContent=' \\u2605';"
+            "s.title='handmatig';s.style.color='#f5a623';nc.appendChild(s);}"
+            "var ac=r.insertCell();var btn=document.createElement('button');"
+            "btn.textContent='\\u2715';btn.className='del';btn.title='verwijderen';"
+            "btn.onclick=function(){if(!confirm('Naam voor '+n.hex+' verwijderen?'))return;"
+            "var fd=new FormData();fd.append('hex',n.hex);"
+            "fetch('/api/name/del',{method:'POST',body:fd}).then(function(){ld();});};"
+            "ac.appendChild(btn);});})"
+            ".catch(function(){});}"
+            "ld();setInterval(ld,10000);})();</script>"
+            "</div>";
+
     // Sync interval (JES-844)
     {
       char sync_sec_str[8];
@@ -3307,6 +3350,75 @@ void WebManager::setupRoutes() {
     AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", j);
     resp->addHeader("Cache-Control", "no-store");
     req->send(resp);
+  });
+
+  // GET /api/names — name-table JSON (JES-875, admin-auth required).
+  // Only 4-byte pubkey prefixes are exposed; never private keys.
+  _server.on("/api/names", HTTP_GET, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    String j = "[";
+    bool first = true;
+    int n = _mesh.getNameTableSize();
+    for (int i = 0; i < n; i++) {
+      const NameEntry* e = _mesh.getNameEntry(i);
+      if (!e || e->lru_seq == 0) continue;  // empty slot
+      char hex[9] = {};
+      for (int b = 0; b < 4; b++) snprintf(hex + b * 2, 3, "%02x", (unsigned int)e->pub_prefix[b]);
+      if (!first) j += ",";
+      first = false;
+      j += "{\"hex\":\"";   j += hex; j += "\"";
+      j += ",\"name\":\"";  j += jsonEscape(e->name); j += "\"";
+      j += ",\"manual\":";  j += e->manual ? "true" : "false";
+      j += "}";
+    }
+    j += "]";
+    AsyncWebServerResponse* resp = req->beginResponse(200, "application/json", j);
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+  });
+
+  // POST /api/name/set (body: hex=<8hex>&name=<str>) — pin an operator name (JES-875)
+  _server.on("/api/name/set", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+    if (!req->hasParam("hex", true) || !req->hasParam("name", true)) {
+      req->send(400, "text/plain", "missing hex or name"); return;
+    }
+    String hx = req->getParam("hex", true)->value();
+    hx.trim();
+    if (hx.length() != 8) { req->send(400, "text/plain", "hex must be 8 chars"); return; }
+    for (int i = 0; i < 8; i++) {
+      char c = hx[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+        req->send(400, "text/plain", "hex must be hex"); return;
+      }
+    }
+    uint8_t pfx[4] = {};
+    if (!mesh::Utils::fromHex(pfx, 4, hx.c_str())) { req->send(400, "text/plain", "bad hex"); return; }
+    String nm = req->getParam("name", true)->value();
+    nm.trim();
+    if (!nm.length() || nm.length() > 23) {
+      req->send(400, "text/plain", "naam leeg of te lang (max 23 tekens)"); return;
+    }
+    if (!_mesh.setNameManual(pfx, nm.c_str())) {
+      req->send(409, "text/plain", "naamtabel vol"); return;
+    }
+    req->redirect("/network");
+  });
+
+  // POST /api/name/del (body: hex=<8hex>) — remove a name-table entry (JES-875)
+  _server.on("/api/name/del", HTTP_POST, [this, user, pass](AsyncWebServerRequest* req) {
+    if (!req->authenticate(user, pass)) return req->requestAuthentication();
+    if (!checkOrigin(req)) { req->send(403, "text/plain", "CSRF check failed"); return; }
+    if (!req->hasParam("hex", true)) { req->send(400, "text/plain", "missing hex"); return; }
+    String hx = req->getParam("hex", true)->value();
+    hx.trim();
+    uint8_t pfx[4] = {};
+    if (hx.length() != 8 || !mesh::Utils::fromHex(pfx, 4, hx.c_str())) {
+      req->send(400, "text/plain", "hex must be 8 chars"); return;
+    }
+    if (!_mesh.delName(pfx)) { req->send(404, "text/plain", "not found"); return; }
+    req->redirect("/network");
   });
 
   // GET /rxlog — live view of all received packets (JES-868, admin-auth required)

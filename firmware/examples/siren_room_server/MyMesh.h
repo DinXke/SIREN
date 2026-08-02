@@ -177,6 +177,8 @@ struct NameEntry {
   uint8_t  pub_prefix[NAME_KEY_SIZE];   // first 4 bytes of pubkey
   char     name[24];                    // advertised name (NUL-terminated)
   uint32_t lru_seq;                     // 0 = empty; higher = more recently seen
+  bool     manual;                      // JES-875: set by operator; pinned (not
+                                        // advert-overwritten, not LRU-evicted)
 };
 
 /** One message in a DM conversation (bidirectional). */
@@ -693,6 +695,20 @@ public:
   /** Resolve a 32-byte pubkey to an advertised name. Falls back to 8-char hex prefix. */
   const char* resolveName(const uint8_t* pubkey);
   void        storeName(const uint8_t* pub4, const char* name);
+
+  /* ---- Manual name table management (JES-875) ---- */
+  /** Manually set (pin) a name for a 4-byte pubkey prefix. Overrides adverts and
+   *  survives LRU eviction. Returns false only if the table is full of other
+   *  manual entries. Used for repeaters that never sent an advert. */
+  bool        setNameManual(const uint8_t* pub4, const char* name);
+  /** Delete a name-table entry by 4-byte pubkey prefix. Returns true if removed. */
+  bool        delName(const uint8_t* pub4);
+  /** Number of name-table slots (may include empty entries; check lru_seq > 0). */
+  int         getNameTableSize() const { return NAME_TABLE_SIZE; }
+  /** Name-table entry at physical index i (nullptr if out of range). */
+  const NameEntry* getNameEntry(int i) const {
+    return (i >= 0 && i < NAME_TABLE_SIZE) ? &_names[i] : nullptr;
+  }
   /** Direct access to the global post pool for web/CLI inspection. */
   const PostInfo* getPostPool() const { return _post_pool; }
   /** Post a server-authored message to a room. Pushes to connected companions. */
