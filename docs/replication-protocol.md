@@ -158,7 +158,24 @@ The 20-second stagger prevents all nodes from transmitting SYNCREQ at the same i
 
 ### Deduplication
 
-If a post arrives via replication that already exists in the local store (identified by `(room_slot_hash, sequence_number)`), it is silently discarded. This prevents replication storms (infinite loops of re-syncing the same data).
+If a post arrives via replication that already exists in the local store (identified by `(origin_id, post_timestamp)`), it is silently discarded. This prevents replication storms (infinite loops of re-syncing the same data).
+
+#### Echo suppression across coupled nodes (JES-861)
+
+The `(origin_id, post_timestamp)` dedup collapses re-syncs of the *same stored post*, but it cannot collapse a message that was **received independently by two coupled nodes**.
+
+When two room-servers share a room key, a companion message addressed to that room is flooded and decrypted by **both** nodes. Each one runs `addPost` locally and stamps the post with:
+
+- its **own** `origin_id` (the per-node identity, required by the version-vector model — see *Origin identity* above), and
+- its **own** local receive time as `post_timestamp` (typically ~1 second apart).
+
+Both copies therefore have a *different* `(origin_id, post_timestamp)` even though they are the same logical message. Anti-entropy then replicates each node's copy to the other, and the user sees **every message twice, roughly one second apart** (the "echo").
+
+To catch this, each post also carries a **message identity** `msg_id` = the sender's original message timestamp (`sender_timestamp` from the companion's TXT frame). Because the companion assigns this stamp once, both nodes store the *same* `(author, msg_id)` for the same message. On ingest (and on local add), if a post with the same `(author, msg_id)` already exists in the room, the redundant copy is dropped — but the version vector for the dropped copy's origin is still advanced so the peer stops resending it.
+
+Key safety property: `msg_id` uniquely identifies a *single transmitted message*, so this **never merges two genuinely distinct messages** (even if they carry identical text sent seconds apart). Posts with `msg_id == 0` (operator/`[OP]` posts, or posts persisted before JES-861) fall back to `(origin_id, post_timestamp)` dedup only.
+
+`msg_id` is transported in the `SYNCDAT2` frame (flag `9`) — identical to `SYNCDAT` but with a 4-byte `msg_id` after `author_pub`. A node still speaking legacy `SYNCDAT` (flag `5`, e.g. mid-OTA) is parsed without a `msg_id` and its posts simply are not echo-deduped until it is upgraded. **Both coupled nodes must be updated to v1.10.6+ for echo suppression to take effect.**
 
 ---
 
@@ -242,13 +259,15 @@ SYNCREQ, SYNCDAT, and SYNCEND are sent as encrypted direct messages over MeshCor
 Every frame carries a 4-byte `room_hash` = the first 4 bytes of the relevant room's public key. The receiver matches this against its own active rooms and ignores the frame if it knows no room with that hash.
 
 ```
-SYNCREQ : [4:ts][1:flags][4:room_hash][1:num_vv][N × 8: VVEntry{origin[4], seq[4]}]
-SYNCDAT : [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][text]
-SYNCEND : [4:ts][1:flags][4:room_hash][1:num_vv][N × 8: VVEntry{origin[4], seq[4]}]
+SYNCREQ  : [4:ts][1:flags][4:room_hash][1:num_vv][N × 8: VVEntry{origin[4], seq[4]}]
+SYNCDAT  : [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len][name][text]
+SYNCDAT2 : [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][4:msg_id][1:name_len][name][text]
+SYNCEND  : [4:ts][1:flags][4:room_hash][1:num_vv][N × 8: VVEntry{origin[4], seq[4]}]
 ```
 
+- `SYNCDAT2` (flag `9`, JES-861) is the current post frame: it adds a 4-byte `msg_id` (the sender's message timestamp) used for cross-node echo suppression. `SYNCDAT` (flag `5`) is the legacy frame without `msg_id`, still accepted for backward compatibility during OTA.
 - One **SYNCREQ per active room** is sent to each peer, staggered by 1 s to respect the 1% LoRa duty cycle.
-- All parsers are length-guarded (`SYNCREQ`/`SYNCEND` min 10 bytes, `SYNCDAT` min 21 bytes) and the VV count is clamped to `MAX_VV_ORIGINS`.
+- All parsers are length-guarded (`SYNCREQ`/`SYNCEND` min 10 bytes, `SYNCDAT` min 22 bytes, `SYNCDAT2` min 26 bytes) and the VV count is clamped to `MAX_VV_ORIGINS`.
 - Both nodes must have each other's public key in their peer list.
 - The channel is encrypted end-to-end (no cleartext on the LoRa channel); replay protection is inherited from MeshCore's packet de-dup.
 

@@ -831,6 +831,7 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
            pi, (int)type, (int)flags, (int)len);
       if      (flags == TXT_TYPE_SYNCREQ)  handleSyncReq(pi, data, len);
       else if (flags == TXT_TYPE_SYNCDAT)  handleSyncDat(pi, data, len);
+      else if (flags == TXT_TYPE_SYNCDAT2) handleSyncDat(pi, data, len);  // JES-861: same handler, carries msg_id
       else if (flags == TXT_TYPE_SYNCEND)  handleSyncEnd(pi, data, len);
       else if (flags == TXT_TYPE_SYNCDEL)  handleSyncDel(pi, data, len);
       else if (flags == TXT_TYPE_ROOMSYNC) handleRoomSync(pi, data, len);
@@ -887,7 +888,9 @@ void MultiRoomMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type,
           temp[5] = 0;
         } else {
           if (!is_retry) {
-            addPost(slot, client, (const char*)&data[5]);
+            // JES-861: tag the post with the sender's message timestamp so a
+            // copy flooded to a coupled node dedups to a single displayed post.
+            addPost(slot, client, (const char*)&data[5], sender_timestamp);
             dmBuffer(client->id.pub_key, sender_timestamp, false, (const char*)&data[5]);
           }
           temp[5] = 0;
@@ -1018,9 +1021,23 @@ void MultiRoomMesh::onAckRecv(mesh::Packet* packet, uint32_t ack_crc) {
 /* ------------------------------------------------------------------ */
 /*  Per-slot helpers                                                    */
 /* ------------------------------------------------------------------ */
-void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text) {
+void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text, uint32_t msg_id) {
   uint8_t ridx = (uint8_t)(&slot - rooms);
   if (ridx == 0) return;  // JES-846: room 0 is identity-only, no posts allowed
+
+  // JES-861 echo suppression: if we already hold this exact logical message
+  // (same author + same sender message-id), don't create a duplicate. This
+  // covers the case where the peer's replicated copy arrived via sync before
+  // our own direct reception of the flooded message.
+  if (msg_id != 0) {
+    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+      if (_post_pool[i].room_idx == ridx &&
+          _post_pool[i].msg_id == msg_id &&
+          memcmp(_post_pool[i].author.pub_key, client->id.pub_key, 4) == 0)
+        return;   // already have this message
+    }
+  }
+
   int quota = MAX_TOTAL_POSTS / (_num_active_rooms > 0 ? _num_active_rooms : 1);
 
   // Find a free slot; also track oldest post owned by this room
@@ -1061,6 +1078,7 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   free_slot->author         = client->id;
   StrHelper::strncpy(free_slot->text, text, MAX_POST_TEXT_LEN);
   free_slot->post_timestamp = getRTCClock()->getCurrentTimeUnique();
+  free_slot->msg_id         = msg_id;   // JES-861: cross-node message identity
   free_slot->room_idx       = ridx;
   // Phase 5: tag with this room-server as origin.
   // JES-874: origin MUST be the NODE identity (rooms[0]), not the room key.
@@ -3069,6 +3087,7 @@ void MultiRoomMesh::loadPostPool() {
       if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) break;
       if (f.read(&p.room_idx, 1) != 1) break;
       memset(p.origin_id, 0, 4);  // unknown origin — zero is safe default
+      p.msg_id = 0;               // JES-861: not persisted — unknown for old posts
       // Prune posts for rooms that are no longer active
       if (p.room_idx != 0xFF &&
           (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
@@ -3088,6 +3107,7 @@ void MultiRoomMesh::loadPostPool() {
       if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) break;
       if (f.read(&p.room_idx, 1) != 1) break;
       if (f.read(p.origin_id, 4) != 4) break;  // Phase 5
+      p.msg_id = 0;                            // JES-861: not persisted — unknown for old posts
       // Prune posts for rooms that are no longer active
       if (p.room_idx != 0xFF &&
           (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
@@ -3922,7 +3942,7 @@ bool MultiRoomMesh::vvUpdate(RoomSlot& slot, const uint8_t* origin_id, uint32_t 
  */
 bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
                                     uint32_t ts, const uint8_t* author_pub,
-                                    const char* text) {
+                                    const char* text, uint32_t msg_id) {
   if (ridx >= MAX_ROOMS || !rooms[ridx].active) return false;
 
   // Resurrection guard: silently drop tombstoned posts (JES-824)
@@ -3934,6 +3954,26 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
         _post_pool[i].post_timestamp == ts &&
         memcmp(_post_pool[i].origin_id, origin_id, 4) == 0) {
       return false;   // duplicate
+    }
+  }
+
+  // JES-861 echo suppression: a client message flooded to BOTH coupled
+  // room-servers is ingested independently by each, producing two posts that
+  // share the same logical identity (author, msg_id) but carry DIFFERENT
+  // origin_id/post_timestamp — so the (origin, ts) dedup above cannot collapse
+  // them and the user sees every message twice ~1 s apart. If we already hold
+  // this logical message, drop the peer's redundant copy but still advance the
+  // VV for its origin so the peer stops resending it every sync round.
+  // msg_id == 0 (server/OP posts, pre-JES-861 peers) falls back to (origin,ts)
+  // dedup only, which never collapses distinct messages -> no message loss.
+  if (msg_id != 0) {
+    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+      if (_post_pool[i].room_idx == ridx &&
+          _post_pool[i].msg_id == msg_id &&
+          memcmp(_post_pool[i].author.pub_key, author_pub, 4) == 0) {
+        vvUpdate(rooms[ridx], origin_id, ts);   // mark known -> peer stops resending
+        return false;   // echo of a message we already have
+      }
     }
   }
 
@@ -3974,6 +4014,7 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
   memcpy(free_slot->author.pub_key, author_pub, 4);  // 4-byte prefix
   StrHelper::strncpy(free_slot->text, text, MAX_POST_TEXT_LEN);
   free_slot->post_timestamp = ts;
+  free_slot->msg_id         = msg_id;   // JES-861: cross-node message identity
   free_slot->room_idx       = ridx;
   memcpy(free_slot->origin_id, origin_id, 4);
 
@@ -4012,11 +4053,12 @@ void MultiRoomMesh::pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post) {
   int len = 0;
   uint32_t now = getRTCClock()->getCurrentTimeUnique();
   memcpy(&reply_data[len], &now, 4);                        len += 4;
-  reply_data[len++] = (TXT_TYPE_SYNCDAT << 2);
+  reply_data[len++] = (TXT_TYPE_SYNCDAT2 << 2);            // JES-861: msg_id-bearing frame
   memcpy(&reply_data[len], slot.id.pub_key, 4);             len += 4;  // room_hash
   memcpy(&reply_data[len], &post.post_timestamp, 4);        len += 4;
   memcpy(&reply_data[len], post.origin_id, 4);              len += 4;
   memcpy(&reply_data[len], post.author.pub_key, 4);         len += 4;
+  memcpy(&reply_data[len], &post.msg_id, 4);                len += 4;  // JES-861: cross-node message id
   // Bug 2 (JES-840): embed author name so the receiving node can populate its name table
   const char* aname = resolveName(post.author.pub_key);
   uint8_t name_len = (uint8_t)strlen(aname);
@@ -4267,26 +4309,34 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
  * Routes the post to the local room matching room_hash.
  */
 void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
-  if (len < 22) return;  // [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub][1:name_len] min
+  // JES-861: SYNCDAT2 (flag 9) inserts a 4-byte msg_id after author_pub;
+  // legacy SYNCDAT (flag 5) has none. Parse the correct layout for each so a
+  // node still talking the old format (e.g. mid-OTA) is handled without garbage.
+  bool     has_msgid = ((data[4] >> 2) == TXT_TYPE_SYNCDAT2);
+  size_t   min_hdr   = has_msgid ? 26 : 22;
+  if (len < min_hdr) return;  // [4:ts][1:flags][4:room_hash][4:post_ts][4:origin_id][4:author_pub](+[4:msg_id])[1:name_len]
   uint8_t  room_hash[4];
   uint32_t post_ts;
   uint8_t  origin_id[4], author_pub[4];
+  uint32_t msg_id = 0;
   memcpy(room_hash,  &data[5],  4);
   memcpy(&post_ts,   &data[9],  4);
   memcpy(origin_id,  &data[13], 4);
   memcpy(author_pub, &data[17], 4);
+  size_t nl_pos = 21;
+  if (has_msgid) { memcpy(&msg_id, &data[21], 4); nl_pos = 25; }
   // Bug 2 (JES-840): parse embedded author name and store in name table
-  uint8_t name_len = data[21];
+  uint8_t name_len = data[nl_pos];
   if (name_len > 23) name_len = 23;  // clamp — reject oversized (no buffer overflow)
-  if ((size_t)(22 + name_len) > len) return;  // bounds guard for name + text
+  if ((size_t)(nl_pos + 1 + name_len) > len) return;  // bounds guard for name + text
   if (name_len > 0) {
     char author_name[24];
-    memcpy(author_name, &data[22], name_len);
+    memcpy(author_name, &data[nl_pos + 1], name_len);
     author_name[name_len] = '\0';
     storeName(author_pub, author_name);
   }
   data[len] = 0;   // NUL-terminate text
-  const char* text = (const char*)&data[22 + name_len];
+  const char* text = (const char*)&data[nl_pos + 1 + name_len];
 
   // Find local room matching hash; skip room 0 (JES-846)
   int ri = -1;
@@ -4308,7 +4358,7 @@ void MultiRoomMesh::handleSyncDat(int pi, uint8_t* data, size_t len) {
   peers[pi].last_syncdat_ts = getRTCClock()->getCurrentTime();
   _sync_dat_recv++;
 
-  bool added = ingestSyncPost((uint8_t)ri, origin_id, post_ts, author_pub, text);
+  bool added = ingestSyncPost((uint8_t)ri, origin_id, post_ts, author_pub, text, msg_id);
   DLOG(post_ts,
        "SYNC DAT←peer[%d] orig=%02x%02x%02x%02x ts=%lu room=%d %s",
        pi,

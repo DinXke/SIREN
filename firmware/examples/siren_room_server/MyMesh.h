@@ -120,6 +120,10 @@
 #define TXT_TYPE_SYNCEND  6   // B→A end of stream  [ts][flags][num_vv][VV...]
 #define TXT_TYPE_SYNCDEL  7   // delete tombstone   [ts][flags][room_hash[4]][origin_id[4]][post_ts[4]]
 #define TXT_TYPE_ROOMSYNC 8   // room key push      [ts][flags][room_idx[1]][prv[64]][pub[32]][name\0]
+#define TXT_TYPE_SYNCDAT2 9   // B→A one post + msg_id (JES-861 echo dedup)
+                              // [ts][flags][room_hash[4]][post_ts][orig[4]][auth[4]][msg_id[4]][1:name_len][name][text]
+                              // Same as SYNCDAT but carries the sender's message-id so a
+                              // message flooded to both coupled nodes collapses to one copy.
 
 /* Name resolution table — maps pubkey prefix → advertised node name.
    Populated from onAdvertRecv(); persisted to SPIFFS /names.          */
@@ -202,6 +206,11 @@ struct PostInfo {
   char            text[MAX_POST_TEXT_LEN + 1];
   uint8_t         room_idx;       // owning room (0xFF = free slot)
   uint8_t         origin_id[4];   // Phase 5: 4-byte prefix of room-server that originated post
+  uint32_t        msg_id;         // JES-861: sender's message timestamp — stable across nodes.
+                                  // (author, msg_id) is the logical message identity used to
+                                  // suppress echoes when the same message reaches both coupled
+                                  // room-servers. 0 = unknown (server/OP posts, pre-JES-861 posts).
+                                  // RAM-only: not persisted (post_log stays v2), defaults to 0 on load.
 };
 
 /**
@@ -429,7 +438,7 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void*               _mqtt_post_ctx;
 
   /* ---- Per-slot helpers ---- */
-  void          addPost(RoomSlot& slot, ClientInfo* client, const char* text);
+  void          addPost(RoomSlot& slot, ClientInfo* client, const char* text, uint32_t msg_id = 0);
   void          pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInfo& post);
   uint8_t       getUnsyncedCount(RoomSlot& slot, ClientInfo* client);
   bool          processAckForSlot(RoomSlot& slot, const uint8_t* data);
@@ -460,7 +469,8 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   void          handleSyncEnd(int pi, uint8_t* data, size_t len);
   void          pushPostToPeer(int pi, RoomSlot& slot, PostInfo& post);
   bool          ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
-                               uint32_t ts, const uint8_t* author_pub, const char* text);
+                               uint32_t ts, const uint8_t* author_pub, const char* text,
+                               uint32_t msg_id = 0);
 
   /* ---- Post pool persistence (JES-787) ---- */
   void          savePostPool();
