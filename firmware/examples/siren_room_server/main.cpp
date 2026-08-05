@@ -3,11 +3,14 @@
 #ifdef ESP32
   #include <esp_ota_ops.h>
   #include <esp_system.h>
+  #if defined(SIREN_SD_CARD)
+    #include <SD.h>
+  #endif
 #endif
 
 #include "MyMesh.h"
 #include "SettingsMenu.h"
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
   #include "WebManager.h"
   #include "MqttManager.h"
 #endif
@@ -23,7 +26,7 @@ MultiRoomMesh the_mesh(board, radio_driver,
                        *new ArduinoMillis(), fast_rng,
                        rtc_clock, tables);
 SettingsMenu settings_menu(the_mesh);
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
   WebManager  web_manager(the_mesh);
   MqttManager mqtt_manager(the_mesh);
 #endif
@@ -74,8 +77,26 @@ void setup() {
   LittleFS.begin();
   fs = &LittleFS;
 #elif defined(ESP32)
-  SPIFFS.begin(true);
-  fs = &SPIFFS;
+  // SD offload (JES-851): when an SD/FAT filesystem is compiled in, prefer it
+  // for room persistence AND the large post archive, falling back to SPIFFS
+  // when no card is present or mounting fails.
+  bool sd_ok = false;
+  #if defined(SIREN_SD_CARD)
+    #if defined(SIREN_SD_SCK) && defined(SIREN_SD_MISO) && defined(SIREN_SD_MOSI)
+      // SD card on a dedicated SPI bus (e.g. VSPI pins on the T-LoRa V2.1),
+      // separate from the LoRa radio SPI.
+      SPI.begin(SIREN_SD_SCK, SIREN_SD_MISO, SIREN_SD_MOSI, SIREN_SD_CS);
+    #endif
+    sd_ok = SD.begin(SIREN_SD_CS);
+    if (sd_ok) {
+      Serial.println("[SIREN] SD card mounted — using it as primary filesystem");
+      fs = &SD;
+    }
+  #endif
+  if (!sd_ok) {
+    SPIFFS.begin(true);
+    fs = &SPIFFS;
+  }
 #else
   #error "Unsupported platform"
 #endif
@@ -83,7 +104,7 @@ void setup() {
   sensors.begin();
   the_mesh.begin(fs);
 
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
   web_manager.begin();
 
   // MqttManager: register post-publish hook into the mesh, then start
@@ -97,7 +118,7 @@ void setup() {
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
-  #ifdef ENABLE_WIFI_MGMT
+  #if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
     web_manager.setUITask(&ui_task);
   #endif
 #endif
@@ -122,7 +143,7 @@ void setup() {
   Serial.println("  room stealth <idx> on|off | qr <idx>");
   Serial.println("  rooms | msgs <idx> [n] | nicks <idx> | say <idx> <text>");
   Serial.println("  peer list | add <hex64> <name> | del <idx> | status | sync");
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
   Serial.println("  wifi mode ap|sta | wifi ap ssid <n> | wifi ap pass <p>");
   Serial.println("  wifi ssid <n> | wifi pass <p> | wifi connect | wifi status");
   Serial.println("  mqtt status | enable | disable | set host|port|tls|user|pass|net_id ...");
@@ -163,7 +184,7 @@ void loop() {
           handled = true;
         }
 #endif
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
         if (!handled && memcmp(command, "wifi ", 5) == 0) {
           web_manager.handleWifiCommand(command + 5, reply);
           handled = true;
@@ -192,7 +213,7 @@ void loop() {
 
   the_mesh.loop();
   sensors.loop();
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
   web_manager.loop();
   mqtt_manager.loop();
 #endif
@@ -205,7 +226,7 @@ void loop() {
     ui_stats.wifi_mode     = 0;
     ui_stats.wifi_ip[0]    = 0;
     ui_stats.contact_count = the_mesh.getTotalContacts();
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
     ui_stats.wifi_mode = (uint8_t)(web_manager.getMode() + 1);  // MODE_AP=0->1, MODE_STA=1->2
     {
       String ip = (web_manager.getMode() == WebManager::MODE_AP)

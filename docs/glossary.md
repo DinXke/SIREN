@@ -208,10 +208,10 @@ In SIREN replication context: another SIREN room server node that this node repl
 The build system and IDE extension used to compile SIREN firmware. Uses INI-based configuration (`platformio.ini`). Target environment: `SIREN_v3_room_server`.
 
 **Post**
-A message stored in a SIREN room. Contains: author identity, timestamp, and text (max ~151 characters). Stored in RAM in the global post pool. Lost on reboot.
+A message stored in a SIREN room. Contains: author identity, timestamp, and text (max ~151 characters). Appended to the on-disk post journal on ingest and kept in the RAM window. Survives reboot (within the retention cap).
 
-**Post pool**
-The global array of `PostInfo` structures shared across all rooms (`_post_pool[128]`). Each entry's `room_idx` field identifies which room it belongs to.
+**Post journal / post log**
+The on-disk append-only archive of `PostInfo` records (`/post_log`), one 193-byte record per post, retained up to `POST_ARCHIVE_CAP` (default 128; 512 on SD-equipped boards). The newest `POST_RAM_CACHE` (default 24) posts are kept resident in RAM as the working window.
 
 **PRG button**
 The "Program" button on the Heltec board (GPIO0). Press to wake the OLED from auto-off. Hold during boot to enter download mode (for USB flashing).
@@ -231,7 +231,7 @@ A machine-readable barcode encoding the room join URI. Shown on the Web UI per-r
 ## R
 
 **RAM**
-Random Access Memory — volatile storage that loses its contents on power-off or reboot. SIREN stores the post pool and active room state in RAM. The ESP32-S3 has approximately 512 KB of available RAM.
+Random Access Memory — volatile storage that loses its contents on power-off or reboot. SIREN keeps the resident post working window and active room state in RAM; the full post archive lives on the filesystem. The ESP32-S3 has approximately 512 KB of available RAM.
 
 **Repeater**
 A MeshCore node whose primary function is to receive and re-transmit packets, extending the mesh's range. SIREN room servers can be configured with repeater-like forwarding settings.

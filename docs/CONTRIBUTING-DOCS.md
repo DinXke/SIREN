@@ -51,7 +51,7 @@ When adding new documentation, ask which type it is and place it accordingly.
 | `docs/introduction.md` | What SIREN is, LoRa, MeshCore — for absolute beginners |
 | `docs/hardware.md` | Heltec LoRa32 V3 hardware, antenna, board units |
 | `docs/getting-started.md` | First flash, OTA, radio defaults, quick-start checklist |
-| `docs/architecture.md` | Multiroom model, RoomSlot, post pool, packet dispatch, SPIFFS layout |
+| `docs/architecture.md` | Multiroom model, RoomSlot, post journal/pool, packet dispatch, SPIFFS/SD layout |
 | `docs/wifi-webui.md` | AP/STA modes, web management pages, backup/restore, OTA via web |
 | `docs/cli-reference.md` | Every CLI command with syntax, examples, and expected output |
 | `docs/web-clients.md` | Standalone HTML client and React client — install, use, troubleshoot |

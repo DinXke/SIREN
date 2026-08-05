@@ -1,5 +1,5 @@
 #ifdef ESP32
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
 
 #include "OtaManager.h"
 #include <WiFiClientSecure.h>

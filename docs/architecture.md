@@ -34,19 +34,29 @@ struct RoomSlot {
 
 Up to `MAX_ROOMS = 16` slots exist in RAM. Room slot 0 always exists (it is created on first boot if no config is found). Additional rooms are created and deleted at runtime via CLI or Web UI.
 
-### Global Post Pool
+### Global Post Store (RAM window + on-disk journal)
 
-Messages (posts) are **not** stored per-room. Instead, all posts across all rooms share a single global pool:
+Messages (posts) are stored in a **two-tier** design: a small RAM working
+window plus a compact on-disk append-only journal (`/post_log`) on the active
+filesystem (SD card when present, otherwise SPIFFS):
 
 ```cpp
-PostInfo _post_pool[MAX_TOTAL_POSTS];  // MAX_TOTAL_POSTS = 128
+PostInfo* _post_ram;    // newest POST_RAM_CACHE posts resident in RAM
+int       _post_ram_cnt;
+int       _post_total;  // post count in the on-disk journal
 ```
 
-Each `PostInfo` entry knows which room it belongs to (`room_idx` field). When a room is pushed a new post, the firmware looks for a free slot in the pool. If the pool is full, the oldest post from that room is evicted (FIFO within each room's quota).
+- **RAM window** — the newest `POST_RAM_CACHE` (default 24) posts are kept in
+  RAM as the working set. This is what the web UI and CLI iterate. RAM usage is
+  fixed and small no matter how large the archive grows.
+- **On-disk journal** — every post is appended to `/post_log` (v3 format, one
+  193-byte record per post) immediately on ingest. The journal retains up to
+  `POST_ARCHIVE_CAP` (default 128; 512 on boards with an SD card) posts, oldest
+  evicted by compaction once the cap is exceeded.
 
-**Per-room quota**: The effective quota per room scales with how many rooms are active. With 2 active rooms: up to 64 posts/room. With 16 active rooms: 8 posts/room.
-
-**Important**: Posts are stored in RAM only. A power cycle or reboot clears all messages. Room configuration and identities are persisted to SPIFFS and survive reboots.
+Persisting each post synchronously means **posts survive a reboot / power
+cycle**, which the old RAM-only pool could not guarantee. Room configuration
+and identities continue to live in SPIFFS.
 
 ### PeerInfo (Replication Groundwork)
 
@@ -154,7 +164,7 @@ When a member sends a post to a room:
 ```
 1. Member sends encrypted DM to room's public key
 2. Room server receives, decrypts, authenticates sender (must be in ACL with write permission)
-3. Post stored in global _post_pool[]
+3. Post stored in the RAM window and appended to the on-disk journal (/post_log)
 4. Server round-robins through member list, pushing undelivered posts to each member
    - Push: encrypted direct message to member's public key
    - Member sends ACK when received
@@ -168,15 +178,19 @@ The server does not push posts back to the original author (they already have th
 
 ## Memory Budget
 
-At compile time, with `MAX_ROOMS=16` and `MAX_TOTAL_POSTS=128`:
+At compile time, with `MAX_ROOMS=16`, `POST_ARCHIVE_CAP=128` and `POST_RAM_CACHE=24`:
 
 ```
-RoomSlot[16]        ≈ 16 * ~200 bytes    = ~3.2 KB
-PostInfo[128]       ≈ 128 * ~180 bytes   = ~23 KB
-PeerInfo[8]         ≈ 8 * ~60 bytes      = ~0.5 KB
-Packet pool (32)    ≈ 32 * ~256 bytes    = ~8 KB
-Total data overhead ≈ ~35 KB
+RoomSlot[16]          ≈ 16 * ~200 bytes    = ~3.2 KB
+PostInfo[24] (RAM)    ≈ 24 * ~180 bytes    = ~4.3 KB   (fixed, journal-backed)
+PeerInfo[8]           ≈ 8 * ~60 bytes      = ~0.5 KB
+Packet pool (32)      ≈ 32 * ~256 bytes    = ~8 KB
+Total data overhead   ≈ ~16 KB
 ```
+
+The full post archive (up to `POST_ARCHIVE_CAP`) lives on the filesystem, not
+in RAM — so archive capacity can be raised (e.g. 512 on SD-equipped boards)
+without growing DRAM.
 
 ESP32-S3 has 512 KB RAM. At v1.16 baseline + Phase 1-3 implementation, measured RAM usage is approximately **40.5%** (~207 KB), leaving healthy headroom.
 
@@ -193,6 +207,9 @@ All persistent data is stored in SPIFFS (the on-chip filesystem):
 | ... | |
 | `/room_cfg` | Binary blob: active flags, names, passwords for all rooms |
 | `/peer_cfg` | Binary blob: peer room server list |
+| `/post_log` | Append-only post journal (v3, one record per post) + `/post_count` sidecar |
+| `/names` | Learned display-name table (LRU, up to 32 entries) |
+| `/notify_cfg` | Admin login-attempt notification targets |
 | `/wifi_sta.json` | WiFi mode and credentials |
 | (NVS via CommonCLI) | Radio settings (freq/BW/SF/CR/TX), node name, admin password, flood params |
 
@@ -235,7 +252,8 @@ Key build-time constants (set in `firmware/variants/heltec_v3/platformio.ini`):
 | Flag | Default | Meaning |
 |---|---|---|
 | `MAX_ROOMS` | 16 | Maximum virtual rooms per device |
-| `MAX_TOTAL_POSTS` | 128 | Global post pool size (shared across all rooms) |
+| `POST_ARCHIVE_CAP` | 128 | Post journal retention cap (512 on SD-equipped boards) |
+| `POST_RAM_CACHE` | 24 | Posts kept resident in RAM (working set) |
 | `MAX_PEERS` | 8 | Maximum peer room servers for replication |
 | `ADMIN_PASSWORD` | `password` | Default admin password (change post-flash) |
 | `LORA_FREQ` | 869.618 | Radio frequency in MHz |

@@ -310,11 +310,14 @@ Understanding what is saved and what is lost is critical for operations:
 
 ```
 SIREN Node
-├── SPIFFS (flash filesystem) — SURVIVES POWER LOSS
+├── Filesystem (SPIFFS or SD) — SURVIVES POWER LOSS
 │   ├── /identity/_room0        Room 0 Ed25519 keypair
 │   ├── /identity/_room1        Room 1 Ed25519 keypair
 │   ├── /room_cfg               Room names, passwords, stealth flags, ACL
 │   ├── /peer_cfg               Peer node list (for replication)
+│   ├── /post_log               Post archive (append-only journal)
+│   ├── /names                  Learned display-name table
+│   ├── /notify_cfg             Admin login-attempt notification targets
 │   ├── /wifi_sta.json          WiFi mode and credentials
 │   └── /screensaver_cfg.json   OLED screensaver settings
 │
@@ -324,13 +327,20 @@ SIREN Node
 │   ├── Admin password          Management room admin password
 │   └── Flood parameters        flood_max_unscoped, flood_max_advert
 │
-└── RAM — LOST ON POWER CYCLE
-    ├── Post pool               All chat messages (128 posts max)
-    ├── Pending ACKs            Delivery confirmations in flight
-    └── Runtime state           Connected clients, retry counters
+└── Filesystem — SURVIVES POWER LOSS
+    ├── SPIFFS/SD              Room config, identities, member lists, names
+    ├── Post log (/post_log)   All chat messages (append-only journal, up to POST_ARCHIVE_CAP)
+    └── RAM (working set)       PostInfo window (newest POST_RAM_CACHE posts), pending ACKs, runtime state
 ```
 
-**Implication for replication**: If all nodes in a cluster lose power simultaneously, all messages are lost. Room configuration and member lists survive. Design your deployment with at least one always-on node if message persistence matters.
+**Post persistence**: Every post is appended to `/post_log` on the active
+filesystem immediately on ingest, so messages survive a reboot. The RAM window
+holds only the newest `POST_RAM_CACHE` posts. With SD-equipped boards the
+archive cap is raised (e.g. 512) and the journal lives on the SD card.
+
+**Implication for replication**: A full power loss on every node keeps room
+configuration and member lists, and now also the persisted post journal. Design
+your deployment with at least one always-on node if message persistence matters.
 
 ---
 
