@@ -82,6 +82,25 @@ There are currently two Heltec units in use:
 
 Both units are fully functional and can be updated via either USB serial or OTA. Configuration is available via USB serial CLI, CLI-over-mesh, or the Web UI.
 
+### Optional: LILYGO T-LoRa V2.1
+
+SIREN also builds for the **LILYGO T-LoRa V2.1-1.6** (ESP32 + SX1276, 4 MB
+flash) as a headless SD-card-equipped room server. This board drops OTA (single
+factory app slot, see `partitions_siren_lilygo.csv`) and instead persists rooms
+and the post journal on the onboard microSD card via VSPI:
+
+| Signal | GPIO |
+|---|---|
+| SD CS  | 13 |
+| SD MOSI | 15 |
+| SD MISO | 2 |
+| SD SCK  | 14 |
+
+- Runs firmware environment `SIREN_lilygo_tlora_v2_1`
+- WiFi/MQTT/Ota are disabled (`ENABLE_WIFI_MGMT=0`); administration is over the
+  LoRa mesh CLI only.
+- Post archive cap raised to 512 (journal on SD).
+
 ---
 
 ## USB and Serial

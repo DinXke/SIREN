@@ -1,5 +1,5 @@
 #ifdef ESP32
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
 
 #include "WebManager.h"
 #include "MqttManager.h"
@@ -2958,10 +2958,11 @@ void WebManager::setupRoutes() {
     }
 
     const PostInfo* pool = _mesh.getPostPool();
+    int pool_cnt = _mesh.getPostPoolCount();
     // Collect posts for room, sorted ascending by timestamp
-    const PostInfo* sorted[MAX_TOTAL_POSTS];
+    const PostInfo* sorted[POST_RAM_CACHE];
     int cnt = 0;
-    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
+    for (int i = 0; i < pool_cnt; i++) {
       if (pool[i].room_idx == (uint8_t)room_idx) sorted[cnt++] = &pool[i];
     }
     // Insertion sort by timestamp

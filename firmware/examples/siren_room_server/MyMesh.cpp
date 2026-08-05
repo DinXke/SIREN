@@ -107,8 +107,9 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
   memset(rooms, 0, sizeof(rooms));
-  memset(_post_pool, 0, sizeof(_post_pool));
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) _post_pool[i].room_idx = 0xFF;
+  _post_ram = nullptr;
+  _post_ram_cnt = 0;
+  _post_total = 0;
   memset(peers, 0, sizeof(peers));
   _num_peers = 0;
   for (int i = 0; i < MAX_PEERS; i++) {
@@ -146,6 +147,17 @@ MultiRoomMesh::MultiRoomMesh(mesh::MainBoard& board, mesh::Radio& radio,
 void MultiRoomMesh::begin(FILESYSTEM* fs) {
   mesh::Mesh::begin();
   _fs = fs;
+
+  // Allocate the RAM post window on the heap instead of static .bss. The full
+  // archive (up to POST_ARCHIVE_CAP posts) lives in the /post_log journal on
+  // the active filesystem, so the resident copy is just a bounded working set
+  // (newest POST_RAM_CACHE posts).  Heap placement keeps the static DRAM
+  // footprint small on RAM-constrained no-PSRAM targets.
+  _post_ram = new PostInfo[POST_RAM_CACHE];
+  memset(_post_ram, 0, sizeof(PostInfo) * POST_RAM_CACHE);
+  for (int i = 0; i < POST_RAM_CACHE; i++) _post_ram[i].room_idx = 0xFF;
+  _post_ram_cnt = 0;
+  _post_total = 0;
 
 #ifdef ESP32
   // Create mutex that guards rooms[] against concurrent access from the
@@ -1030,51 +1042,17 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   // covers the case where the peer's replicated copy arrived via sync before
   // our own direct reception of the flooded message.
   if (msg_id != 0) {
-    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-      if (_post_pool[i].room_idx == ridx &&
-          _post_pool[i].msg_id == msg_id &&
-          memcmp(_post_pool[i].author.pub_key, client->id.pub_key, 4) == 0)
+    // msg_id is RAM-only (JES-861), so dedup scans the resident window.
+    for (int i = 0; i < POST_RAM_CACHE; i++) {
+      if (_post_ram[i].room_idx == ridx &&
+          _post_ram[i].msg_id == msg_id &&
+          memcmp(_post_ram[i].author.pub_key, client->id.pub_key, 4) == 0)
         return;   // already have this message
     }
   }
 
-  int quota = MAX_TOTAL_POSTS / (_num_active_rooms > 0 ? _num_active_rooms : 1);
-
-  // Find a free slot; also track oldest post owned by this room
-  PostInfo* free_slot = nullptr;
-  PostInfo* oldest_for_room = nullptr;
-  int room_count = 0;
-
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    PostInfo& p = _post_pool[i];
-    if (p.room_idx == 0xFF) {
-      if (!free_slot) free_slot = &p;
-    } else if (p.room_idx == ridx) {
-      room_count++;
-      if (!oldest_for_room || p.post_timestamp < oldest_for_room->post_timestamp)
-        oldest_for_room = &p;
-    }
-  }
-
-  // If this room is at quota, evict its oldest post to make room
-  if (room_count >= quota && oldest_for_room) {
-    memset(oldest_for_room, 0, sizeof(PostInfo));
-    oldest_for_room->room_idx = 0xFF;
-    if (!free_slot) free_slot = oldest_for_room;
-  }
-
-  // Last resort: pool completely full — evict the globally oldest post
-  if (!free_slot) {
-    PostInfo* oldest_global = nullptr;
-    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-      if (!oldest_global || _post_pool[i].post_timestamp < oldest_global->post_timestamp)
-        oldest_global = &_post_pool[i];
-    }
-    memset(oldest_global, 0, sizeof(PostInfo));
-    oldest_global->room_idx = 0xFF;
-    free_slot = oldest_global;
-  }
-
+  PostInfo* free_slot = postStoreSlot(ridx);
+  if (!free_slot) return;
   free_slot->author         = client->id;
   StrHelper::strncpy(free_slot->text, text, MAX_POST_TEXT_LEN);
   free_slot->post_timestamp = getRTCClock()->getCurrentTimeUnique();
@@ -1089,6 +1067,9 @@ void MultiRoomMesh::addPost(RoomSlot& slot, ClientInfo* client, const char* text
   // (e.g. operator/[OP] posts). Using the per-node identity makes each
   // room-server a distinct origin, which is what the VV model requires.
   memcpy(free_slot->origin_id, rooms[0].id.pub_key, 4);
+
+  // Persist immediately to the on-disk journal (RAM window stays bounded).
+  postLogAppend(*free_slot);
 
   DLOG(free_slot->post_timestamp,
        "RX post room=%d auth=%02x%02x%02x%02x ts=%lu txt=%.30s",
@@ -1189,8 +1170,8 @@ void MultiRoomMesh::pushPostToClient(RoomSlot& slot, ClientInfo* client, PostInf
 uint8_t MultiRoomMesh::getUnsyncedCount(RoomSlot& slot, ClientInfo* client) {
   uint8_t ridx = (uint8_t)(&slot - rooms);
   uint8_t count = 0;
-  for (int k = 0; k < MAX_TOTAL_POSTS; k++) {
-    const PostInfo& p = _post_pool[k];
+  for (int k = 0; k < POST_RAM_CACHE; k++) {
+    const PostInfo& p = _post_ram[k];
     if (p.room_idx == ridx &&
         p.post_timestamp > client->extra.room.sync_since &&
         !p.author.matches(client->id)) {
@@ -1419,8 +1400,8 @@ void MultiRoomMesh::loopSlot(RoomSlot& slot) {
     uint8_t ridx = (uint8_t)(&slot - rooms);
     uint32_t now = getRTCClock()->getCurrentTime();
     PostInfo* oldest_unsynced = nullptr;
-    for (int k = 0; k < MAX_TOTAL_POSTS; k++) {
-      PostInfo& p = _post_pool[k];
+    for (int k = 0; k < POST_RAM_CACHE; k++) {
+      PostInfo& p = _post_ram[k];
       if (p.room_idx == ridx &&
           now >= p.post_timestamp + POST_SYNC_DELAY_SECS &&
           p.post_timestamp > client->extra.room.sync_since &&
@@ -1885,10 +1866,10 @@ void MultiRoomMesh::handleCommand(uint32_t sender_timestamp,
 
     // Collect posts for this room sorted by timestamp ascending
     // Simple selection sort over the pool (small pool, non-hot path)
-    const PostInfo* sorted[MAX_TOTAL_POSTS];
+    const PostInfo* sorted[POST_RAM_CACHE];
     int cnt = 0;
-    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-      if (_post_pool[i].room_idx == (uint8_t)ridx) sorted[cnt++] = &_post_pool[i];
+    for (int i = 0; i < POST_RAM_CACHE; i++) {
+      if (_post_ram[i].room_idx == (uint8_t)ridx) sorted[cnt++] = &_post_ram[i];
     }
     // Insertion sort by timestamp
     for (int i = 1; i < cnt; i++) {
@@ -2648,10 +2629,10 @@ void MultiRoomMesh::handleRoomCommand(char* args, char* reply, bool serial) {
     }
 
     // collect and insertion-sort posts for this room by timestamp ascending
-    const PostInfo* sorted[MAX_TOTAL_POSTS];
+    const PostInfo* sorted[POST_RAM_CACHE];
     int cnt = 0;
-    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-      if (_post_pool[i].room_idx == (uint8_t)ridx) sorted[cnt++] = &_post_pool[i];
+    for (int i = 0; i < POST_RAM_CACHE; i++) {
+      if (_post_ram[i].room_idx == (uint8_t)ridx) sorted[cnt++] = &_post_ram[i];
     }
     for (int i = 1; i < cnt; i++) {
       const PostInfo* key = sorted[i];
@@ -2995,12 +2976,18 @@ void MultiRoomMesh::loadPeerConfig() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Post pool persistence (JES-787, updated Phase 5)                    */
-/*  Binary layout per slot (193 bytes):                                 */
-/*    [32: author pub_key][4: post_timestamp][152: text]                */
-/*    [1: room_idx][4: origin_id]                                       */
-/*  File header (6 bytes):                                              */
-/*    [4: magic 'POST'][1: version=2][1: num_slots=MAX_TOTAL_POSTS]    */
+/* ------------------------------------------------------------------ */
+/*  Post store persistence (JES-787, updated to journal model)          */
+/*  v3 journal = append-only: header + a stream of fixed 193-byte        */
+/*  records, one per post (no empty slots):                              */
+/*    [32: author pub_key][4: post_timestamp][152: text]                 */
+/*    [1: room_idx][4: origin_id]                                        */
+/*  File header (6 bytes):                                               */
+/*    [4: magic 'POST'][1: version=3][1: reserved]                       */
+/*  A 4-byte /post_count sidecar caches the record count; the            */
+/*  authoritative count is always re-derived by scanning the file.       */
+/*  The journal is compacted (oldest dropped) once it exceeds            */
+/*  POST_ARCHIVE_CAP; RAM stays bounded by POST_RAM_CACHE.               */
 /* ------------------------------------------------------------------ */
 #define POST_LOG_PATH    "/post_log"
 #define POST_LOG_TMP     "/post_log.tmp"
@@ -3008,140 +2995,346 @@ void MultiRoomMesh::loadPeerConfig() {
 #define POST_LOG_MAGIC_1 0x4F   // 'O'
 #define POST_LOG_MAGIC_2 0x53   // 'S'
 #define POST_LOG_MAGIC_3 0x54   // 'T'
-#define POST_LOG_VERSION 2      // bumped: added origin_id[4] per slot
-// v1 slot = 32+4+152+1 = 189 bytes (no origin_id); v2 slot = 193 bytes
-#define POST_LOG_V1_SLOT_SIZE  (PUB_KEY_SIZE + 4 + (MAX_POST_TEXT_LEN + 1) + 1)
+#define POST_LOG_VERSION 3      // v3 = append-only journal (no empty slots)
+#ifndef POST_LOG_REC_SIZE
+  #define POST_LOG_REC_SIZE  (PUB_KEY_SIZE + 4 + (MAX_POST_TEXT_LEN + 1) + 1 + 4)
+#endif
+#ifndef POST_COUNT_PATH
+  #define POST_COUNT_PATH    "/post_count"
+#endif
 
-void MultiRoomMesh::savePostPool() {
+/* Read/write one 193-byte record field-by-field (avoid struct padding). */
+static bool writePostRecord(File& f, const PostInfo& p) {
+  if (f.write(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) return false;
+  if (f.write((const uint8_t*)&p.post_timestamp, 4) != 4) return false;
+  if (f.write((const uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) return false;
+  if (f.write(&p.room_idx, 1) != 1) return false;
+  if (f.write(p.origin_id, 4) != 4) return false;
+  return true;
+}
+static bool readPostRecord(File& f, PostInfo& p) {
+  memset(&p, 0, sizeof(PostInfo));
+  if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) return false;
+  if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) return false;
+  if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) return false;
+  if (f.read(&p.room_idx, 1) != 1) return false;
+  if (f.read(p.origin_id, 4) != 4) return false;
+  return true;
+}
+
+void MultiRoomMesh::writePostCount() {
   if (!_fs) return;
-  // Write to .tmp first; rename atomically so a power-cut never corrupts the live file.
+  uint32_t cnt = (uint32_t)_post_total;
+  File f = _fs->open(POST_COUNT_PATH, "w", true);
+  if (!f) return;
+  f.write((const uint8_t*)&cnt, 4);
+  f.close();
+}
+
+/* Re-derive the retained post count by scanning the journal, then cache it. */
+void MultiRoomMesh::recountFromJournal() {
+  _post_total = 0;
+  if (!_fs || !_fs->exists(POST_LOG_PATH)) { writePostCount(); return; }
+  File f = _fs->open(POST_LOG_PATH);
+  if (!f) { writePostCount(); return; }
+  uint8_t hdr[6];
+  if (f.read(hdr, 6) != 6 ||
+      hdr[0] != POST_LOG_MAGIC_0 || hdr[1] != POST_LOG_MAGIC_1 ||
+      hdr[2] != POST_LOG_MAGIC_2 || hdr[3] != POST_LOG_MAGIC_3) {
+    f.close(); writePostCount(); return;
+  }
+  PostInfo p;
+  while (readPostRecord(f, p)) _post_total++;
+  f.close();
+  writePostCount();
+}
+
+/* Pick a RAM-window slot for a new post of room ridx.  Reuses a free slot,
+ * else evicts the globally-oldest resident post to make room.  The evicted
+ * post stays persisted in the on-disk journal, so nothing is lost. */
+PostInfo* MultiRoomMesh::postStoreSlot(uint8_t ridx) {
+  for (int i = 0; i < POST_RAM_CACHE; i++) {
+    if (_post_ram[i].room_idx == 0xFF) {
+      memset(&_post_ram[i], 0, sizeof(PostInfo));
+      _post_ram[i].room_idx = ridx;
+      _post_ram_cnt++;
+      return &_post_ram[i];
+    }
+  }
+  // Window full: evict the globally oldest resident post.
+  int oldest = 0;
+  for (int i = 1; i < POST_RAM_CACHE; i++) {
+    if (_post_ram[i].post_timestamp < _post_ram[oldest].post_timestamp) oldest = i;
+  }
+  memset(&_post_ram[oldest], 0, sizeof(PostInfo));
+  _post_ram[oldest].room_idx = ridx;
+  return &_post_ram[oldest];
+}
+
+/* Append one post to the /post_log journal (fresh header on creation).
+ * Persists immediately so RAM stays bounded by the window. */
+void MultiRoomMesh::postLogAppend(const PostInfo& p) {
+  if (!_fs) return;
+  bool existed = _fs->exists(POST_LOG_PATH);
 #if defined(RP2040_PLATFORM)
-  File f = _fs->open(POST_LOG_TMP, "w");
-#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  _fs->remove(POST_LOG_TMP);
-  File f = _fs->open(POST_LOG_TMP, FILE_O_WRITE);
+  File f = existed ? _fs->open(POST_LOG_PATH, "a") : _fs->open(POST_LOG_PATH, "w");
 #else
-  File f = _fs->open(POST_LOG_TMP, "w", true);
+  File f = existed ? _fs->open(POST_LOG_PATH, "a", true) : _fs->open(POST_LOG_PATH, "w", true);
 #endif
   if (!f) return;
+  if (!existed) {
+    uint8_t hdr[6] = {POST_LOG_MAGIC_0, POST_LOG_MAGIC_1,
+                      POST_LOG_MAGIC_2, POST_LOG_MAGIC_3,
+                      POST_LOG_VERSION, 1};
+    f.write(hdr, 6);
+  }
+  writePostRecord(f, p);
+  f.close();
+  _post_total++;
+  writePostCount();
+  if (_post_total > POST_ARCHIVE_CAP) postLogCompact();
+}
 
-  // Header
-  uint8_t hdr[6] = {POST_LOG_MAGIC_0, POST_LOG_MAGIC_1,
-                    POST_LOG_MAGIC_2, POST_LOG_MAGIC_3,
-                    POST_LOG_VERSION, (uint8_t)MAX_TOTAL_POSTS};
-  f.write(hdr, 6);
-
-  // All pool slots (field-by-field to avoid struct padding issues)
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    const PostInfo& p = _post_pool[i];
-    f.write(p.author.pub_key, PUB_KEY_SIZE);
-    f.write((const uint8_t*)&p.post_timestamp, 4);
-    f.write((const uint8_t*)p.text, MAX_POST_TEXT_LEN + 1);
-    f.write(&p.room_idx, 1);
-    f.write(p.origin_id, 4);   // Phase 5
+/* True if a post with these identity fields is in the window or journal. */
+bool MultiRoomMesh::postLogFind(uint8_t room_idx, const uint8_t* origin_id,
+                                uint32_t post_ts) const {
+  for (int i = 0; i < POST_RAM_CACHE; i++) {
+    const PostInfo& p = _post_ram[i];
+    if (p.room_idx == room_idx && p.post_timestamp == post_ts &&
+        memcmp(p.origin_id, origin_id, 4) == 0) return true;
+  }
+  if (!_fs || !_fs->exists(POST_LOG_PATH)) return false;
+  File f = _fs->open(POST_LOG_PATH);
+  if (!f) return false;
+  uint8_t hdr[6]; bool found = false;
+  if (f.read(hdr, 6) == 6) {
+    PostInfo p;
+    while (readPostRecord(f, p)) {
+      if (p.room_idx == room_idx && p.post_timestamp == post_ts &&
+          memcmp(p.origin_id, origin_id, 4) == 0) { found = true; break; }
+    }
   }
   f.close();
+  return found;
+}
 
-  // Atomic commit: remove old file then rename tmp into place.
-  // SPIFFS has no true rename; remove+rename is the closest atomic-ish operation.
+/* Remove a single post from the window + journal.  Does not touch per-room
+ * num_posted or tombstones (callers do that). Returns true if it was found. */
+bool MultiRoomMesh::postLogRemove(uint8_t room_idx, const uint8_t* origin_id,
+                                  uint32_t post_ts) {
+  bool found = false;
+  for (int i = 0; i < POST_RAM_CACHE; i++) {
+    PostInfo& p = _post_ram[i];
+    if (p.room_idx == room_idx && p.post_timestamp == post_ts &&
+        memcmp(p.origin_id, origin_id, 4) == 0) {
+      memset(&p, 0, sizeof(PostInfo));
+      p.room_idx = 0xFF;
+      _post_ram_cnt--;
+      found = true;
+      break;
+    }
+  }
+  if (_fs && _fs->exists(POST_LOG_PATH) && _post_total > 0) {
+    File in = _fs->open(POST_LOG_PATH);
+    if (in) {
+      uint8_t hdr[6];
+      if (in.read(hdr, 6) == 6 && hdr[4] == POST_LOG_VERSION) {
+        File out = _fs->open(POST_LOG_TMP, "w", true);
+        if (out) {
+          out.write(hdr, 6);
+          PostInfo p;
+          int kept = 0;
+          while (readPostRecord(in, p)) {
+            if (p.room_idx == room_idx && p.post_timestamp == post_ts &&
+                memcmp(p.origin_id, origin_id, 4) == 0) continue;
+            writePostRecord(out, p);
+            kept++;
+          }
+          out.close();
+          _fs->remove(POST_LOG_PATH);
+          _fs->rename(POST_LOG_TMP, POST_LOG_PATH);
+          _post_total = kept;
+          writePostCount();
+        }
+      }
+      in.close();
+    }
+  }
+  return found;
+}
+
+/* Compaction: drop the oldest posts once the journal exceeds POST_ARCHIVE_CAP. */
+void MultiRoomMesh::postLogCompact() {
+  if (!_fs) return;
+  if (_post_total <= POST_ARCHIVE_CAP) return;   // nothing to drop
+  int drop = _post_total - POST_ARCHIVE_CAP;
+  if (!_fs->exists(POST_LOG_PATH)) { _post_total = 0; writePostCount(); return; }
+  File in = _fs->open(POST_LOG_PATH);
+  if (!in) { recountFromJournal(); return; }
+  uint8_t hdr[6];
+  if (in.read(hdr, 6) != 6 || hdr[4] != POST_LOG_VERSION) { in.close(); recountFromJournal(); return; }
+  File out = _fs->open(POST_LOG_TMP, "w", true);
+  if (!out) { in.close(); return; }
+  out.write(hdr, 6);
+  PostInfo p;
+  int seen = 0, kept = 0;
+  while (readPostRecord(in, p)) {
+    if (seen++ < drop) continue;
+    writePostRecord(out, p);
+    kept++;
+  }
+  out.close(); in.close();
   _fs->remove(POST_LOG_PATH);
   _fs->rename(POST_LOG_TMP, POST_LOG_PATH);
+  _post_total = kept;
+  writePostCount();
+}
+
+/* Drop every post of a (now-deactivated) room from the window + journal. */
+void MultiRoomMesh::removeRoomPosts(int ridx) {
+  if (ridx <= 0 || ridx >= MAX_ROOMS) return;
+  if (_fs && _fs->exists(POST_LOG_PATH)) {
+    File in = _fs->open(POST_LOG_PATH);
+    if (in) {
+      uint8_t hdr[6];
+      if (in.read(hdr, 6) == 6 && hdr[4] == POST_LOG_VERSION) {
+        File out = _fs->open(POST_LOG_TMP, "w", true);
+        if (out) {
+          out.write(hdr, 6);
+          PostInfo p;
+          int kept = 0;
+          while (readPostRecord(in, p)) {
+            if (p.room_idx == (uint8_t)ridx) continue;
+            writePostRecord(out, p);
+            kept++;
+          }
+          out.close();
+          _fs->remove(POST_LOG_PATH);
+          _fs->rename(POST_LOG_TMP, POST_LOG_PATH);
+          _post_total = kept;
+          writePostCount();
+        }
+      }
+      in.close();
+    }
+  }
+  for (int i = 0; i < POST_RAM_CACHE; i++) {
+    if (_post_ram[i].room_idx == ridx) {
+      memset(&_post_ram[i], 0, sizeof(PostInfo));
+      _post_ram[i].room_idx = 0xFF;
+      _post_ram_cnt--;
+    }
+  }
+}
+
+/* Delete the entire journal + sidecar and reset the RAM window. */
+void MultiRoomMesh::removeAllJournal() {
+  if (_fs) {
+    if (_fs->exists(POST_LOG_PATH)) _fs->remove(POST_LOG_PATH);
+    if (_fs->exists(POST_LOG_TMP))  _fs->remove(POST_LOG_TMP);
+    if (_fs->exists(POST_COUNT_PATH)) _fs->remove(POST_COUNT_PATH);
+  }
+  for (int i = 0; i < POST_RAM_CACHE; i++) {
+    memset(&_post_ram[i], 0, sizeof(PostInfo));
+    _post_ram[i].room_idx = 0xFF;
+  }
+  _post_ram_cnt = 0;
+  _post_total = 0;
+}
+
+/* Migrate an old-format (v1 or v2 pool) /post_log into the v3 journal. */
+void MultiRoomMesh::migrateLegacyPostLog() {
+  if (!_fs || !_fs->exists(POST_LOG_PATH)) return;
+  File f = _fs->open(POST_LOG_PATH);
+  if (!f) return;
+  uint8_t hdr[6];
+  if (f.read(hdr, 6) != 6) { f.close(); return; }
+  uint8_t ver = hdr[4];
+  if (ver == POST_LOG_VERSION || hdr[0] != POST_LOG_MAGIC_0) { f.close(); return; }
+  int legacy_slot = (ver == 1) ? (PUB_KEY_SIZE + 4 + (MAX_POST_TEXT_LEN + 1) + 1)
+                               : POST_LOG_REC_SIZE;
+  int stored = (int)(uint8_t)hdr[5];
+
+  // Write a fresh v3 journal containing every non-empty legacy slot.
+  File out = _fs->open(POST_LOG_TMP, "w", true);
+  if (!out) { f.close(); return; }
+  uint8_t nhdr[6] = {POST_LOG_MAGIC_0, POST_LOG_MAGIC_1,
+                     POST_LOG_MAGIC_2, POST_LOG_MAGIC_3, POST_LOG_VERSION, 1};
+  out.write(nhdr, 6);
+
+  PostInfo p;
+  for (int i = 0; i < stored; i++) {
+    memset(&p, 0, sizeof(PostInfo));
+    if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
+    if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
+    if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) break;
+    if (f.read(&p.room_idx, 1) != 1) break;
+    if (legacy_slot == POST_LOG_REC_SIZE) {
+      if (f.read(p.origin_id, 4) != 4) break;
+    } else {
+      memset(p.origin_id, 0, 4);
+    }
+    if (p.room_idx == 0xFF || p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active) continue;
+    writePostRecord(out, p);
+  }
+  out.close();
+  f.close();
+  _fs->remove(POST_LOG_PATH);
+  _fs->rename(POST_LOG_TMP, POST_LOG_PATH);
+  _post_total = 0;
+  recountFromJournal();
 }
 
 void MultiRoomMesh::loadPostPool() {
   if (!_fs) return;
-
-  // Remove any leftover .tmp from a prior interrupted write (power-cut recovery).
   if (_fs->exists(POST_LOG_TMP)) _fs->remove(POST_LOG_TMP);
 
-#if defined(RP2040_PLATFORM)
-  if (!_fs->exists(POST_LOG_PATH)) return;
-  File f = _fs->open(POST_LOG_PATH, "r");
-#else
-  if (!_fs->exists(POST_LOG_PATH)) return;
-  File f = _fs->open(POST_LOG_PATH);
-#endif
-  if (!f) return;
+  if (!_fs->exists(POST_LOG_PATH)) { writePostCount(); return; }
 
-  // Validate magic
+  // Detect a legacy (v1/v2) pool file and migrate it before loading.
+  File probe = _fs->open(POST_LOG_PATH);
+  uint8_t ver = 0;
+  if (probe) {
+    uint8_t hdr[6];
+    if (probe.read(hdr, 6) == 6 && hdr[0] == POST_LOG_MAGIC_0 &&
+        hdr[1] == POST_LOG_MAGIC_1 && hdr[2] == POST_LOG_MAGIC_2 &&
+        hdr[3] == POST_LOG_MAGIC_3) ver = hdr[4];
+    probe.close();
+  }
+  if (ver != 0 && ver != POST_LOG_VERSION) migrateLegacyPostLog();
+
+  recountFromJournal();          // authoritative retained count
+  if (_post_total <= 0) return;
+
+  // Rebuild per-room counts from scratch.
+  for (int i = 0; i < MAX_ROOMS; i++) if (rooms[i].active) rooms[i].num_posted = 0;
+
+  File j = _fs->open(POST_LOG_PATH);
+  if (!j) return;
   uint8_t hdr[6];
-  if (f.read(hdr, 6) != 6) { f.close(); return; }
-  if (hdr[0] != POST_LOG_MAGIC_0 || hdr[1] != POST_LOG_MAGIC_1 ||
-      hdr[2] != POST_LOG_MAGIC_2 || hdr[3] != POST_LOG_MAGIC_3) {
-    f.close();
-    return;   // unrecognised file — start empty (fail-safe, no crash)
-  }
-
-  uint8_t file_ver   = hdr[4];
-  int     stored_cnt = (int)(uint8_t)hdr[5];  // slots written to disk
-  bool    need_resave = false;
-
-  if (file_ver == 1) {
-    // v1 layout: no origin_id field — 189 bytes per slot instead of 193.
-    // Migrate: read v1 slots, zero-fill origin_id, resave as v2 afterwards.
-    int load_cnt = (stored_cnt < MAX_TOTAL_POSTS) ? stored_cnt : MAX_TOTAL_POSTS;
-    for (int i = 0; i < load_cnt; i++) {
-      PostInfo& p = _post_pool[i];
-      if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
-      if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
-      if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) break;
-      if (f.read(&p.room_idx, 1) != 1) break;
-      memset(p.origin_id, 0, 4);  // unknown origin — zero is safe default
-      p.msg_id = 0;               // JES-861: not persisted — unknown for old posts
-      // Prune posts for rooms that are no longer active
-      if (p.room_idx != 0xFF &&
-          (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
-        memset(&p, 0, sizeof(PostInfo));
-        p.room_idx = 0xFF;
-      }
+  if (j.read(hdr, 6) != 6 || hdr[4] != POST_LOG_VERSION) { j.close(); return; }
+  PostInfo p;
+  while (readPostRecord(j, p)) {
+    if (p.room_idx == 0xFF || p.room_idx >= MAX_ROOMS ||
+        !rooms[p.room_idx].active) continue;
+    PostInfo* slot = postStoreSlot(p.room_idx);
+    if (slot) {
+      *slot = p;
+      rooms[p.room_idx].num_posted++;
+      vvUpdate(rooms[p.room_idx], p.origin_id, p.post_timestamp);
     }
-    need_resave = true;  // write back as v2 so next boot skips migration
-  } else if (file_ver == POST_LOG_VERSION) {
-    // Current v2 layout — load min(stored, MAX_TOTAL_POSTS) so a smaller
-    // MAX_TOTAL_POSTS build doesn't crash; excess slots are silently dropped.
-    int load_cnt = (stored_cnt < MAX_TOTAL_POSTS) ? stored_cnt : MAX_TOTAL_POSTS;
-    for (int i = 0; i < load_cnt; i++) {
-      PostInfo& p = _post_pool[i];
-      if (f.read(p.author.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
-      if (f.read((uint8_t*)&p.post_timestamp, 4) != 4) break;
-      if (f.read((uint8_t*)p.text, MAX_POST_TEXT_LEN + 1) != (int)(MAX_POST_TEXT_LEN + 1)) break;
-      if (f.read(&p.room_idx, 1) != 1) break;
-      if (f.read(p.origin_id, 4) != 4) break;  // Phase 5
-      p.msg_id = 0;                            // JES-861: not persisted — unknown for old posts
-      // Prune posts for rooms that are no longer active
-      if (p.room_idx != 0xFF &&
-          (p.room_idx >= MAX_ROOMS || !rooms[p.room_idx].active)) {
-        memset(&p, 0, sizeof(PostInfo));
-        p.room_idx = 0xFF;
-      }
-    }
-    if (stored_cnt != MAX_TOTAL_POSTS) need_resave = true;  // normalise slot count
-  } else {
-    // Unknown/future version — fail-safe: start empty, no crash.
-    f.close();
-    return;
   }
-  f.close();
-
-  // Recount num_posted and rebuild per-room VV from restored pool
-  for (int i = 0; i < MAX_ROOMS; i++) {
-    if (!rooms[i].active) continue;
-    uint16_t cnt = 0;
-    for (int k = 0; k < MAX_TOTAL_POSTS; k++) {
-      if (_post_pool[k].room_idx == (uint8_t)i) {
-        cnt++;
-        // Phase 5: rebuild VV from persisted posts
-        vvUpdate(rooms[i], _post_pool[k].origin_id, _post_pool[k].post_timestamp);
-      }
-    }
-    rooms[i].num_posted = cnt;
-  }
-
-  // Write migrated/normalised data back immediately so next boot needs no migration.
-  if (need_resave) savePostPool();
+  j.close();
 }
 
-/* ------------------------------------------------------------------ */
+void MultiRoomMesh::savePostPool() {
+  // Each post is persisted synchronously on append; this debounced flush
+  // just keeps the journal compacted at the cap and the count fresh.
+  if (!_fs) return;
+  postLogCompact();
+  writePostCount();
+}
+
 /*  Name resolution table (JES-798)                                     */
 /* ------------------------------------------------------------------ */
 #define NAMES_PATH "/names"
@@ -3816,8 +4009,14 @@ String MultiRoomMesh::getPostsFlatJson() const {
   String j;
   int count = 0;
 
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    const PostInfo& p = _post_pool[i];
+  // Walk the full on-disk journal (oldest first) so a flat backup includes the
+  // entire archive, not just the RAM window.
+  File jf = _fs->open(POST_LOG_PATH);
+  if (!jf) return j;
+  uint8_t hdr[6];
+  if (jf.read(hdr, 6) != 6 || hdr[4] != POST_LOG_VERSION) { jf.close(); return j; }
+  PostInfo p;
+  while (readPostRecord(jf, p)) {
     if (p.room_idx == 0xFF) continue;
 
     char pfx[16];
@@ -3842,6 +4041,7 @@ String MultiRoomMesh::getPostsFlatJson() const {
 
     count++;
   }
+  jf.close();
 
   j += "\"post_count\":\""; j += count; j += "\"";
   return j;
@@ -3853,11 +4053,7 @@ bool MultiRoomMesh::restorePostsFlatJson(const String& json) {
   int count = atoi(buf);
   if (count <= 0) return true;
 
-  // Clear pool and per-room post counts
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    memset(&_post_pool[i], 0, sizeof(PostInfo));
-    _post_pool[i].room_idx = 0xFF;
-  }
+  // Clear per-room post counts (the RAM window/journal are reset below)
   for (int i = 0; i < MAX_ROOMS; i++) rooms[i].num_posted = 0;
 
   char ri_str[4], ts_str[12], ak_hex[PUB_KEY_SIZE * 2 + 2];
@@ -3865,7 +4061,9 @@ bool MultiRoomMesh::restorePostsFlatJson(const String& json) {
   char ri_k[24], ts_k[24], ak_k[24], tx_k[24];
   int pool_idx = 0;
 
-  for (int n = 0; n < count && pool_idx < MAX_TOTAL_POSTS; n++) {
+  // Rebuild the journal fresh from the flat JSON, then reload the RAM window.
+  removeAllJournal();
+  for (int n = 0; n < count; n++) {
     snprintf(ri_k, sizeof(ri_k), "post%d_ri", n);
     snprintf(ts_k, sizeof(ts_k), "post%d_ts", n);
     snprintf(ak_k, sizeof(ak_k), "post%d_ak", n);
@@ -3879,16 +4077,20 @@ bool MultiRoomMesh::restorePostsFlatJson(const String& json) {
     int ri = atoi(ri_str);
     if (ri < 0 || ri >= MAX_ROOMS || !rooms[ri].active) continue;
 
-    PostInfo& entry = _post_pool[pool_idx];
+    PostInfo entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.msg_id = 0;
     if (!mesh::Utils::fromHex(entry.author.pub_key, PUB_KEY_SIZE, ak_hex)) continue;
     entry.post_timestamp = (uint32_t)strtoul(ts_str, nullptr, 10);
     strncpy(entry.text, tx_str, MAX_POST_TEXT_LEN);
     entry.text[MAX_POST_TEXT_LEN] = '\0';
     entry.room_idx = (uint8_t)ri;
     rooms[ri].num_posted++;
+    postLogAppend(entry);
     pool_idx++;
   }
 
+  recountFromJournal();
   savePostPool();
   return true;
 }
@@ -3948,14 +4150,8 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
   // Resurrection guard: silently drop tombstoned posts (JES-824)
   if (isTombstoned(origin_id, ts)) return false;
 
-  // Dedup check: already have this (origin, ts) pair?
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    if (_post_pool[i].room_idx == ridx &&
-        _post_pool[i].post_timestamp == ts &&
-        memcmp(_post_pool[i].origin_id, origin_id, 4) == 0) {
-      return false;   // duplicate
-    }
-  }
+  // Dedup check: already have this (origin, ts) pair? (RAM window + journal)
+  if (postLogFind(ridx, origin_id, ts)) return false;   // duplicate
 
   // JES-861 echo suppression: a client message flooded to BOTH coupled
   // room-servers is ingested independently by each, producing two posts that
@@ -3966,11 +4162,12 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
   // VV for its origin so the peer stops resending it every sync round.
   // msg_id == 0 (server/OP posts, pre-JES-861 peers) falls back to (origin,ts)
   // dedup only, which never collapses distinct messages -> no message loss.
+  // msg_id is RAM-only so the echo scan covers the resident window.
   if (msg_id != 0) {
-    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-      if (_post_pool[i].room_idx == ridx &&
-          _post_pool[i].msg_id == msg_id &&
-          memcmp(_post_pool[i].author.pub_key, author_pub, 4) == 0) {
+    for (int i = 0; i < POST_RAM_CACHE; i++) {
+      if (_post_ram[i].room_idx == ridx &&
+          _post_ram[i].msg_id == msg_id &&
+          memcmp(_post_ram[i].author.pub_key, author_pub, 4) == 0) {
         vvUpdate(rooms[ridx], origin_id, ts);   // mark known -> peer stops resending
         return false;   // echo of a message we already have
       }
@@ -3978,38 +4175,9 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
   }
 
   RoomSlot& slot = rooms[ridx];
-  int quota = MAX_TOTAL_POSTS / (_num_active_rooms > 0 ? _num_active_rooms : 1);
 
-  // Find a free slot; track oldest for this room
-  PostInfo* free_slot = nullptr;
-  PostInfo* oldest_for_room = nullptr;
-  int room_count = 0;
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    PostInfo& p = _post_pool[i];
-    if (p.room_idx == 0xFF) {
-      if (!free_slot) free_slot = &p;
-    } else if (p.room_idx == ridx) {
-      room_count++;
-      if (!oldest_for_room || p.post_timestamp < oldest_for_room->post_timestamp)
-        oldest_for_room = &p;
-    }
-  }
-  if (room_count >= quota && oldest_for_room) {
-    memset(oldest_for_room, 0, sizeof(PostInfo));
-    oldest_for_room->room_idx = 0xFF;
-    if (!free_slot) free_slot = oldest_for_room;
-  }
-  if (!free_slot) {
-    // Pool full globally — evict oldest
-    PostInfo* oldest_global = nullptr;
-    for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-      if (!oldest_global || _post_pool[i].post_timestamp < oldest_global->post_timestamp)
-        oldest_global = &_post_pool[i];
-    }
-    memset(oldest_global, 0, sizeof(PostInfo));
-    oldest_global->room_idx = 0xFF;
-    free_slot = oldest_global;
-  }
+  PostInfo* free_slot = postStoreSlot(ridx);
+  if (!free_slot) return false;
 
   memcpy(free_slot->author.pub_key, author_pub, 4);  // 4-byte prefix
   StrHelper::strncpy(free_slot->text, text, MAX_POST_TEXT_LEN);
@@ -4017,6 +4185,9 @@ bool MultiRoomMesh::ingestSyncPost(uint8_t ridx, const uint8_t* origin_id,
   free_slot->msg_id         = msg_id;   // JES-861: cross-node message identity
   free_slot->room_idx       = ridx;
   memcpy(free_slot->origin_id, origin_id, 4);
+
+  // Persist immediately to the on-disk journal.
+  postLogAppend(*free_slot);
 
   slot.num_posted++;
   slot.next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS);
@@ -4213,15 +4384,19 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
   memset(peer_id.pub_key, 0, PUB_KEY_SIZE);
   memcpy(peer_id.pub_key, peers[pi].pub_key, PUB_KEY_SIZE);
 
-  // Send SYNCDAT for each post in room ri that the peer is missing
+  // Send SYNCDAT for each post in room ri that the peer is missing (journal walk)
   int sent = 0;
   uint32_t delay_ms = 500;
-  for (int k = 0; k < MAX_TOTAL_POSTS && sent < MAX_SYNC_POSTS; k++) {
-    const PostInfo& p = _post_pool[k];
-    if (p.room_idx != (uint8_t)ri) continue;
-    uint32_t peer_knows = peerKnows(p.origin_id);
-    if (p.post_timestamp <= peer_knows) continue;
-    if (isTombstoned(p.origin_id, p.post_timestamp)) continue;  // don't push deleted posts (JES-824)
+  File jf = _fs->open(POST_LOG_PATH);
+  if (jf) {
+    uint8_t hdr[6];
+    if (jf.read(hdr, 6) == 6 && hdr[4] == POST_LOG_VERSION) {
+      PostInfo p;
+      while (readPostRecord(jf, p)) {
+        if (p.room_idx != (uint8_t)ri) continue;
+        uint32_t peer_knows = peerKnows(p.origin_id);
+        if (p.post_timestamp <= peer_knows) continue;
+        if (isTombstoned(p.origin_id, p.post_timestamp)) continue;  // don't push deleted posts (JES-824)
 
     int dlen = 0;
     uint32_t now = getRTCClock()->getCurrentTimeUnique();
@@ -4253,6 +4428,9 @@ void MultiRoomMesh::handleSyncReq(int pi, uint8_t* data, size_t len) {
       delay_ms += 500;
       sent++;
     }
+      }
+    }
+    jf.close();
   }
 
   // Send SYNCEND with our VV for this room
@@ -4441,12 +4619,16 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
 
   int pushed = 0;
   uint32_t delay_ms = 300;  // small initial delay — peer's in-flight frames land first
-  for (int k = 0; k < MAX_TOTAL_POSTS && pushed < MAX_SYNC_POSTS; k++) {
-    const PostInfo& p = _post_pool[k];
-    if (p.room_idx != (uint8_t)ri) continue;
-    uint32_t peer_knows = peerKnows(p.origin_id);
-    if (p.post_timestamp <= peer_knows) continue;
-    if (isTombstoned(p.origin_id, p.post_timestamp)) continue;
+  File jf = _fs->open(POST_LOG_PATH);
+  if (jf) {
+    uint8_t hdr[6];
+    if (jf.read(hdr, 6) == 6 && hdr[4] == POST_LOG_VERSION) {
+      PostInfo p;
+      while (readPostRecord(jf, p)) {
+        if (p.room_idx != (uint8_t)ri) continue;
+        uint32_t peer_knows = peerKnows(p.origin_id);
+        if (p.post_timestamp <= peer_knows) continue;
+        if (isTombstoned(p.origin_id, p.post_timestamp)) continue;
 
     int dlen = 0;
     uint8_t buf[MAX_PACKET_PAYLOAD];
@@ -4476,6 +4658,9 @@ void MultiRoomMesh::handleSyncEnd(int pi, uint8_t* data, size_t len) {
       delay_ms += 500;
       pushed++;
     }
+      }
+    }
+    jf.close();
   }
   Serial.printf("[SYNC] reverse push → peer[%d]: %d post(s) for room[%d]\n",
                 pi, pushed, ri);
@@ -4576,18 +4761,25 @@ void MultiRoomMesh::addTombstone(const uint8_t* origin_id, uint32_t post_ts,
 }
 
 bool MultiRoomMesh::deletePostEntry(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts) {
-  for (int i = 0; i < MAX_TOTAL_POSTS; i++) {
-    if (_post_pool[i].room_idx == room_idx &&
-        _post_pool[i].post_timestamp == post_ts &&
-        memcmp(_post_pool[i].origin_id, origin_id, 4) == 0) {
-      memset(&_post_pool[i], 0, sizeof(PostInfo));
-      _post_pool[i].room_idx = 0xFF;
-      if (room_idx < MAX_ROOMS && rooms[room_idx].num_posted > 0)
-        rooms[room_idx].num_posted--;
-      return true;
+  bool found = false;
+  for (int i = 0; i < POST_RAM_CACHE; i++) {
+    if (_post_ram[i].room_idx == room_idx &&
+        _post_ram[i].post_timestamp == post_ts &&
+        memcmp(_post_ram[i].origin_id, origin_id, 4) == 0) {
+      memset(&_post_ram[i], 0, sizeof(PostInfo));
+      _post_ram[i].room_idx = 0xFF;
+      _post_ram_cnt--;
+      found = true;
+      break;
     }
   }
-  return false;
+  if (!found) {
+    // Not in RAM window: remove from the on-disk journal instead.
+    if (postLogRemove(room_idx, origin_id, post_ts)) found = true;
+  }
+  if (found && room_idx < MAX_ROOMS && rooms[room_idx].num_posted > 0)
+    rooms[room_idx].num_posted--;
+  return found;
 }
 
 bool MultiRoomMesh::handleDeletePost(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts) {

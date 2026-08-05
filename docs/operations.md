@@ -47,7 +47,10 @@ All rooms default to stealth (no adverts). If users cannot find the room server 
 
 ### 3. Posts are lost on reboot
 
-Messages stored in the post pool are in RAM only. Reboot = all messages lost. Room configuration, identities, and member lists survive reboots (stored in SPIFFS).
+Messages are persisted in the on-disk post journal (`/post_log`). Every post is
+appended on ingest, so a reboot does **not** clear chat history within the
+`POST_ARCHIVE_CAP` retention (128 by default; 512 on boards with an SD card).
+Room configuration, identities, and member lists survive reboots (stored in SPIFFS/SD).
 
 **Mitigation**: In production, ensure the device has stable power. Use a UPS or LiPo battery with a USB power bank for field deployments.
 

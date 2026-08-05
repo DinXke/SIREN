@@ -1,7 +1,7 @@
 #pragma once
 
 #ifdef ESP32
-#ifdef ENABLE_WIFI_MGMT
+#if defined(ENABLE_WIFI_MGMT) && (ENABLE_WIFI_MGMT)
 
 #include <Arduino.h>
 #include <WiFiClientSecure.h>

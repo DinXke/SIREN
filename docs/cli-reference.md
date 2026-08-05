@@ -362,7 +362,7 @@ say 0 Noodprotocol geactiveerd — volg instructies van teamleider
 
 **Notes:**
 - Text is clamped to `MAX_POST_TEXT_LEN` (151 characters).
-- Operator posts are stored in the global post pool and survive reboots.
+- Operator posts are stored in the on-disk post journal and survive reboots.
 - The operator identity is the room's own key pair, not a companion.
 
 ---

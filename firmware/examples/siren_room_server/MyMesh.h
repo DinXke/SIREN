@@ -74,10 +74,20 @@
   #define TXT_ACK_DELAY          200
 #endif
 /* Total post budget shared across all active rooms.
-   Per-room quota = MAX_TOTAL_POSTS / num_active_rooms.
-   With MAX_ROOMS=16 active: 8 posts/room; with 2 active: 64 posts/room. */
-#ifndef MAX_TOTAL_POSTS
-  #define MAX_TOTAL_POSTS        128
+   Per-room quota = POST_ARCHIVE_CAP / num_active_rooms (journal retention). */
+/* Post storage: RAM working window + on-disk append journal (/post_log).
+   POST_ARCHIVE_CAP = max posts retained in the journal, bounded by flash/SD
+   free space, not RAM.  Raise it on boards with an SD card (e.g. LilyGo
+   T-LoRa), keep it modest on SPIFFS-only boards.
+   POST_RAM_CACHE   = PostInfo slots kept resident in RAM (the working set).
+   RAM footprint stays fixed (bounded by POST_RAM_CACHE) no matter how large
+   the archive is, so capacity can be raised without blowing DRAM.
+   Per-room RAM budget = POST_RAM_CACHE / num_active_rooms. */
+#ifndef POST_ARCHIVE_CAP
+  #define POST_ARCHIVE_CAP       128
+#endif
+#ifndef POST_RAM_CACHE
+  #define POST_RAM_CACHE         24
 #endif
 
 /* Maximum virtual room servers hosted on one device. */
@@ -307,8 +317,14 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
   SemaphoreHandle_t _rooms_mutex = nullptr;
 #endif
 
-  /* ---- Global post pool (shared budget across all rooms) ---- */
-  PostInfo      _post_pool[MAX_TOTAL_POSTS];
+  /* ---- Post store: RAM window + on-disk journal ----
+   * _post_ram holds the newest POST_RAM_CACHE posts (the working set).  The
+   * full archive (up to POST_ARCHIVE_CAP posts) lives in the /post_log append
+   * journal on the active filesystem (SD when present, else SPIFFS).
+   * Heap-allocated in begin(); RAM stays bounded by POST_RAM_CACHE. */
+  PostInfo*     _post_ram;
+  int           _post_ram_cnt;   // posts resident in _post_ram
+  int           _post_total;     // posts in the on-disk journal
 
   /* ---- Peer room-server list (Phase 5 replication ground work) ---- */
   PeerInfo      peers[MAX_PEERS];
@@ -472,9 +488,21 @@ class MultiRoomMesh : public mesh::Mesh, public CommonCLICallbacks {
                                uint32_t ts, const uint8_t* author_pub, const char* text,
                                uint32_t msg_id = 0);
 
-  /* ---- Post pool persistence (JES-787) ---- */
+  /* ---- Post store persistence (JES-787) ---- */
   void          savePostPool();
   void          loadPostPool();
+
+  /* ---- Post store internals (RAM window + /post_log journal) ---- */
+  PostInfo*     postStoreSlot(uint8_t ridx);
+  void          postLogAppend(const PostInfo& p);
+  bool          postLogRemove(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts);
+  bool          postLogFind(uint8_t room_idx, const uint8_t* origin_id, uint32_t post_ts) const;
+  void          postLogCompact();
+  void          removeRoomPosts(int ridx);
+  void          removeAllJournal();
+  void          recountFromJournal();
+  void          migrateLegacyPostLog();
+  void          writePostCount();
 
   /* ---- Login-attempt admin notification (JES-834) ---- */
   void          _notifyAdminsLoginAttempt(int slot_idx, const uint8_t* caller_pubkey, bool success);
@@ -721,8 +749,10 @@ public:
   const NameEntry* getNameEntry(int i) const {
     return (i >= 0 && i < NAME_TABLE_SIZE) ? &_names[i] : nullptr;
   }
-  /** Direct access to the global post pool for web/CLI inspection. */
-  const PostInfo* getPostPool() const { return _post_pool; }
+  /** Direct access to the RAM post window (newest posts) for web/CLI inspection. */
+  const PostInfo* getPostPool() const { return _post_ram; }
+  /** Number of posts currently resident in the RAM window. */
+  int  getPostPoolCount() const { return _post_ram_cnt; }
   /** Post a server-authored message to a room. Pushes to connected companions. */
   void addServerPost(int room_idx, const char* text);
   /** Build JSON array of nick objects for /api/chat/nicks. */
@@ -865,6 +895,7 @@ public:
     if (rooms[i].active) {
       rooms[i].active = false;
       _num_active_rooms--;
+      removeRoomPosts(i);   // drop its posts from RAM window + journal
       saveRoomConfig();
     }
   }
